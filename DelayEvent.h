@@ -6,6 +6,7 @@
 #define AFX_DELAYEVENT_H__047EB960_D8C0_11D2_B145_00001C7030A6__INCLUDED_
 
 #include <windows.h>
+#include <winbase.h>
 
 #if _MSC_VER >= 1000
 #pragma once
@@ -21,6 +22,7 @@
 class CDelayEvent  
 {										  
 public:
+
 	CDelayEvent();
 	virtual ~CDelayEvent();
 

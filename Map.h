@@ -10,6 +10,7 @@
 #endif // _MSC_VER >= 1000
 
 #include <windows.h>
+#include <winbase.h>
 #include "OccupyFlag.h"
 #include "Tile.h"
 #include "StrategicPoint.h"
@@ -46,12 +47,13 @@
 #define DEF_MAXSECTORS					60
 #define DEF_MAXSTRIKEPOINTS				20
 
-
+#define DEF_MAXITEMEVENTS				50
 
 
 class CMap  
 {
 public:
+
 	void RestoreStrikePoints();
 	BOOL bRemoveCrusadeStructureInfo(short sX, short sY);
 	BOOL bAddCrusadeStructureInfo(char cType, short sX, short sY, char cSide);
@@ -64,6 +66,9 @@ public:
 	void SetTempMoveAllowedFlag(int dX, int dY, BOOL bFlag);
 	int iAnalyze(char cType, int *pX, int *pY, int * pV1, int *pV2, int * pV3);
 	BOOL bGetIsWater(short dX, short dY);
+	BOOL bGetIsFarm(short dX, short dY);	//v2.19 2002-12-16 농사 스킬 관련
+	BOOL bAddCropsTotalSum();				//v2.19 2002-12-16 농사 스킬 관련
+	BOOL bRemoveCropsTotalSum();			//v2.19 2002-12-16 농사 스킬 관련
 	void GetDeadOwner(short * pOwner, char * pOwnerClass, short sX, short sY);
 	BOOL bGetIsMoveAllowedTile(short dX, short dY);
 	void SetNamingValueEmpty(int iValue);
@@ -78,7 +83,7 @@ public:
 	BOOL bSetItem(short sX, short sY, class CItem * pItem);
 	void ClearDeadOwner(short sX, short sY);
 	void ClearOwner(int iDebugCode, short sOwnerH, char cOwnerType, short sX, short sY);
-	BOOL bGetMoveable(short dX, short dY, short * pDOtype = NULL);
+	BOOL bGetMoveable(short dX, short dY, short * pDOtype = NULL, class CItem * pTopItem = NULL); // v2.172
 	void GetOwner(short * pOwner, char * pOwnerClass, short sX, short sY);
 	void SetOwner(short sOwner, char cOwnerClass, short sX, short sY);
 	void SetDeadOwner(short sOwner, char cOwnerClass, short sX, short sY);
@@ -105,6 +110,7 @@ public:
 	char  m_cType;				// 맵의 형식. 0이면 보통. 1이면 공격행위가 범죄가 아니다.
 
 	BOOL  m_bIsFixedDayMode;	// 항상 주간모드인지: 건물 내부 등 
+	BOOL  m_bIsFixedSnowMode;	// 항상 눈내리는 모드인지 (icebound,X-Mas)
 
 	struct {		    
 		BOOL bDefined;
@@ -196,7 +202,30 @@ public:
 		short sX, sY;		// 설치된 위치 
 	} m_stCrusadeStructureInfo[DEF_MAXCRUSADESTRUCTURES];
 	int m_iTotalCrusadeStructures;
+	int m_iTotalAgriculture;  //v2.19 2002-12-16 농사 스킬:: 작물 갯수...
 
+	// 2.04 아이템 이벤트용 정보
+	// 2.18 아이템 이벤트 수정
+	// item-event = 	1	적색소원구	0	1	10		11	1	Cannibal-Plant Ettin EOL
+	struct {
+		char cItemName[21];	// 아이템 ID번호
+		int iAmount;		// 아이템 개수: 수량단위 아이템일 경우에 적용됨.
+		int iTotalNum;		// 하루동안 풀릴 아이템 총 물량 
+		int iMonth;			// 아이템 이벤트 날짜 
+		int iDay;
+		int iType;			// 종류
+		char *cMob[5];		// 최대 몬스터 수는 5마리
+
+		int iCurNum;
+		int	iNumMob;
+	} m_stItemEventList[DEF_MAXITEMEVENTS];
+	int m_iTotalItemEvents;
+
+	BOOL m_bIsEnergySphereAutoCreation;
+
+	short sMobEventAmount ;         // 2002-7-4 맵에서 몹이벤트 양을 수정할 수 있게 
+
+	
 private:
 	BOOL _bDecodeMapDataFileContents();
 };

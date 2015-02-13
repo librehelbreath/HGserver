@@ -45,6 +45,12 @@ CNpc::CNpc(char * pName5)
 	m_iGuildGUID = NULL;
 
 	m_iV1 = 0;
+
+	m_iNpcCrops = 0; //v2.19 2002-12-16 농사 스킬 관련
+	m_iCropsSkillLV = 0;	//v2.19 2002-12-16 농사 스킬 관련
+
+	// 2002-09-17 #1
+	m_iNpcitemMax = 0;
 }
 
 CNpc::~CNpc()
@@ -52,3 +58,13 @@ CNpc::~CNpc()
 
 }
 
+// 2002-09-06 #1
+CNpcItem::CNpcItem()
+{
+	ZeroMemory(m_cName, sizeof(m_cName));
+	m_sItemID = 0;							// 2002-09-09 #1
+	m_sFirstProbability = 0 ;
+	m_cFirstTargetValue = NULL;
+	m_sSecondProbability = 0 ;
+	m_cSecondTargetValue = NULL;
+}

@@ -22,7 +22,7 @@
 #define DEF_QUESTTYPE_DELIVERY					4		// 배달: 특정 장소로 아이템을 배달한다.
 #define DEF_QUESTTYPE_ESCORT					5		// 보호: 특정 캐릭터를 보호한다.
 #define DEF_QUESTTYPE_GUARD						6		// 특정 지역을 적의 공격으로부터 방어한다. 
-#define DEF_QUESTTYPE_GOPLACE					7		// 특정 장소로 간다. 적국 침투 
+#define DEF_QUESTTYPE_GOPLACE					7		// 특정 장소로 간다. 적국 침투 : 던젼이나 기타 가기 힘든 장소로 가는 퀘스트 추가 
 #define DEF_QUESTTYPE_BUILDSTRUCTURE			8		// 구조물 설치 임무
 #define DEF_QUESTTYPE_SUPPLYBUILDSTRUCTURE		9		// 구조물 설치 보급 임무
 #define DEF_QUESTTYPE_STRATEGICSTRIKE			10		// 전술적 폭격임무 

@@ -15,6 +15,7 @@ CTile::CTile()
 	m_bIsMoveAllowed = TRUE;
 	m_bIsTeleport    = FALSE;
 	m_bIsWater       = FALSE;
+	m_bIsFarmingAllowed = FALSE; //v2.19 2002-12-16 농사 스킬 관련
 												   
 	m_sOwner      = NULL;
 	m_cOwnerClass = NULL;

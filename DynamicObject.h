@@ -10,10 +10,12 @@
 #endif // _MSC_VER > 1000
 
 #include <windows.h>
+#include <winbase.h>
 
 class CDynamicObject  
 {
 public:
+
 	CDynamicObject(short sOwner, char cOwnerType, short sType, char cMapIndex, short sX, short sY, DWORD dwRegisterTime, DWORD dwLastTime, int iV1);
 	virtual ~CDynamicObject();
 

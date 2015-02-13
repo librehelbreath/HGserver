@@ -10,6 +10,7 @@
 #endif // _MSC_VER >= 1000
 
 #include <windows.h>
+#include <winbase.h>
 
 #define DEF_MSGFROM_CLIENT		1
 #define DEF_MSGFROM_LOGSERVER	2
@@ -18,6 +19,7 @@
 class CMsg  								 
 {
 public:
+
 	void Get(char * pFrom, char * pData, DWORD * pSize, int * pIndex, char * pKey);
 	BOOL bPut(char cFrom, char * pData, DWORD dwSize, int iIndex, char cKey);
 	CMsg();

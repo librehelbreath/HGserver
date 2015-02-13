@@ -43,7 +43,7 @@ RSC=rc.exe
 # PROP Ignore_Export_Lib 0
 # PROP Target_Dir ""
 # ADD BASE CPP /nologo /W3 /GX /O2 /D "WIN32" /D "NDEBUG" /D "_WINDOWS" /YX /FD /c
-# ADD CPP /nologo /G5 /MT /W3 /GX /O2 /D "WIN32" /D "NDEBUG" /D "_WINDOWS" /YX /FD /c
+# ADD CPP /nologo /G5 /MT /W3 /GX /O2 /D "WIN32" /D "NDEBUG" /D "_WINDOWS" /FR /YX /FD /c
 # ADD BASE MTL /nologo /D "NDEBUG" /mktyplib203 /o "NUL" /win32
 # ADD MTL /nologo /D "NDEBUG" /mktyplib203 /o "NUL" /win32
 # ADD BASE RSC /l 0x412 /d "NDEBUG"
@@ -69,7 +69,7 @@ LINK32=link.exe
 # PROP Ignore_Export_Lib 0
 # PROP Target_Dir ""
 # ADD BASE CPP /nologo /W3 /Gm /GX /Zi /Od /D "WIN32" /D "_DEBUG" /D "_WINDOWS" /YX /FD /c
-# ADD CPP /nologo /G5 /MTd /W3 /Gm /GX /ZI /D "WIN32" /D "_DEBUG" /D "_WINDOWS" /YX /FD /c
+# ADD CPP /nologo /G5 /MTd /W3 /Gm /GX /ZI /D "WIN32" /D "_DEBUG" /D "_WINDOWS" /FR /YX /FD /c
 # ADD BASE MTL /nologo /D "_DEBUG" /mktyplib203 /o "NUL" /win32
 # ADD MTL /nologo /D "_DEBUG" /mktyplib203 /o "NUL" /win32
 # ADD BASE RSC /l 0x412 /d "_DEBUG"
@@ -79,7 +79,7 @@ BSC32=bscmake.exe
 # ADD BSC32 /nologo
 LINK32=link.exe
 # ADD BASE LINK32 kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib /nologo /subsystem:windows /debug /machine:I386 /pdbtype:sept
-# ADD LINK32 kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib /nologo /subsystem:windows /profile /debug /machine:I386
+# ADD LINK32 kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib /nologo /subsystem:windows /profile /map /debug /machine:I386
 
 !ENDIF 
 
@@ -88,6 +88,58 @@ LINK32=link.exe
 # Name "HGserver - Win32 Release"
 # Name "HGserver - Win32 Debug"
 # Begin Group "source"
+
+# PROP Default_Filter ""
+# Begin Source File
+
+SOURCE=.\Client.cpp
+# End Source File
+# Begin Source File
+
+SOURCE=.\Client.h
+# End Source File
+# Begin Source File
+
+SOURCE=.\Game.cpp
+# End Source File
+# Begin Source File
+
+SOURCE=.\Game.h
+# End Source File
+# Begin Source File
+
+SOURCE=.\GlobalDef.h
+# End Source File
+# Begin Source File
+
+SOURCE=.\NetMessages.h
+# End Source File
+# Begin Source File
+
+SOURCE=.\Teleport.cpp
+# End Source File
+# Begin Source File
+
+SOURCE=.\Teleport.h
+# End Source File
+# Begin Source File
+
+SOURCE=.\UserMessages.h
+# End Source File
+# Begin Source File
+
+SOURCE=.\version.h
+# End Source File
+# Begin Source File
+
+SOURCE=.\winmain.h
+# End Source File
+# Begin Source File
+
+SOURCE=.\wmain.cpp
+# End Source File
+# End Group
+# Begin Group "NotCurrent"
 
 # PROP Default_Filter ""
 # Begin Source File
@@ -101,14 +153,6 @@ SOURCE=.\BuildItem.cpp
 # Begin Source File
 
 SOURCE=.\BuildItem.h
-# End Source File
-# Begin Source File
-
-SOURCE=.\Client.cpp
-# End Source File
-# Begin Source File
-
-SOURCE=.\Client.h
 # End Source File
 # Begin Source File
 
@@ -137,14 +181,6 @@ SOURCE=.\Fish.cpp
 # Begin Source File
 
 SOURCE=.\Fish.h
-# End Source File
-# Begin Source File
-
-SOURCE=.\Game.cpp
-# End Source File
-# Begin Source File
-
-SOURCE=.\Game.h
 # End Source File
 # Begin Source File
 
@@ -208,10 +244,6 @@ SOURCE=.\Msg.h
 # End Source File
 # Begin Source File
 
-SOURCE=.\NetMessages.h
-# End Source File
-# Begin Source File
-
 SOURCE=.\Npc.cpp
 # End Source File
 # Begin Source File
@@ -232,11 +264,11 @@ SOURCE=.\Player.h
 # End Source File
 # Begin Source File
 
-SOURCE=.\Portion.cpp
+SOURCE=.\Potion.cpp
 # End Source File
 # Begin Source File
 
-SOURCE=.\Portion.h
+SOURCE=.\Potion.h
 # End Source File
 # Begin Source File
 
@@ -268,10 +300,6 @@ SOURCE=.\StrategicPoint.h
 # End Source File
 # Begin Source File
 
-SOURCE=.\StrTok.cpp
-# End Source File
-# Begin Source File
-
 SOURCE=.\StrTok.h
 # End Source File
 # Begin Source File
@@ -292,28 +320,24 @@ SOURCE=.\Tile.h
 # End Source File
 # Begin Source File
 
-SOURCE=.\UserMessages.h
-# End Source File
-# Begin Source File
-
-SOURCE=.\version.h
-# End Source File
-# Begin Source File
-
-SOURCE=.\winmain.h
-# End Source File
-# Begin Source File
-
-SOURCE=.\wmain.cpp
-# End Source File
-# Begin Source File
-
-SOURCE=.\XSocket.cpp
-# End Source File
-# Begin Source File
-
 SOURCE=.\XSocket.h
 # End Source File
+# End Group
+# Begin Group "language"
+
+# PROP Default_Filter ""
+# Begin Source File
+
+SOURCE=.\englishitem.h
+# End Source File
+# Begin Source File
+
+SOURCE=.\koreaitem.h
+# End Source File
+# End Group
+# Begin Group "lib"
+
+# PROP Default_Filter ""
 # Begin Source File
 
 SOURCE=.\Winmm.lib
@@ -322,10 +346,14 @@ SOURCE=.\Winmm.lib
 
 SOURCE=.\Ws2_32.lib
 # End Source File
-# End Group
 # Begin Source File
 
-SOURCE=.\GlobalDef.h
+SOURCE=.\GameServerStrTok.lib
 # End Source File
+# Begin Source File
+
+SOURCE=.\GameServerXsocket.lib
+# End Source File
+# End Group
 # End Target
 # End Project

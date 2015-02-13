@@ -11,7 +11,9 @@
 
 
 #include <windows.h>
+#include <winbase.h>
 #include "Magic.h"
+#include <vector>
 
 #define DEF_MAXWAYPOINTS			10
 
@@ -29,9 +31,30 @@
 #define DEF_BEHAVIOR_FLEE			3
 #define DEF_BEHAVIOR_DEAD			4
 
+#define DEF_ATTRIBUTE_EARTH			1
+#define DEF_ATTRIBUTE_AIR			2
+#define DEF_ATTRIBUTE_FIRE			3
+#define DEF_ATTRIBUTE_WATER			4
+
+// 2002-09-06 #1
+class CNpcItem
+{
+ public :
+	CNpcItem() ;
+
+	char  m_cName[21];
+	short m_sItemID;				// 2002-09-09 #1 Item ID
+	short m_sFirstProbability;
+	char  m_cFirstTargetValue;
+	short m_sSecondProbability;
+	char  m_cSecondTargetValue;
+};
+
+
 class CNpc  
 {
 public:
+
 	CNpc(char * pName5);
 	virtual ~CNpc();
 
@@ -151,6 +174,18 @@ case 8:  "Hi-Explosive"
 	int   m_iGuildGUID;				// 전쟁용 유니트인 경우 소환자의 길드 아이디가 입력된다.
 
 	int   m_iV1;
+
+	// 2002-09-06 #1
+	std::vector<CNpcItem>		m_vNpcItem;
+
+	// 2002-09-17 #1
+	int		m_iNpcitemType;		// 1 : 일반   (아이템이 나오지 않을 수 있다.) 
+								// 2 : 특수 몬스터 (타이거웜, 헬클라우 등)
+
+	int		m_iNpcitemMax;		// npcitem type이 2일때 dice를 돌릴 최대 값
+
+	int		m_iNpcCrops;		//v2.19 2002-12-16 농사 스킬 ::농작물 번호 :: 0이면 농작물이 아니다.
+	int		m_iCropsSkillLV;		//v2.19 2002-12-16 농사 스킬 ::농작물의 레벨
 };
 
 #endif // !defined(AFX_NPC_H__6F7A5C80_A709_11D2_B143_00001C7030A6__INCLUDED_)

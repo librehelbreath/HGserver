@@ -37,6 +37,11 @@ char            G_cTxt[512];
 char			G_cData50000[50000];
 MMRESULT        G_mmTimer = NULL;
 
+// v2.14 로그 부하 감소용 버퍼및 카운터 그리고 시간 플래그 
+char			G_cLogBuffer[30000] ;
+short			G_sLogCounter ;
+DWORD			G_dwLogTime ; 
+
 
 class XSocket * G_pListenSock = NULL;
 class XSocket * G_pLogSock    = NULL;
@@ -44,6 +49,7 @@ class CGame *   G_pGame       = NULL;
 
 int             G_iQuitProgramCount = 0;
 BOOL			G_bIsThread = TRUE;
+BOOL            G_bShutdown = FALSE ; 
 
 FILE * pLogFile;
 
@@ -80,7 +86,7 @@ LRESULT CALLBACK WndProc( HWND hWnd,UINT message,WPARAM wParam,LPARAM lParam )
 		break;
 	
 	case WM_USER_TIMERSIGNAL:
-		G_pGame->OnTimer(NULL);
+	    if(G_bShutdown == FALSE) G_pGame->OnTimer(NULL);
 		break;
 
 	case WM_USER_ACCEPT:
@@ -96,6 +102,7 @@ LRESULT CALLBACK WndProc( HWND hWnd,UINT message,WPARAM wParam,LPARAM lParam )
 		break;
 
 	case WM_DESTROY:
+		G_bShutdown = TRUE ;
 		OnDestroy();
 		break;
 
@@ -108,14 +115,17 @@ LRESULT CALLBACK WndProc( HWND hWnd,UINT message,WPARAM wParam,LPARAM lParam )
 		break;
 
 	case WM_ONGATESOCKETEVENT:
-		G_pGame->OnGateSocketEvent(message, wParam, lParam);
+		if ( G_bShutdown == TRUE) break;
+		if(G_pGame->m_bOnExitProcess != TRUE ) G_pGame->OnGateSocketEvent(message, wParam, lParam);
 		break;
 
 	case WM_ONLOGSOCKETEVENT:
+		if ( G_bShutdown == TRUE) break;
 		G_pGame->OnMainLogSocketEvent(message, wParam, lParam);
 		break;
 	
 	default: 
+		if ( G_bShutdown == TRUE) break;
 		if ((message >= WM_ONLOGSOCKETEVENT + 1) && (message <= WM_ONLOGSOCKETEVENT + DEF_MAXSUBLOGSOCK))
 			G_pGame->OnSubLogSocketEvent(message, wParam, lParam);
 		
@@ -247,7 +257,9 @@ void Initialize()
 	G_pListenSock->bListen(G_pGame->m_cGameServerAddr, G_pGame->m_iGameServerPort, WM_USER_ACCEPT);
 
 	pLogFile = NULL;
-	pLogFile = fopen("test.log","wt+");
+	//  v2.14 성후니 변경 대만 로그 부하 줄이기 위해 
+	G_sLogCounter = 0 ;
+	ZeroMemory(G_cLogBuffer, sizeof(G_cLogBuffer));
 }
 
 
@@ -275,13 +287,12 @@ void OnDestroy()
 void PutLogList(char * cMsg)
 {
  char cTemp[120*50];
-	
+
 	G_cMsgUpdated = TRUE;
 	ZeroMemory(cTemp, sizeof(cTemp));
 	memcpy((cTemp + 120), G_cMsgList, 120*49);
 	memcpy(cTemp, cMsg, strlen(cMsg));
 	memcpy(G_cMsgList, cTemp, 120*50);
-
 }
 
 void UpdateScreen()
@@ -404,13 +415,55 @@ void PutAdminLogFileList(char * cStr)
 	fclose(pFile);
 }
 
-void PutItemLogFileList(char * cStr)
+void PutItemLogFileList(char * cStr, BOOL bIsSave)
+{
+ // v2.14 성후니 변경 대만 로그 부하를 줄이기 위해 
+ char cTempBuffer[512];
+ SYSTEMTIME SysTime;
+ DWORD dwTime;
+
+   	dwTime = timeGetTime();
+
+	if (G_sLogCounter == 0 ) G_dwLogTime = dwTime ; 
+
+	G_sLogCounter++ ;
+
+	GetLocalTime(&SysTime);
+	
+	ZeroMemory(cTempBuffer, sizeof(cTempBuffer)) ;
+	wsprintf(cTempBuffer, "%02d:%02d:%02d\t", SysTime.wHour, SysTime.wMinute, SysTime.wSecond );
+	strcat(cTempBuffer, cStr);
+	strcat(cTempBuffer, "\n");
+
+	strcat(G_cLogBuffer, cTempBuffer) ;
+
+	// 로그 버퍼에 100개의 로그가 쌓여 있던지 
+	// 혹은 로그를 쓴지 10초가 지난경우 그리고 마지막 셧다운시는 무조건 저장한다.
+	if ( G_sLogCounter >= 100 || (dwTime - G_dwLogTime  >  10*1000)  || bIsSave == TRUE) {
+		ZeroMemory(cTempBuffer, sizeof(cTempBuffer)) ;
+		_mkdir("LogData");
+
+		wsprintf(cTempBuffer,"LogData\\ItemEvents%04d%02d%02d.log",SysTime.wYear,SysTime.wMonth,SysTime.wDay) ;
+
+		pLogFile = fopen(cTempBuffer, "at");
+
+		if (pLogFile == NULL) return;
+	
+		fwrite(G_cLogBuffer, 1, strlen(G_cLogBuffer), pLogFile);
+		fclose(pLogFile);
+		G_sLogCounter = 0 ;
+		ZeroMemory(G_cLogBuffer, sizeof(G_cLogBuffer));	
+	}
+
+}
+
+void PutLogEventFileList(char * cStr)
 {
  FILE * pFile;
  char cBuffer[512];
  SYSTEMTIME SysTime;
 	
-	pFile = fopen("ItemEvents.log", "at");
+	pFile = fopen("LogEvents.log", "at");
 	if (pFile == NULL) return;
 
 	ZeroMemory(cBuffer, sizeof(cBuffer));
@@ -424,13 +477,13 @@ void PutItemLogFileList(char * cStr)
 	fclose(pFile);
 }
 
-void PutLogEventFileList(char * cStr)
+void PutDebugMsg(char * cStr)
 {
  FILE * pFile;
  char cBuffer[512];
  SYSTEMTIME SysTime;
 	
-	pFile = fopen("LogEvents.log", "at");
+	pFile = fopen("DebugMsg.log", "at");
 	if (pFile == NULL) return;
 
 	ZeroMemory(cBuffer, sizeof(cBuffer));

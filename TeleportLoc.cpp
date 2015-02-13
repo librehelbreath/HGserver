@@ -25,6 +25,7 @@ CTeleportLoc::CTeleportLoc()
 	m_dwTime  = NULL;
 	m_dwTime2 = NULL;
 
+	m_iNumSummonNpc = 0;
 }
 
 CTeleportLoc::~CTeleportLoc()

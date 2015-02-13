@@ -10,11 +10,13 @@
 #endif // _MSC_VER >= 1000
 
 #include <windows.h>
+#include <winbase.h>
 #include "item.h"
 
 class CFish  
 {
 public:
+
 	CFish(char cMapIndex, short sX, short sY, short sType, class CItem * pItem, int iDifficulty);
 	virtual ~CFish();
 

@@ -25,6 +25,8 @@ CClient::CClient(HWND hWnd)
 
 	ZeroMemory(m_cGuildName, sizeof(m_cGuildName));
 	ZeroMemory(m_cLocation, sizeof(m_cLocation));
+	ZeroMemory(m_cMapName, sizeof(m_cMapName));
+	
 	strcpy(m_cLocation, "NONE");
 	m_iGuildRank = -1;
 	m_iGuildGUID = -1;
@@ -110,13 +112,17 @@ CClient::CClient(HWND hWnd)
 	for (i = 0; i < DEF_MAXITEMEQUIPPOS; i++) m_iDamageAbsorption_Armor[i]  = 0;
 	m_iDamageAbsorption_Shield = 0;
 
+	// v2.20 2002-12-28 3주년 기념반지 버그 수정 
 	m_iHPstock = 0;
+	m_iHPStatic_stock = 0 ;
+
 	m_bIsKilled = FALSE;
 
 	for (i = 0; i < DEF_MAXMAGICEFFECTS; i++) 
 		m_cMagicEffectStatus[i]	= 0;
 
 	m_iWhisperPlayerIndex = -1;
+	ZeroMemory(m_cWhisperPlayerName, sizeof(m_cWhisperPlayerName));
 	
 	m_iHungerStatus  = 100;  // 최대값은 100
 	
@@ -232,6 +238,7 @@ CClient::CClient(HWND hWnd)
 	m_iSkillMsgRecvCount  = 0;
 
 	m_bIsAdminCreateItemEnabled = FALSE;
+	m_bIsAdminCommandEnabled = FALSE;   // v2.18 2002-10-15 중요 GM 명령어에 패스워드 추가 
 	m_iAlterItemDropIndex = -1;
 
 	m_iAutoExpAmount = 0;
@@ -244,7 +251,8 @@ CClient::CClient(HWND hWnd)
 
 	ZeroMemory(m_cLockedMapName, sizeof(m_cLockedMapName));
 	strcpy(m_cLockedMapName, "NONE");
-	m_iLockedMapTime = NULL;
+	m_iLockedMapTime   = NULL;
+	m_iDeadPenaltyTime = NULL;
 
 	m_iCrusadeDuty  = NULL;
 	m_dwCrusadeGUID = NULL;
@@ -264,6 +272,33 @@ CClient::CClient(HWND hWnd)
 
 	ZeroMemory(m_cConstructMapName, sizeof(m_cConstructMapName));
 	m_iConstructLocX = m_iConstructLocY = -1;
+
+	m_dwFightzoneDeadTime = NULL;
+
+	m_iPartyID = NULL;
+	m_iPartyStatus = DEF_PARTYSTATUS_NULL;
+
+	m_iReqJoinPartyClientH = NULL;
+	ZeroMemory(m_cReqJoinPartyName, sizeof(m_cReqJoinPartyName));
+
+	m_dwLastActionTime = NULL;
+	m_bIsCheckingWhisperPlayer = FALSE;
+
+	// v2.13 성후니 추가 DB 부하를 줄이기 위한 변수
+	m_bIsBankModified = FALSE ;
+
+	m_iGizonItemUpgradeLeft = 0;
+
+	m_dwAttackFreqTime = m_dwMagicFreqTime = m_dwMoveFreqTime = NULL; // v2.171
+	m_bIsMoveBlocked = FALSE; // v2.171
+	m_bIsAttackModeChange = FALSE; // v2.172 2002-7-2
+	m_iIsOnTown = FALSE;
+	m_bIsOnShop = FALSE ; // v2.182 2002-11-15 사고 팔수 있는 곳인지 체크하는 변수 추가 
+	m_bIsOnTower = FALSE ; // v2.20 2002-12-23 마법을 배울수 있는곳인지 체크 한다.
+	m_bIsOnWarehouse = FALSE ; // v2.20 2002-12-23 창고인지 체크 한다.
+	m_bIsHunter = FALSE ; // v2.182 2002-11-15 사냥군인지 체크하는 변수 추가 
+	m_dwWarmEffectTime = NULL; // v2.172 
+	m_bIsInBuilding = FALSE ;
 }
 
 CClient::~CClient()

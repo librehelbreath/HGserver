@@ -65,6 +65,16 @@ CMap::CMap(class CGame * pGame)
 		m_stEnergySphereCreationList[i].cType = NULL;
 		m_stEnergySphereGoalList[i].cResult   = NULL;
 	}
+
+	for (i = 0; i < DEF_MAXITEMEVENTS; i++) {
+		ZeroMemory(m_stItemEventList[i].cItemName, sizeof(m_stItemEventList[i].cItemName));
+		m_stItemEventList[i].iAmount = 0;
+		m_stItemEventList[i].iTotalNum = 0;
+		m_stItemEventList[i].iCurNum = 0;
+		m_stItemEventList[i].iMonth  = 0;
+		m_stItemEventList[i].iDay    = 0;
+	}
+	m_iTotalItemEvents = 0;
 	
 	m_iTotalActiveObject = 0;
 	m_iTotalAliveObject  = 0;
@@ -73,6 +83,7 @@ CMap::CMap(class CGame * pGame)
 	//m_sInitialPointY = 0;
 
 	m_bIsFixedDayMode = FALSE;
+	m_bIsFixedSnowMode = FALSE ; // v2.20 2002-12-20 크리스마스와 iceboud맵에서는 항상 눈이 내린다.
 
 	m_iTotalFishPoint = 0;
 	m_iMaxFish = 0;
@@ -140,6 +151,12 @@ CMap::CMap(class CGame * pGame)
 		m_stCrusadeStructureInfo[i].sY = NULL;
 	}
 	m_iTotalCrusadeStructures = 0;
+	m_iTotalAgriculture = 0;		//v2.19 2002-12-16
+
+	m_bIsEnergySphereAutoCreation = FALSE;
+
+	// 2002-7-5 맵에서 몹이벤트 시간및 양을 조절 가능하게 디폴트 15
+	sMobEventAmount = 15 ;   
 }
 
 CMap::~CMap()
@@ -218,7 +235,7 @@ void CMap::GetDeadOwner(short * pOwner, char * pOwnerClass, short sX, short sY)
 }
 
  								  
-BOOL CMap::bGetMoveable(short dX, short dY, short * pDOtype)
+BOOL CMap::bGetMoveable(short dX, short dY, short * pDOtype, class CItem * pTopItem) // v2.172
 {
  class CTile * pTile;	
 	
@@ -227,6 +244,7 @@ BOOL CMap::bGetMoveable(short dX, short dY, short * pDOtype)
 	pTile = (class CTile *)(m_pTile + dX + dY*m_sSizeY);
 	
 	if (pDOtype != NULL) *pDOtype = pTile->m_sDynamicObjectType; // v1.4
+	if (pTopItem != NULL) pTopItem = pTile->m_pItem[0]; // v2.172
 
 	if (pTile->m_sOwner != NULL) return FALSE;
 	if (pTile->m_bIsMoveAllowed == FALSE) return FALSE;
@@ -471,6 +489,13 @@ BOOL CMap::_bDecodeMapDataFileContents()
 			 pTile->m_bIsTeleport = TRUE;
 		}
 		else pTile->m_bIsTeleport = FALSE;
+		
+		//v2.19 2002-12-16 농사 스킬 관련 :: 농작물을 심을수 있는 곳이다.
+		if ((cTemp[8] & 0x20) != 0) {
+			// 농사를 지을수 있는 속성이 세트되어 있다.
+			pTile->m_bIsFarmingAllowed = TRUE;
+		}
+		else pTile->m_bIsFarmingAllowed = FALSE;
 
 		sp = (short *)&cTemp[0];
 		if (*sp == 19) {
@@ -565,6 +590,22 @@ BOOL CMap::bGetIsWater(short dX, short dY)
 	
 	return TRUE;
 }
+
+
+//v2.19 2002-12-16 농사 스킬 관련
+BOOL CMap::bGetIsFarm(short dX, short dY)
+{
+ class CTile * pTile;	
+	
+	if ((dX < 14) || (dX >= m_sSizeX - 16) || (dY < 12) || (dY >= m_sSizeY - 14)) return FALSE;
+
+	pTile = (class CTile *)(m_pTile + dX + dY*m_sSizeY);
+	
+	if (pTile->m_bIsFarmingAllowed == FALSE) return FALSE;
+	
+	return TRUE;
+}
+
 
 int CMap::iAnalyze(char cType, int * pX, int * pY, int * pV1, int * pV2, int * pV3)
 {
@@ -728,12 +769,37 @@ RCSI_REARRANGE:;
 }
 
 
+//v2.19 2002-12-16 농사 스킬 관련
+BOOL CMap::bAddCropsTotalSum()
+{
+	if(m_iTotalAgriculture < DEF_MAXAGRICULTURE)
+	{
+		m_iTotalAgriculture++;
+		return TRUE;
+	}
+	return FALSE;
+}
+
+//v2.19 2002-12-16 농사 스킬 관련
+BOOL CMap::bRemoveCropsTotalSum()
+{
+	if(m_iTotalAgriculture < DEF_MAXAGRICULTURE)
+	{
+		m_iTotalAgriculture--;
+		if(m_iTotalAgriculture < 0)
+		{
+			m_iTotalAgriculture = 0;
+		}
+		return TRUE;
+	}
+	return FALSE;
+}
 
 void CMap::RestoreStrikePoints()
 {
  int i;
 
 	for (i = 0; i < DEF_MAXSTRIKEPOINTS; i++) {
-		m_stStrikePoint[i].iInitHP = m_stStrikePoint[i].iHP;
+		m_stStrikePoint[i].iHP = m_stStrikePoint[i].iInitHP;
 	}
 }

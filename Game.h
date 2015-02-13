@@ -38,12 +38,15 @@
 #include "Fish.h"
 #include "DynamicObject.h"
 #include "DynamicObjectID.h"
-#include "Portion.h"
+#include "Potion.h"
 #include "Mineral.h"
 #include "Quest.h"
 #include "BuildItem.h"
 #include "TeleportLoc.h"
 #include "GlobalDef.h"
+#include "englishitem.h"
+#include "koreaitem.h"
+#include "teleport.h"
 
 #define DEF_SERVERSOCKETBLOCKLIMIT	300
 
@@ -63,6 +66,7 @@
 #define DEF_POISONTIME			1000*12		// 중독 효과 시간 간격 
 #define DEF_SUMMONTIME			60000*5		// 소환몹은 5분간 살아있다
 #define DEF_NOTICETIME			80000		// 공지 사항 전송 시간간격 
+#define DEF_PLANTTIME			60000*5		//v2.20 2002-12-20 농작물 살아 있는 시간.
 
 #define DEF_EXPSTOCKTIME		1000*10		// ExpStock을 계산하는 시간 간격 
 #define DEF_MSGQUENESIZE		100000		// 메시지 큐 사이즈 10만개 
@@ -93,7 +97,7 @@
 #define DEF_MAXENGAGINGFISH				30  // 한 물고기에 낚시를 시도할 수 있는 최대 인원 
 #define DEF_MAXPORTIONTYPES				500 // 최대 포션 정의 갯수 
 
-#define DEF_SPECIALEVENTTIME			600000 // 10분
+#define DEF_MOBEVENTTIME				300000 // 5분 
 #define DEF_MAXQUESTTYPE				200
 
 #define DEF_MAXSUBLOGSOCK				10
@@ -104,53 +108,164 @@
 #define DEF_ITEMLOG_DEPLETE				4
 #define DEF_ITEMLOG_NEWGENDROP			5
 #define DEF_ITEMLOG_DUPITEMID			6
+#define DEF_ITEMLOG_BUY					7        // 12-22 성후니추가 
+#define DEF_ITEMLOG_SELL				8     
+#define DEF_ITEMLOG_RETRIEVE			9
+#define DEF_ITEMLOG_DEPOSIT				10
+#define DEF_ITEMLOG_EXCHANGE			11
+#define DEF_ITEMLOG_MAGICLEARN			12
+#define DEF_ITEMLOG_MAKE				13
+#define DEF_ITEMLOG_SUMMONMONSTER		14
+#define DEF_ITEMLOG_POISONED			15
+#define DEF_ITEMLOG_SKILLLEARN			16
+#define DEF_ITEMLOG_REPAIR				17
+#define DEF_ITEMLOG_JOINGUILD           18
+#define DEF_ITEMLOG_BANGUILD            19	// 한국에 빠진 로그
+#define DEF_ITEMLOG_RESERVEFIGZONE      20	//  "
+#define DEF_ITEMLOG_APPLY               21	//  "
+#define DEF_ITEMLOG_SHUTUP              22	//  "
+#define DEF_ITEMLOG_CLOSECONN			23	//  "
+#define DEF_ITEMLOG_SPELLFIELD			24	//  "
+#define DEF_ITEMLOG_CREATEGUILD			25	//  "
+#define DEF_ITEMLOG_GUILDDISMISS		26	//  "
+#define DEF_ITEMLOG_SUMMONPLAYER        27	//  "
+#define DEF_ITEMLOG_CREATE				28	//  "
+#define DEF_ITEMLOG_UPGRADEFAIL         29
+#define DEF_ITEMLOG_UPGRADESUCCESS      30
+
+
+// v2.15 전면전 로그 관련 
+#define DEF_CRUSADELOG_ENDCRUSADE       1
+#define DEF_CRUSADELOG_STARTCRUSADE     2
+#define DEF_CRUSADELOG_SELECTDUTY       3
+#define DEF_CRUSADELOG_GETEXP           4
+
+
+#define DEF_PKLOG_BYPLAYER				1
+#define DEF_PKLOG_BYPK					2
+#define DEF_PKLOG_BYENERMY				3
+#define DEF_PKLOG_BYNPC					4
+#define DEF_PKLOG_BYOTHER				5
+#define DEF_PKLOG_REDUCECRIMINAL        6
+
 
 #define DEF_MAXDUPITEMID				100
 
 #define DEF_MAXGUILDS					1000 // 동시에 접속할 수 있는 길드수 
 #define DEF_MAXONESERVERUSERS			800	 // 한 서버에서 허용할 수 있는 최대 사용자수. 초과된 경우 부활존 혹은 블리딩 아일, 농경지로 보내진다.
 
-#define DEF_MAXGATESERVERSTOCKMSGSIZE	10000
+#define DEF_MAXGATESERVERSTOCKMSGSIZE	30000
 
+
+#ifdef DEF_TAIWAN    // 대만의 경우 최대 7개만 지어진다.
+#define DEF_MAXCONSTRUCTNUM				7
+#else
 #define DEF_MAXCONSTRUCTNUM				10
+#endif
+
+#define DEF_MAXSCHEDULE					10
+
 
 //v1.4311-3  사투장의 최대 숫자
 #define DEF_MAXFIGHTZONE 10 
 
 //============================
-#define DEF_LEVELLIMIT		20				// 체험판 레벨 제한치!!!			
+// #define DEF_LEVELLIMIT		130				// 체험판 레벨 제한치!!!			
+#define DEF_LEVELLIMIT		20				// 체험판 레벨 제한치!!!	// adamas
 //============================
 
 //============================
-#define DEF_MINIMUMHITRATIO 10				// 최저 명중 확률 
+#define DEF_MINIMUMHITRATIO 15				// 최저 명중 확률  //v2.172 10->15% 상승 
 //============================		
 
 //============================
-#define DEF_MAXIMUMHITRATIO	95				// 최대 명중 확률
+#define DEF_MAXIMUMHITRATIO	99				// 최대 명중 확률
 //============================
 
 //============================
-#define DEF_PLAYERMAXLEVEL	180				// 최대 레벨: Npc.cfg 파일에 설정되어 있지 않을 경우 m_iPlayerMaxLevel에 입력된다.
+#if defined(DEF_TESTSERVER)
+	// #define DEF_PLAYERMAXLEVEL	130				// 최대 레벨: Npc.cfg 파일에 설정되어 있지 않을 경우 m_iPlayerMaxLevel에 입력된다.
+	#define DEF_PLAYERMAXLEVEL	180				// 최대 레벨: Npc.cfg 파일에 설정되어 있지 않을 경우 m_iPlayerMaxLevel에 입력된다.
+#else
+	#define DEF_PLAYERMAXLEVEL	180				// 최대 레벨: Npc.cfg 파일에 설정되어 있지 않을 경우 m_iPlayerMaxLevel에 입력된다.
+	// #define DEF_PLAYERMAXLEVEL	140
+#endif
 //============================
 
 //============================
-#define DEF_GMGMANACONSUMEUNIT	1			// Grand Magic Generator 마나 흡수 단위.
+#define DEF_GMGMANACONSUMEUNIT	15			// Grand Magic Generator 마나 흡수 단위.
 //============================
 
 #define DEF_MAXCONSTRUCTIONPOINT 30000		// 최대 소환 포인트 
 
-#define DEF_MAXWARCONTRIBUTION	 1000000
+#define DEF_MAXWARCONTRIBUTION	 500000
 
+#define DEF_MAXPARTYMEMBERS		8
+#define DEF_MAXPARTYNUM			5000
 
-//#define DEF_TESTSERVER
+#define DEF_MAXGIZONPOINT		37			// adamas : 최고 지존 업그레이드
 
-//#define NO_MSGSPEEDCHECK
+// v2.181 2002-10-24 서버 속도 향상을 위해 스트링 비교를 줄인다.
+#define DEF_NETURAL             0
+#define DEF_ARESDEN             1
+#define DEF_ELVINE              2
+#define DEF_BOTHSIDE			100
+
+//v2.19 2002-11-19 
+#define DEF_PK					0
+#define DEF_NONPK				1
+#define DEF_NEVERNONPK			2  //v2.19 2002-11-19 초보 미들 랜드 절때 PK불가능
+
+// 2002-12-24 전면전시 소환할 수 있는 (건물 수를 제외한) NPC의 수를 제한한다.(대만 요청)
+#ifdef DEF_TAIWAN
+	#define DEF_MAX_CRUSADESUMMONMOB	5
+#else
+	#define DEF_MAX_CRUSADESUMMONMOB	500
+#endif
+
+// v2.20 2002-12-31 민간인 모드 레벨 제한 과 이동지역 제한 추가 
+#define DEF_LIMITHUNTERLEVEL 100
 
 class CGame  
 {
 public:
+	int  iSetSide(int iClientH); // 2002-11-15 Client의 side, onTown, onShop 정보를 설정
+	void RequestHuntmode(int iClientH); // 2002-11-14 사냥꾼 모드 추가
+	void SetNoHunterMode(int iClientH,BOOL bSendMSG = FALSE); 	// v2.20 2002-12-31 민간인 모드 레벨 제한 과 이동지역 제한 추가 
+	BOOL _bCrusadeLog(int iAction,int iClientH,int iData, char * cName);
+	void SetForceRecallTime(int iClientH) ; // v2.17 2002-7-15 
+	BOOL bCheckClientMoveFrequency(int iClientH, DWORD dwClientTime); // v2.171
+	BOOL bCheckClientMagicFrequency(int iClientH, DWORD dwClientTime); // v2.171
+	BOOL bCheckClientAttackFrequency(int iClientH, DWORD dwClientTime); // v2.171
+	void RequestGuildNameHandler(int iClientH, int iObjectID, int iIndex); // v2.171
+	void ArmorLifeDecrement(int iClientH, int sTargetH, char cOwnerType, int iValue);
+	BOOL bCheckIsItemUpgradeSuccess(int iClientH, int iItemIndex, int iSomH,BOOL bBonus = FALSE) ;
+	void RequestItemUpgradeHandler(int iClientH, int iItemIndex);
+	BOOL bSerchMaster(int iNpcH);
+	void GetExp(int iClientH, int iExp, BOOL bIsAttackerOwn = FALSE);
+	void PartyOperationResult_Dismiss(int iClientH, char *pName, int iResult, int iPartyID);
+	void RequestAcceptJoinPartyHandler(int iClientH, int iResult);
+	void RequestDeletePartyHandler(int iClientH);
+	void PartyOperationResult_Info(int iClientH, char * pName, int iTotal, char * pNameList);
+	void GetPartyInfoHandler(int iClientH);
+	void RequestDismissPartyHandler(int iClientH);
+	void PartyOperationResult_Join(int iClientH, char *pName, int iResult, int iPartyID);
+	void RequestJoinPartyHandler(int iClientH, char * pData, DWORD dwMsgSize);
+	void PartyOperationResult_Delete(int iPartyID);
+	void PartyOperationResult_Create(int iClientH, char * pName, int iResult, int iPartyID);
+	void PartyOperationResultHandler(char * pData);
+	void RequestCreatePartyHandler(int iClientH);
+	BOOL bCheckAndConvertPlusWeaponItem(int iClientH, int iItemIndex);
+	void ResurrectPlayer(int iClientH);
+	void AdminOrder_GetFightzoneTicket(int iClientH);
+	void KillCrusadeObjects();
+
+	BOOL bReadCrusadeScheduleConfigFile(char * pFn);
+	void CrusadeWarStarter();
 	BOOL bCopyItemContents(class CItem * pOriginal, class CItem * pCopy);
+
 	int  iGetMapLocationSide(char * pMapName);
+
 	void ManualEndCrusadeMode(int iWinnerSide);
 	void ChatMsgHandlerGSM(int iMsgType, int iV1, char * pName, char * pData, DWORD dwMsgSize);
 	BOOL bReadCrusadeGUIDFile(char * cFn);
@@ -165,15 +280,22 @@ public:
 	void GSM_SetGuildTeleportLoc(int iGuildGUID, int dX, int dY, char * pMapName);
 	void SyncMiddlelandMapInfo();
 	void _GrandMagicLaunchMsgSend(int iType, char cAttackerSide);
-	void GrandMagicResultHandler(char * cMapName, int iCrashedStructureNum, int iStructureDamageAmount, int iCasualities, int iActiveStructure);
+	// v2.15 건물의 HP를 보여주기 위해 수정함 
+	void GrandMagicResultHandler(char * cMapName, int iCrashedStructureNum, int iStructureDamageAmount, int iCasualities, int iActiveStructure, int iSTCount,char * pData);
 	void CalcMeteorStrikeEffectHandler(int iMapIndex);
 	void DoMeteorStrikeDamageHandler(int iMapIndex);
-	void GSM_RequestFindCharacter(WORD wReqServerID, WORD wReqClientH, char * pName);
+	void GSM_RequestFindCharacter(WORD wReqServerID, WORD wReqClientH, char * pName,char * cCharName);
+	// v2.15 2002-5-21
+	void GSM_RequestShutupPlayer(char * cName,WORD wReqServerID, WORD wReqClientH, WORD wV1,char * cTemp); 
 	void ServerStockMsgHandler(char * pData);
 	void SendStockMsgToGateServer();
 	BOOL bStockMsgToGateServer(char * pData, DWORD dwSize);
 	void RequestHelpHandler(int iClientH);
 	void RemoveCrusadeStructures();
+
+	// v2.20 2002-12-28 전면전 종료후 민간인 마을로 강콜
+	void RecallHunterPlayer();
+
 	void _SendMapStatus(int iClientH);
 	void MapStatusHandler(int iClientH, int iMode, char * pMapName);
 	void SelectCrusadeDutyHandler(int iClientH, int iDuty);
@@ -198,19 +320,26 @@ public:
 	BOOL _bNpcBehavior_Detector(int iNpcH);
 	BOOL _bNpcBehavior_ManaCollector(int iNpcH);
 	BOOL __bSetConstructionKit(int iMapIndex, int dX, int dY, int iType, int iTimeCost, int iClientH);
+	BOOL __bSetAgricultureItem(int iMapIndex, int dX, int dY, int iType, int iSsn,int iClientH);   //v2.19 2002-12-16 농사스킬
+	BOOL bCropsItemDrop(int iClientH, short iTargetH,BOOL bMobDropPos = FALSE);												//v2.19 2002-12-16 농사스킬
+	int bProbabilityTable(int x,int y,int iTable);												//v2.19 2002-12-16 농사 스킬 관련
 	void AgingMapSectorInfo();
 	void UpdateMapSectorInfo();
-	BOOL bGetItemNameWhenDeleteNpc(char * pItemName, short sNpcType);
+
+	BOOL bGetItemNameWhenDeleteNpc(int & iItemID, short sNpcType, int iItemprobability);
+
 	int iGetItemWeight(class CItem * pItem, int iCount);
 	void CancelQuestHandler(int iClientH);
 	void ActivateSpecialAbilityHandler(int iClientH);
 	void EnergySphereProcessor(BOOL bIsAdminCreate = FALSE, int iClientH = NULL);
 	BOOL bCheckEnergySphereDestination(int iNpcH, short sAttackerH, char cAttackerType);
-	void JoinPartyHandler(int iClientH, char * pMemberName);
+	void JoinPartyHandler(int iClientH, int iV1, char * pMemberName);
 	void CreateNewPartyHandler(int iClientH);
 	void _DeleteRandomOccupyFlag(int iMapIndex);
 	void RequestSellItemListHandler(int iClientH, char * pData);
 	void AdminOrder_EnableAdminCreateItem(int iClientH, char * pData, DWORD dwMsgSize);
+	// v2.18 2002-10-15 중요 GM 명령어에 패스워드 추가 
+	void AdminOrder_EnableAdminCommand(int iClientH, char * pData, DWORD dwMsgSize); 
 	void AdminOrder_CreateItem(int iClientH, char * pData, DWORD dwMsgSize);
 	void RequestRestartHandler(int iClientH);
 	void AdminOrder_SetObserverMode(int iClientH);
@@ -227,19 +356,40 @@ public:
 	BOOL _bCheckDupItemID(class CItem * pItem);
 	BOOL _bDecodeDupItemIDFileContents(char * pData, DWORD dwMsgSize);
 	void NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType);
-	int  iGetPlayerABSStatus(int iWhatH, int iRecvH);
+	// int  iGetPlayerABSStatus(int iWhatH, int iRecvH);
+	int  iGetPlayerABSStatus(int iWhatH, int iRecvH); // 2002-12-2
 	void AdminOrder_DisconnectAll(int iClientH, char * pData, DWORD dwMsgSize);
 	void CheckSpecialEvent(int iClientH);
+	void CheckSpecialEventThirdYear(int iClientH); // 2002-10-25 3주년 이벤트 
 	void AdminOrder_Summon(int iClientH, char * pData, DWORD dwMsgSize);
+	// v2.14 유저 소환 명령어 추가 
+	void AdminOrder_SummonPlayer(int iClientH, char * pData, DWORD dwMsgSize);
+	// v2.15 2002-5-21
+	BOOL _bDecodeWorldConfigFileContents(char * pData, DWORD dwMsgSize);
+	// v2.17 2002-8-7 // 2002-09-06 #1
+	BOOL _bDecodeNpcItemConfigFileContents(char * pData, DWORD dwMsgSize);
+	// 2002-12-8 World server 보안 설정을 위해 
+	BOOL _bDecodeWLServerConfigFileContents(char * pData, DWORD dwMsgSize);
+	
+
 	char _cGetSpecialAbility(int iKindSA);
-	void AdminOrder_UnsummonDemon(int iClientH);
+	void AdminOrder_UnsummonBoss(int iClientH);
 	void AdminOrder_UnsummonAll(int iClientH);
 	void AdminOrder_SetAttackMode(int iClientH, char * pData, DWORD dwMsgSize);
+	// v2.17 2002-7-15 
+	void AdminOrder_SetForceRecallTime(int iClientH, char * pData, DWORD dwMsgSize);
+	
 	void BuildItemHandler(int iClientH, char * pData);
 	BOOL _bDecodeBuildItemConfigFileContents(char * pData, DWORD dwMsgSize);
 	BOOL _bCheckSubLogSocketIndex();
 	void _CheckGateSockConnection();
-	BOOL _bItemLog(int iAction, int iGiveH, int iRecvH, class CItem * pItem);
+
+	BOOL _bItemLog(int iAction, int iGiveH, int iRecvH, class CItem * pItem, BOOL bForceItemLog = FALSE) ;
+	BOOL _bItemLog(int iAction, int iClientH, char * cName, class CItem * pItem);
+	// v2.14 성후니 로그 
+	BOOL _bPKLog(int iAction, int iAttackerH, int iVictumH, char * cNPC) ;
+	BOOL _bCheckGoodItem( class CItem * pItem ); 
+
 	void OnSubLogRead(int iIndex);
 	void OnSubLogSocketEvent(UINT message, WPARAM wParam, LPARAM lParam);
 	void _CheckStrategicPointOccupyStatus(char cMapIndex);
@@ -267,6 +417,12 @@ public:
 	void ExchangeItemHandler(int iClientH, short sItemIndex, int iAmount, short dX, short dY, WORD wObjectID, char * pItemName);
 	void _BWM_Command_Shutup(char * pData);
 	void _BWM_Init(int iClientH, char * pData);
+
+	// v2.15 메니저 프로그램 2002-5-6
+	void _Manager_Init(int iClientH, char * pData);
+	void _Manager_Shutdown(int iClientH, char * pData);
+
+
 	void CheckUniqueItemEquipment(int iClientH);
 	void _SetItemPos(int iClientH, char * pData);
 	void GetHeroMantleHandler(int iClientH);
@@ -378,7 +534,8 @@ public:
 	void Effect_Damage_Spot(short sAttackerH, char cAttackerType, short sTargetH, char cTargetType, short sV1, short sV2, short sV3, BOOL bExp, int iAttr = NULL);
 	void UseItemHandler(int iClientH, short sItemIndex, short dX, short dY, short sDestItemID);
 	void NpcBehavior_Stop(int iNpcH);
-	void ItemDepleteHandler(int iClientH, short sItemIndex, BOOL bIsUseItemResult);
+	// v2.15 
+	void ItemDepleteHandler(int iClientH, short sItemIndex, BOOL bIsUseItemResult, BOOL bIsLog = TRUE);
 	int _iGetArrowItemIndex(int iClientH);
 	void RequestFullObjectData(int iClientH, char * pData);
 	void DeleteNpc(int iNpcH);
@@ -390,8 +547,8 @@ public:
 	int  iAddDynamicObjectList(short sOwner, char cOwnerType, short sType, char cMapIndex, short sX, short sY, DWORD dwLastTime, int iV1 = NULL);
 	int _iCalcMaxLoad(int iClientH);
 	void GetRewardMoneyHandler(int iClientH);
-	void _PenaltyItemDrop(int iClientH, int iTotal, BOOL bIsSAattacked = FALSE);
-	void ApplyCombatKilledPenalty(int iClientH, char cPenaltyLevel, BOOL bIsSAattacked = FALSE);
+	void _PenaltyItemDrop(int iClientH, int iTotal, BOOL bIsSAattacked = FALSE,BOOL bItemDrop = FALSE);
+	void ApplyCombatKilledPenalty(int iClientH, char cPenaltyLevel, BOOL bIsSAattacked = FALSE, BOOL bItemDrop = FALSE);
 	void EnemyKillRewardHandler(int iAttackerH, int iClientH);
 	void PK_KillRewardHandler(short sAttackerH, short sVictumH);
 	void ApplyPKpenalty(short sAttackerH, short sVictumLevel);
@@ -408,8 +565,7 @@ public:
 	void TimeStaminarPointsUp(int iClientH);
 	void Quit();
 	BOOL __bReadMapInfo(int iMapIndex);
-	BOOL bBankItemToPlayer(int iClientH, short sItemIndex);
-	BOOL bPlayerItemToBank(int iClientH, short sItemIndex);
+
 	int  _iGetSkillNumber(char * pSkillName);
 	void TrainSkillResponse(BOOL bSuccess, int iClientH, int iSkillNum, int iSkillLevel);
 	int _iGetMagicNumber(char * pMagicName, int * pReqInt, int * pCost);
@@ -424,7 +580,7 @@ public:
 	void SendMsgToGateServer(DWORD dwMsg, int iClientH, char * pData = NULL);
 	void OnGateRead();
 	void OnGateSocketEvent(UINT message, WPARAM wParam, LPARAM lParam);
-	void ToggleCombatModeHandler(int iClientH);
+	void ToggleCombatModeHandler(int iClientH); 
 	void GuildNotifyHandler(char * pData, DWORD dwMsgSize);
 	void SendGuildMsg(int iClientH, WORD wNotifyMsgType, short sV1, short sV2, char * pString);
 	void DelayEventProcess();
@@ -455,7 +611,7 @@ public:
 	BOOL bEquipItemHandler(int iClientH, short sItemIndex, BOOL bNotify = TRUE);
 	BOOL _bAddClientItemList(int iClientH, class CItem * pItem, int * pDelReq);
 	int  iClientMotion_GetItem_Handler(int iClientH, short sX, short sY, char cDir);
-	void DropItemHandler(int iClientH, short sItemIndex, int iAmount, char * pItemName);
+	void DropItemHandler(int iClientH, short sItemIndex, int iAmount, char * pItemName, BOOL bByPlayer = FALSE);
 	void ClientCommonHandler(int iClientH, char * pData);
 	BOOL __fastcall bGetMsgQuene(char * pFrom, char * pData, DWORD * pMsgSize, int * pIndex, char * pKey);
 	void MsgProcess();
@@ -464,14 +620,14 @@ public:
 	int iGetDangerValue(int iNpcH, short dX, short dY);
 	void NpcBehavior_Dead(int iNpcH);
 	void NpcKilledHandler(short sAttackerH, char cAttackerType, int iNpcH, short sDamage);
-	int  iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttackerH, char cAttackerType, int tdX, int tdY, int iAttackMode, BOOL bNearAttack = FALSE);
+	int  iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttackerH, char cAttackerType, int tdX, int tdY, int iAttackMode, BOOL bNearAttack = FALSE, BOOL bIsDash = FALSE);
 	void RemoveFromTarget(short sTargetH, char cTargetType, int iCode = NULL);
 	void NpcBehavior_Attack(int iNpcH);
 	void TargetSearch(int iNpcH, short * pTarget, char * pTargetType);
 	void NpcBehavior_Move(int iNpcH);
 	BOOL bGetEmptyPosition(short * pX, short * pY, char cMapIndex);
 	char cGetNextMoveDir(short sX, short sY, short dstX, short dstY, char cMapIndex, char cTurn, int * pError);
-	int  iClientMotion_Attack_Handler(int iClientH, short sX, short sY, short dX, short dY, short wType, char cDir, WORD wTargetObjectID, BOOL bRespose = TRUE);
+	int  iClientMotion_Attack_Handler(int iClientH, short sX, short sY, short dX, short dY, short wType, char cDir, WORD wTargetObjectID, BOOL bRespose = TRUE, BOOL bIsDash = FALSE);
 	void ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize);
 	void NpcProcess();
 	BOOL bCreateNewNpc(char * pNpcName, char * pName, char * pMapName, short sClass, char cSA, char cMoveType, int * poX, int * poY, char * pWaypointList, RECT * pArea, int iSpotMobIndex, char cChangeSide, BOOL bHideGenMode, BOOL bIsSummoned = FALSE, BOOL bFirmBerserk = FALSE, BOOL bIsMaster = FALSE, int iGuildGUID = NULL);
@@ -480,21 +636,24 @@ public:
 	
 	BOOL _bGetIsStringIsNumber(char * pStr);
 	BOOL _bInitItemAttr(class CItem * pItem, char * pItemName);
+	// v2.17 2002-7-31 아이템을 아이템 고유번호로 생성할 수 있게 한다.
+	BOOL _bInitItemAttr(class CItem * pItem, int iItemID);
 	BOOL bReadProgramConfigFile(char * cFn);
 	void GameProcess();
 	void InitPlayerData(int iClientH, char * pData, DWORD dwSize);
 	void ResponsePlayerDataHandler(char * pData, DWORD dwSize);
-	BOOL bSendMsgToLS(DWORD dwMsg, int iClientH, BOOL bFlag = TRUE);
+	// v2.14 GM Log 를 윌드 서버로 보내기 위해 수정함 .
+	BOOL bSendMsgToLS(DWORD dwMsg, int iClientH, BOOL bFlag = TRUE,char * pData = NULL );
 	void OnMainLogRead();
 	void OnMainLogSocketEvent(UINT message, WPARAM wParam, LPARAM lParam);
 	void CheckClientResponseTime();
 	void OnTimer(char cType);
 	int iComposeMoveMapData(short sX, short sY, int iClientH, char cDir, char * pData);
-	void SendEventToNearClient_TypeB(DWORD dwMsgID, WORD wMsgType, char cMapIndex, short sX, short sY, short sV1, short sV2, short sV3, short sV4 = NULL);
+	void SendEventToNearClient_TypeB(DWORD dwMsgID, WORD wMsgType, char cMapIndex, short sX, short sY, short sV1 = 0, short sV2 = 0, short sV3 = 0, short sV4 = 0);
 	void SendEventToNearClient_TypeA(short sOwnerH, char cOwnerType, DWORD dwMsgID, WORD wMsgType, short sV1, short sV2, short sV3);
 	void DeleteClient(int iClientH, BOOL bSave, BOOL bNotify, BOOL bCountLogout = TRUE, BOOL bForceCloseConn = FALSE);
 	int  iComposeInitMapData(short sX, short sY, int iClientH, char * pData);
-	void RequestInitDataHandler(int iClientH, char * pData, char cKey);
+	void RequestInitDataHandler(int iClientH, char * pData, char cKey, BOOL bIsNoNameCheck = FALSE);
 	void RequestInitPlayerHandler(int iClientH, char * pData, char cKey);
 	int  iClientMotion_Move_Handler(int iClientH, short sX, short sY, char cDir, BOOL bIsRun);
 	void ClientMotionHandler(int iClientH, char * pData);
@@ -508,16 +667,28 @@ public:
 	// v1.4311-3 2 시간마다 사투장 예약을 초기화 시킨다.
 	void FightzoneReserveProcessor() ;
 
+	// 2002-10-23 Item Event
+	BOOL NpcDeadItemGeneratorWithItemEvent(int iNpcH, short sAttackerH, char cAttackerType);
+	// 2002-10-24 Item Event List에 있는 아이템 중에 Type이 0인 아이템은 일반 아이템 생성과정에서 제외 된다.
+	BOOL bCheckInItemEventList(int iItemID, int iNpcH);
+
+	// 2002-12-6  Teleport 기능 추가
+	BOOL _bDecodeTeleportListConfigFileContents(char * pData, DWORD dwMsgSize);
+	// 2002-12-6  Teleport 기능 추가
+	void RequestTeleportListHandler(int iClientH, char * pData, DWORD dwMsgSize);
+	void RequestChargedTeleportHandler(int iClientH, char *pData, DWORD dwMsgSize);
+
 	CGame(HWND hWnd);
 	virtual ~CGame();
 
-	char m_cServerName[11];
+	char m_cServerName[12];
 	char m_cGameServerAddr[16];
 	char m_cLogServerAddr[16];
 	char m_cGateServerAddr[16];
 	int  m_iGameServerPort;
 	int  m_iLogServerPort;
 	int  m_iGateServerPort;
+	int  m_iWorldLogServerPort;
 
 	int  m_iLimitedUserExp, m_iLevelExp20;
 
@@ -542,13 +713,16 @@ public:
 	BOOL			m_bIsGameStarted;
 	BOOL            m_bIsLogSockAvailable, m_bIsGateSockAvailable;
 	BOOL			m_bIsItemAvailable, m_bIsBuildItemAvailable, m_bIsNpcAvailable, m_bIsMagicAvailable;
-	BOOL			m_bIsSkillAvailable, m_bIsPortionAvailable, m_bIsQuestAvailable;
+	BOOL			m_bIsSkillAvailable, m_bIsPortionAvailable, m_bIsQuestAvailable, m_bIsWLServerAvailable ;
 	class CItem   * m_pItemConfigList[DEF_MAXITEMTYPES];
 	class CNpc    * m_pNpcConfigList[DEF_MAXNPCTYPES];
 	class CMagic  * m_pMagicConfigList[DEF_MAXMAGICTYPE];
 	class CSkill  * m_pSkillConfigList[DEF_MAXSKILLTYPE];
 	class CQuest  * m_pQuestConfigList[DEF_MAXQUESTTYPE];
 	char            m_pMsgBuffer[DEF_MSGBUFFERSIZE+1];
+
+	// 2002-12-6  Teleport 기능 추가
+	class CTeleport * m_pTeleportConfigList[DEF_MAXTELEPORTLIST];
 
 	HWND  m_hWnd;
 	int   m_iTotalClients, m_iMaxClients, m_iTotalGameServerClients, m_iTotalGameServerMaxClients;
@@ -658,9 +832,37 @@ public:
 
 	int m_iNpcConstructionPoint[DEF_MAXNPCTYPES];
 	DWORD m_dwCrusadeGUID;
-	int   m_iCrusadeWinnerSide;
+	int   m_iCrusadeWinnerSide;   
+	int	  m_iWinnerSide;		//v2.19 2002-11-15 
+	int	  m_iNonAttackArea;		//v2.19 2002-11-19 초보 미들 절대 공격 불가능 하기위해 추가.
 
 	int   m_iPlayerMaxLevel;
+	// v2.15 2002-5-21
+	int   m_iWorldMaxUser;
+
+	// v2.17 2002-7-15
+	short m_sForceRecallTime;
+
+	BOOL  m_bIsCrusadeWarStarter;
+	int   m_iLatestCrusadeDayOfWeek;
+	int   m_iFinalShutdownCount;
+
+	struct {
+		int iDay;
+		int iHour;
+		int iMinute;
+	} m_stCrusadeWarSchedule[DEF_MAXSCHEDULE];
+
+	struct {
+		int iTotalMembers;
+		int iIndex[DEF_MAXPARTYMEMBERS];
+	} m_stPartyInfo[DEF_MAXPARTYNUM];
+
+	class CItem * m_pGold;
+
+	// 2002-09-09 #1
+	// NPCITEM List보다 ITEM List가 먼저 도착 했는지 검사하는 변수
+	bool	m_bReceivedItemList;
 
 private:
 	int __iSearchForQuest(int iClientH, int iWho, int * pQuestType, int * pMode, int * pRewardType, int * pRewardAmount, int * pContribution, char * pTargetName, int * pTargetType, int * pTargetCount, int * pX, int * pY, int * pRange);

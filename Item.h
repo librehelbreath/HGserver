@@ -6,6 +6,7 @@
 #define AFX_ITEM_H__211A1360_91B9_11D2_B143_00001C7030A6__INCLUDED_
 
 #include <windows.h>
+#include <winbase.h>
 
 #if _MSC_VER >= 1000
 #pragma once
@@ -25,6 +26,7 @@
 #define DEF_EQUIPPOS_RFINGER	10
 #define DEF_EQUIPPOS_LFINGER	11
 #define DEF_EQUIPPOS_BACK		12
+#define DEF_EQUIPPOS_FULLBODY	13     //헤드 바디 암 신발 팬츠 망토
  
 #define DEF_ITEMTYPE_NOTUSED	-1	// v1.4 기존에 사용되었으나 현재로서는 사용되지 않는 아이템: 포상금으로 대체된다.
 #define DEF_ITEMTYPE_NONE		 0
@@ -72,6 +74,9 @@
 #define DEF_ITEMEFFECTTYPE_ALTERITEMDROP		26	// 다른 아이템 떨어질 것 대신 이 아이템이 떨어진다.
 
 #define DEF_ITEMEFFECTTYPE_CONSTRUCTIONKIT		27	// 건축 키트
+#define DEF_ITEMEFFECTTYPE_WARM					28	// 얼린 몸을 녹인다. v2.172 2002-7-5
+#define DEF_ITEMEFFECTTYPE_DEFENSE_ANTIMINE		29	// 방어능력 v2.172 2002-7-5
+#define DEF_ITEMEFFECTTYPE_ITEMFARM				30  //v2.19 2002-12-16 농사 스킬 관련
 
 #define DEF_ITET_UNIQUE_OWNER				1		// ItemTouchEffect: 주인을 갖는 아이템 
 #define DEF_ITET_ID							2		// 그냥 아이템 아이디
@@ -81,6 +86,7 @@
 class CItem  
 {
 public:
+
 	CItem();
 	virtual ~CItem();
 
@@ -89,15 +95,15 @@ public:
 	short m_sIDnum;					// 아이템의 고유 번호 
 	char  m_cItemType;
 	char  m_cEquipPos;
-	short m_sItemEffectType;     
-	short m_sItemEffectValue1, m_sItemEffectValue2, m_sItemEffectValue3; 
-	short m_sItemEffectValue4, m_sItemEffectValue5, m_sItemEffectValue6; 
+	short m_sItemEffectType;
+	short m_sItemEffectValue1, m_sItemEffectValue2, m_sItemEffectValue3;
+	short m_sItemEffectValue4, m_sItemEffectValue5, m_sItemEffectValue6;
 	WORD  m_wMaxLifeSpan;
 	short m_sSpecialEffect;
 	
 	//short m_sSM_HitRatio, m_sL_HitRatio;
 	//v1.432 명중률 가감 사용 안한다. 대신 특수 능력 수치가 들어간다.
-	short m_sSpecialEffectValue1, m_sSpecialEffectValue2; 
+	short m_sSpecialEffectValue1, m_sSpecialEffectValue2;
 
 	short m_sSprite;
 	short m_sSpriteFrame;
@@ -105,9 +111,9 @@ public:
 	char  m_cApprValue;
 	char  m_cSpeed;
 
-	DWORD m_wPrice; 
+	DWORD m_wPrice;
 	WORD  m_wWeight;
-	short m_sLevelLimit;	
+	short m_sLevelLimit;
 	char  m_cGenderLimit;
 
 	short m_sRelatedSkill;
@@ -121,11 +127,12 @@ public:
 	short m_sTouchEffectValue1, m_sTouchEffectValue2, m_sTouchEffectValue3;
 	char  m_cItemColor; // v1.4 에서 아이템 색으로 변경되었다. 
 	short m_sItemSpecEffectValue1, m_sItemSpecEffectValue2, m_sItemSpecEffectValue3;
-	WORD  m_wCurLifeSpan;
+	// v2.16 2002-5-23 고광현 수정
+	int  m_wCurLifeSpan;
 	DWORD m_dwAttribute;				// aaaa bbbb cccc dddd eeee ffff xxxx xxx1 
 										// 1: Custom-Made Item flag 
-										// a: Item 속성 종류 
-										// b: Item 속성 정도
+										// a: 추가 대미지
+										// b: RESERVED
 										// c: 특수 아이템 성질 Flag 
 										// d: 특수 아이템 성질 정도 
 										// e: 특수 아이템 추가 성질 Flag

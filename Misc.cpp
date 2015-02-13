@@ -274,7 +274,7 @@ BOOL CMisc::bCheckValidName(char *pStr)
 			 (pStr[i] == '*')  || (pStr[i] == '?')  || (pStr[i] == '<') || 
 			 (pStr[i] == '>')  || (pStr[i] == '|')  || (pStr[i] == '"') ) return FALSE;
 
-		if ((i <= iLen-2) && ((unsigned char)pStr[i] >= 128)) {
+/*		if ((i <= iLen-2) && ((unsigned char)pStr[i] >= 128)) {
 			if (((unsigned char)pStr[i] == 164) && ((unsigned char)pStr[i+1] >= 161) && 
 				((unsigned char)pStr[i+1] <= 211)) {
 				// 적합	
@@ -288,7 +288,8 @@ BOOL CMisc::bCheckValidName(char *pStr)
 			}
 			else return FALSE;
 			i++; // !!! 증가시켜야만 맞다.
-		}
+		}*/
+
 	}
 
 	return TRUE;

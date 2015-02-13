@@ -34,6 +34,7 @@ public:
 	DWORD m_dwDynamicObjectRegisterTime;
 
 	BOOL  m_bIsMoveAllowed, m_bIsTeleport, m_bIsWater, m_bIsTempMoveAllowed;
+	BOOL  m_bIsFarmingAllowed; //v2.19 2002-12-16 농사 스킬 관련 :: 농작물을 심을수 있는 곳이다.
 
 	// 점령지 표시용 
 	int   m_iOccupyStatus;    // Aresden이면 -값으로, Elvine이면 +로 더해진다. 총 합이 이 지역의 경향성 

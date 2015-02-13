@@ -6,15 +6,17 @@
 
 extern void PutLogList(char * cMsg);
 extern char G_cTxt[512];
-extern char	G_cData50000[50000];	// 대용량의 데이터를 접근하기 위함.
+extern char	G_cData50000[50000];		// 대용량의 데이터를 접근하기 위함.
 
 extern void PutLogFileList(char * cStr);
 extern void PutAdminLogFileList(char * cStr);
-extern void PutItemLogFileList(char * cStr);
+extern void PutItemLogFileList(char * cStr, BOOL bIsSave = FALSE );
 extern void PutLogEventFileList(char * cStr);
+extern void PutDebugMsg(char * cStr);	// 2002-09-09 #2
 
 extern FILE * pLogFile;
 extern HWND	G_hWnd;
+
 
 // 메시지 작성용 참조화일. 
 
@@ -265,7 +267,7 @@ extern void ThreadProc(void *ch);
 
 CGame::CGame(HWND hWnd)
 {
- int i;
+ int i, x;
 	
 	m_bIsGameStarted = FALSE;
 	m_hWnd           = hWnd;
@@ -280,10 +282,13 @@ CGame::CGame(HWND hWnd)
 	m_bIsSkillAvailable     = FALSE;
 	m_bIsQuestAvailable     = FALSE;
 	m_bIsPortionAvailable   = FALSE;
+	m_bIsWLServerAvailable  = FALSE;
 
 	ZeroMemory(m_cServerName, sizeof(m_cServerName));
 
 	m_iPlayerMaxLevel = DEF_PLAYERMAXLEVEL;
+
+	m_sForceRecallTime = 0 ;
 	
 	for (i = 0; i < DEF_MAXCLIENTS; i++)
 		m_pClientList[i] = NULL;
@@ -341,6 +346,12 @@ CGame::CGame(HWND hWnd)
 	for (i = 0; i < DEF_MAXDUPITEMID; i++)
 		m_pDupItemIDList[i] = NULL;
 
+	for (i = 0; i < DEF_MAXPARTYNUM; i++) 
+	for (x = 0; x < DEF_MAXPARTYMEMBERS; x++) {
+		m_stPartyInfo[i].iTotalMembers = 0;
+		m_stPartyInfo[i].iIndex[x] = 0;
+	}
+
 	m_iQueneHead = 0;
 	m_iQueneTail = 0;
 
@@ -373,6 +384,11 @@ CGame::CGame(HWND hWnd)
 	m_stCityStatus[2].iWins   = 0;
 
 	m_iAutoRebootingCount = 0;
+
+	m_pGold = NULL ;
+
+	// 2002-09-09 #1
+	m_bReceivedItemList = false;
 }
 
 CGame::~CGame()
@@ -391,7 +407,12 @@ BOOL CGame::bAccept(class XSocket * pXSock)
 		(m_bIsMagicAvailable == FALSE)    || (m_bIsSkillAvailable == FALSE)     || 
 		(m_bIsPortionAvailable == FALSE)  || (m_bOnExitProcess == TRUE)         || 
 		(m_bIsQuestAvailable == FALSE)    || (m_bIsBuildItemAvailable == FALSE) ||
-		(m_bIsGameStarted == FALSE)) 
+		(m_bIsGameStarted == FALSE)
+#ifdef DEF_DEFENCEHACKING
+		// 2002-12-8 World server 보안 설정을 위해 
+		|| (m_bIsWLServerAvailable == FALSE)
+#endif 
+		) 
 		goto CLOSE_ANYWAY;
 
 	// 비어있는 배열을 찾는다. 
@@ -447,7 +468,7 @@ void CGame::OnClientSocketEvent(UINT message, WPARAM wParam, LPARAM lParam)
 {
  UINT iTmp;
  register int iClientH, iRet;
- DWORD dwTime = timeGetTime();
+ 
 
 	iTmp = WM_ONCLIENTSOCKETEVENT;
 	iClientH = message - iTmp;
@@ -465,7 +486,7 @@ void CGame::OnClientSocketEvent(UINT message, WPARAM wParam, LPARAM lParam)
 		break;
 	
 	case DEF_XSOCKEVENT_BLOCK:
-		PutLogList("Socket BLOCKED!");
+		//PutLogList("Socket BLOCKED!");
 		break;
 	
 	case DEF_XSOCKEVENT_CONFIRMCODENOTMATCH:
@@ -560,6 +581,12 @@ BOOL CGame::bInit()
 
 	for (i = 0; i < DEF_MAXNPCTYPES; i++)
 		m_iNpcConstructionPoint[i] = NULL;
+
+	for (i = 0; i < DEF_MAXSCHEDULE; i++) {
+		m_stCrusadeWarSchedule[i].iDay = -1;
+		m_stCrusadeWarSchedule[i].iHour = -1;
+		m_stCrusadeWarSchedule[i].iMinute = -1;
+	}
 	
 	// 일단 여기서 설정 
 	m_iNpcConstructionPoint[1]  = 100; // MS
@@ -574,6 +601,8 @@ BOOL CGame::bInit()
 	m_iNpcConstructionPoint[45] = 3000; // GHKABS
 	m_iNpcConstructionPoint[46] = 2000; // TK
 	m_iNpcConstructionPoint[47] = 3000; // BG
+
+	m_iNpcConstructionPoint[51] = 1500; // Catapult
 	//
 
 	m_bIsGameStarted = FALSE;
@@ -589,6 +618,7 @@ BOOL CGame::bInit()
 	m_bIsSkillAvailable     = FALSE;
 	m_bIsQuestAvailable     = FALSE;
 	m_bIsPortionAvailable   = FALSE;
+	m_bIsWLServerAvailable  = FALSE;
 
 	ZeroMemory(m_cServerName, sizeof(m_cServerName));
 	
@@ -651,6 +681,10 @@ BOOL CGame::bInit()
 		m_stCrusadeStructures[i].dX    = NULL;
 		m_stCrusadeStructures[i].dY    = NULL;
 	}
+
+	// 2002-12-6  Teleport 기능 추가
+	for (i = 0; i < DEF_MAXTELEPORTLIST; i++)
+		m_pTeleportConfigList[i] = NULL;
 
 	for (i = 0; i < DEF_MAXGUILDS; i++)
 		m_pGuildTeleportLoc[i].m_iV1 = NULL;
@@ -729,10 +763,27 @@ BOOL CGame::bInit()
 	// 각 레벨별 경험치 리스트를 작성한다.
 	for (i = 1; i < 300; i++) {
 		m_iLevelExpTable[i] = iGetLevelExp(i);
+
 		//testcode
-		//wsprintf(G_cTxt, "Level:%d --- Exp:%d", i, m_iLevelExpTable[i]);
-		//PutLogFileList(G_cTxt);
+//		wsprintf(G_cTxt, "Level:%d --- Exp:%d", i, m_iLevelExpTable[i]);
+//		PutLogFileList(G_cTxt);
+
 	}
+
+#ifdef	DEF_MAXLEVEL150
+	int iTemp ;
+	for (i = 140; i < 180; i++) {
+		iTemp = (i - 140 ) * 3  ;
+
+		m_iLevelExpTable[i] = m_iLevelExpTable[i+iTemp];
+
+//		wsprintf(G_cTxt, "Level:%d (%d)--- Exp:%d", i,(i+iTemp), m_iLevelExpTable[i]);
+//		PutLogFileList(G_cTxt);
+
+	}
+	
+#endif
+	
 
 	m_iLimitedUserExp = m_iLevelExpTable[DEF_LEVELLIMIT+1]; // 체험판 유저는 20레벨이상의 경험치는 얻을 수 없다.  임시로 레벨 60까지
 	m_iLevelExp20     = m_iLevelExpTable[20]; 
@@ -795,7 +846,7 @@ BOOL CGame::bInit()
 
 	m_iCrusadeCount  = NULL;
 	m_bIsCrusadeMode = FALSE;
-	m_wServerID_GSS = iDice(1,65535);
+	m_wServerID_GSS = (WORD) iDice(1,65535);
 
 	ZeroMemory(m_cGateServerStockMsg, sizeof(m_cGateServerStockMsg));
 	cp = (char *)m_cGateServerStockMsg;
@@ -809,6 +860,11 @@ BOOL CGame::bInit()
 	m_iIndexGSS = 6;
 	m_dwCrusadeGUID = NULL;
 	m_iCrusadeWinnerSide = NULL;
+	m_iWinnerSide = NULL;			//v2.19 2002-11-15 
+	m_iNonAttackArea = FALSE;		//v2.19 2002-11-19 
+	m_bIsCrusadeWarStarter = FALSE;
+	m_iLatestCrusadeDayOfWeek = -1;
+	m_iFinalShutdownCount = 0;
 	
 	return TRUE;
 }
@@ -831,18 +887,75 @@ void CGame::OnClientRead(int iClientH)
 
 void CGame::DisplayInfo(HDC hdc)
 {
- char cTxt[350], cTemp[30];  
- int  i, ix, iy, iLine;
+ char cTxt[350];
+ int  i, iLine;
 
 	// NT에서 에러남! 주의 
+#ifdef DEF_TAIWAN
+	wsprintf(cTxt, "ServerName(%s) Max.Level(%d) Lmt.WorldUser(%d) Players(%d/%d - %d/%d) SLSock(%d:%d) CruID(%d:%d)  GTSock(%d) RBT(%d)", m_cServerName, m_iPlayerMaxLevel, m_iWorldMaxUser, m_iTotalClients, m_iMaxClients, m_iTotalGameServerClients, m_iTotalGameServerMaxClients,  m_iSubLogSockActiveCount, m_iSubLogSockFailCount, m_dwCrusadeGUID, (int)m_bIsCrusadeMode, m_iGateSockConnRetryTimes, m_iAutoRebootingCount);
+	TextOut(hdc, 5, 10, cTxt, strlen(cTxt));
+#else
 	wsprintf(cTxt, "Server-Name(%s) Max.Level(%d) Players(%d/%d - %d/%d) Crusade(%d:%d) SLSock(%d:%d) GTSock(%d) RBT(%d)", m_cServerName, m_iPlayerMaxLevel, m_iTotalClients, m_iMaxClients, m_iTotalGameServerClients, m_iTotalGameServerMaxClients, m_dwCrusadeGUID, (int)m_bIsCrusadeMode, m_iSubLogSockActiveCount, m_iSubLogSockFailCount, m_iGateSockConnRetryTimes, m_iAutoRebootingCount);
 	TextOut(hdc, 5, 10, cTxt, strlen(cTxt));
+
+#endif
 
 #ifdef DEF_TESTSERVER
 	ZeroMemory(cTxt, sizeof(cTxt));
 	strcpy(cTxt, "********** TEST SERVER MODE **********");
 	TextOut(hdc, 5, 25, cTxt, strlen(cTxt));
 #endif
+
+#ifdef DEF_BALLEVENT
+	ZeroMemory(cTxt, sizeof(cTxt));
+	strcpy(cTxt, "********** BALL EVENT MODE ************");
+	TextOut(hdc, 5, 40, cTxt, strlen(cTxt));
+#endif
+	
+#ifdef DEF_TAIWAN
+	ZeroMemory(cTxt, sizeof(cTxt));
+	strcpy(cTxt, "********** TAIWAN SERVER MODE **********");
+	TextOut(hdc, 5, 25, cTxt, strlen(cTxt));
+#endif
+	
+#ifdef DEF_CHINESE
+	ZeroMemory(cTxt, sizeof(cTxt));
+	strcpy(cTxt, "********** CHINESE SERVER MODE **********");
+	TextOut(hdc, 5, 25, cTxt, strlen(cTxt));
+#endif	
+
+#ifdef DEF_INTERSERVER
+	ZeroMemory(cTxt, sizeof(cTxt));
+	strcpy(cTxt, "********** INTERSERVER SERVER MODE **********");
+	TextOut(hdc, 5, 25, cTxt, strlen(cTxt));
+#endif		
+
+#ifdef DEF_GUILDWARMODE
+	ZeroMemory(cTxt, sizeof(cTxt));
+	strcpy(cTxt, "********** GUILD WAR MODE **********");
+	TextOut(hdc, 300, 25, cTxt, strlen(cTxt));
+#endif
+
+#ifdef DEF_BEGINNEREVENTMODE
+	ZeroMemory(cTxt, sizeof(cTxt));
+	strcpy(cTxt, "********** BEGINNER EVENT MODE **********");
+	// TextOut(hdc, 300, 25, cTxt, strlen(cTxt)); // adamas(2002-10-28)
+	TextOut(hdc, 300, 40, cTxt, strlen(cTxt));
+#endif
+	
+#ifdef DEF_ITEMDROPRATINGUP
+	ZeroMemory(cTxt, sizeof(cTxt));
+	strcpy(cTxt, "********** ITEM EVENT MODE **********");
+	TextOut(hdc, 300, 40, cTxt, strlen(cTxt));
+#endif
+
+
+#ifdef DEF_DBGAMESERVER
+	ZeroMemory(cTxt, sizeof(cTxt));
+	strcpy(cTxt, "********** DB GAME SERVER MODE **********");
+	TextOut(hdc, 300, 25, cTxt, strlen(cTxt));
+#endif
+
 		
 	iLine = 0;
 	for (i = 0; i < DEF_MAXMAPS; i++)
@@ -862,8 +975,8 @@ void CGame::DisplayInfo(HDC hdc)
 
 void CGame::ClientMotionHandler(int iClientH, char * pData)
 {
+ DWORD * dwp, dwClientTime; // v2.171
  WORD * wp, wCommand, wTargetObjectID;
- DWORD * dwp, dwTime;
  short * sp, sX, sY, dX, dY, wType;
  char  * cp, cDir;
  int   iRet, iTemp;
@@ -905,6 +1018,11 @@ void CGame::ClientMotionHandler(int iClientH, char * pData)
 		wTargetObjectID = *wp;
 		cp += 2;
 	}
+
+	// v2.171
+	dwp = (DWORD *)cp;
+	dwClientTime = *dwp;
+	cp += 4;
 	
 	switch (wCommand) {
 	case DEF_OBJECTSTOP:
@@ -912,7 +1030,7 @@ void CGame::ClientMotionHandler(int iClientH, char * pData)
 		iRet = iClientMotion_Stop_Handler(iClientH, sX, sY, cDir);
 		if (iRet == 1) {
 			// 인접한 클라이언트들에게 방향전환 이벤트를 알린다. 
-			SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTSTOP, NULL, NULL, NULL);
+			SendEventToNearClient_TypeA((short) iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTSTOP, NULL, NULL, NULL);
 		}
 		else if (iRet == 2) SendObjectMotionRejectMsg(iClientH);
 		break;
@@ -922,26 +1040,30 @@ void CGame::ClientMotionHandler(int iClientH, char * pData)
 		iRet = iClientMotion_Move_Handler(iClientH, sX, sY, cDir, TRUE);
 		if (iRet == 1) {
 			// 인접한 클라이언트들에게 이동 이벤트를 알린다. 
-			SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTRUN, NULL, NULL, NULL);
+			SendEventToNearClient_TypeA((short)iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTRUN, NULL, NULL, NULL);
 		}
 		if ((m_pClientList[iClientH] != NULL) && (m_pClientList[iClientH]->m_iHP <= 0)) ClientKilledHandler(iClientH, NULL, NULL, 1); // v1.4
+		// v2.171
+		bCheckClientMoveFrequency(iClientH, dwClientTime);
 		break;
 
 	case DEF_OBJECTMOVE:
 		iRet = iClientMotion_Move_Handler(iClientH, sX, sY, cDir, FALSE);
 		if (iRet == 1) {
 			// 인접한 클라이언트들에게 이동 이벤트를 알린다. 
-			SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTMOVE, NULL, NULL, NULL);
+			SendEventToNearClient_TypeA((short)iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTMOVE, NULL, NULL, NULL);
 		}
 		if ((m_pClientList[iClientH] != NULL) && (m_pClientList[iClientH]->m_iHP <= 0)) ClientKilledHandler(iClientH, NULL, NULL, 1); // v1.4
+		// v2.171
+		bCheckClientMoveFrequency(iClientH, dwClientTime);
 		break;
 
 	case DEF_OBJECTDAMAGEMOVE:
 		iRet = iClientMotion_Move_Handler(iClientH, sX, sY, cDir, FALSE);
 		if (iRet == 1) {
 			// 인접한 클라이언트들에게 이동 이벤트를 알린다.                                                      
-			SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTDAMAGEMOVE, m_pClientList[iClientH]->m_iLastDamage, NULL, NULL);
-		}
+			SendEventToNearClient_TypeA((short)iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTDAMAGEMOVE, (short)m_pClientList[iClientH]->m_iLastDamage, NULL, NULL);
+		} 
 		if ((m_pClientList[iClientH] != NULL) && (m_pClientList[iClientH]->m_iHP <= 0)) ClientKilledHandler(iClientH, NULL, NULL, 1); // v1.4
 		break;
 
@@ -949,11 +1071,15 @@ void CGame::ClientMotionHandler(int iClientH, char * pData)
 		iRet = iClientMotion_Move_Handler(iClientH, sX, sY, cDir, FALSE);
 		if ((iRet == 1) && (m_pClientList[iClientH] != NULL)) {
 			// 인접한 클라이언트들에게 이동 이벤트를 알린다. 
-			SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTATTACKMOVE, NULL, NULL, NULL);
-			// 공격 효과를 계산
-			iClientMotion_Attack_Handler(iClientH, m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY, dX, dY, wType, cDir, wTargetObjectID, FALSE); // v1.4
+			SendEventToNearClient_TypeA((short)iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTATTACKMOVE, NULL, NULL, NULL);
+			// 공격 효과를 계산: 대쉬 공격임을 계산.
+			// v2.12 대쉬공격이므로 필살기 플래그 클리어
+			wType = 1;
+			iClientMotion_Attack_Handler(iClientH, m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY, dX, dY, wType, cDir, wTargetObjectID, FALSE, TRUE); // v1.4
 		}
 		if ((m_pClientList[iClientH] != NULL) && (m_pClientList[iClientH]->m_iHP <= 0)) ClientKilledHandler(iClientH, NULL, NULL, 1); // v1.4
+		// v2.171
+		bCheckClientAttackFrequency(iClientH, dwClientTime);
 		break;
 
 	case DEF_OBJECTATTACK:
@@ -968,15 +1094,17 @@ void CGame::ClientMotionHandler(int iClientH, char * pData)
 				if (m_pClientList[iClientH]->m_iSuperAttackLeft < 0) m_pClientList[iClientH]->m_iSuperAttackLeft = 0;
 			}
 
-			SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTATTACK, dX, dY, wType);
+			SendEventToNearClient_TypeA((short)iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTATTACK, dX, dY, wType);
 		}
 		else if (iRet == 2) SendObjectMotionRejectMsg(iClientH);
+		// v2.171
+		bCheckClientAttackFrequency(iClientH, dwClientTime);
 		break;
 
 	case DEF_OBJECTGETITEM:
 		iRet = iClientMotion_GetItem_Handler(iClientH, sX, sY, cDir);
 		if (iRet == 1) {
-			SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTGETITEM, NULL, NULL, NULL);
+			SendEventToNearClient_TypeA((short)iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTGETITEM, NULL, NULL, NULL);
 		}
 		else if (iRet == 2) SendObjectMotionRejectMsg(iClientH);
 		break;
@@ -987,7 +1115,7 @@ void CGame::ClientMotionHandler(int iClientH, char * pData)
 			// Casting한 마법 번호(dX)를 함께 보낸다.
 			// v1.41 Casting한 플레이어의 마법능력 수준을 함께 보낸다. 
 			iTemp = 10;
-			SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTMAGIC, dX, iTemp, NULL);
+			SendEventToNearClient_TypeA((short)iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTMAGIC, dX,(short) iTemp, NULL);
 		}
 		else if (iRet == 2) SendObjectMotionRejectMsg(iClientH);
 		break;
@@ -1016,6 +1144,7 @@ int CGame::iClientMotion_Move_Handler(int iClientH, short sX, short sY, char cDi
 	if ((sX != m_pClientList[iClientH]->m_sX) || (sY != m_pClientList[iClientH]->m_sY)) return 2;
 	
 	dwTime = timeGetTime();
+	m_pClientList[iClientH]->m_dwLastActionTime = dwTime;
 	
 #ifndef NO_MSGSPEEDCHECK
 	if (bIsRun == FALSE) {
@@ -1081,7 +1210,9 @@ int CGame::iClientMotion_Move_Handler(int iClientH, short sX, short sY, char cDi
 	case 8:	dX--; dY--;	break;
 	}
 
-	bRet = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->bGetMoveable(dX, dY, &sDOtype);
+	class CItem * pTopItem; // 2.172
+
+	bRet = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->bGetMoveable(dX, dY, &sDOtype, pTopItem); // v2.172
 	
 	// 이동 불능 상태라면
 	if (m_pClientList[iClientH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_HOLDOBJECT ] != 0)
@@ -1100,7 +1231,7 @@ int CGame::iClientMotion_Move_Handler(int iClientH, short sX, short sY, char cDi
 		m_pClientList[iClientH]->m_sY   = dY;
 		m_pClientList[iClientH]->m_cDir = cDir;
 		// 새 위치에 표시한다. 
-		m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->SetOwner(iClientH,
+		m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->SetOwner((short)iClientH,
 			                                                       DEF_OWNERTYPE_PLAYER,
 																   dX, dY);
 
@@ -1111,9 +1242,69 @@ int CGame::iClientMotion_Move_Handler(int iClientH, short sX, short sY, char cDi
 			}
 			else {
 				iDamage = iDice(2,4);
-				m_pClientList[iClientH]->m_iHP -= iDamage;
+				// v2.17 2002-8-2 운영자가 아니면 스파이크류에 에너지가 단다.
+				if (m_pClientList[iClientH]->m_iAdminUserLevel == 0 )
+					m_pClientList[iClientH]->m_iHP -= iDamage;
 			}
 		}
+
+		/*
+		// v2.172 
+		short sRemainItemSprite, sRemainItemSpriteFrame;
+		char cRemainItemColor;
+		// 지뢰 시약이 바닥에 깔린 경우 
+		switch (pTopItem->m_sIDnum) {
+		case 540: // 아레스덴 지뢰 시약 
+			if (m_pClientList[iClientH]->m_cSide == 2) {
+				// 지뢰 방지용 부츠 아이템 장착하고 있다면 
+				if ((m_pClientList[iClientH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_LEGGINGS] != -1) && 
+					(m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_LEGGINGS]] != NULL) && 
+					(m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_LEGGINGS]]->m_sItemEffectType == DEF_ITEMEFFECTTYPE_DEFENSE_ANTIMINE)) {
+
+				}
+				else {
+					// 지뢰 폭발! 대미지 입는다.
+					// 폭발 효과 전송 
+					SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_MAGIC, m_pClientList[iClientH]->m_cMapIndex,
+												m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY, m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY, (61+100), m_pClientList[iClientH]->m_sType);
+				}
+				
+				// 아이템 가져온다.
+				pTopItem = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->pGetItem(m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY, &sRemainItemSprite, &sRemainItemSpriteFrame, &cRemainItemColor);
+				// 아이템을 줍고난 후 남은 아이템을 다른 클라이언트에게 알린다. 
+				SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_SETITEM, m_pClientList[iClientH]->m_cMapIndex,
+											m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY,
+											sRemainItemSprite, sRemainItemSpriteFrame, cRemainItemColor);
+				delete pTopItem;
+			}
+			break;
+		case 541: // 엘바인 지뢰 시약 
+			if (m_pClientList[iClientH]->m_cSide == 1) {
+				// 지뢰 방지용 부츠 템 장착하고 있다면 
+				if ((m_pClientList[iClientH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_LEGGINGS] != -1) && 
+					(m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_LEGGINGS]] != NULL) && 
+					(m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_LEGGINGS]]->m_sItemEffectType == DEF_ITEMEFFECTTYPE_DEFENSE_ANTIMINE)) {
+
+				}
+				else {
+					// 지뢰 폭발! 대미지 입는다.
+					// 폭발 효과 전송 
+					SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_MAGIC, m_pClientList[iClientH]->m_cMapIndex,
+												m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY, m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY, (61+100), m_pClientList[iClientH]->m_sType);
+				}
+
+				// 아이템 가져온다.
+				pTopItem = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->pGetItem(m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY, &sRemainItemSprite, &sRemainItemSpriteFrame, &cRemainItemColor);
+				// 아이템을 줍고난 후 남은 아이템을 다른 클라이언트에게 알린다. 
+				SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_SETITEM, m_pClientList[iClientH]->m_cMapIndex,
+											m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY,
+											sRemainItemSprite, sRemainItemSpriteFrame, cRemainItemColor);
+				delete pTopItem;
+			}
+			break;
+		}
+		//
+		*/
 		
 		if (m_pClientList[iClientH]->m_iHP <= 0) m_pClientList[iClientH]->m_iHP = 0;
 		
@@ -1125,11 +1316,11 @@ int CGame::iClientMotion_Move_Handler(int iClientH, short sX, short sY, char cDi
 		cp = (char *)(cData + DEF_INDEX2_MSGTYPE+2);
 		
 		sp  = (short *)cp;
-		*sp = dX - 10; 
+		*sp = (short)(dX - 10); 
 		cp += 2;
 		
 		sp  = (short *)cp;
-		*sp = dY - 7; 
+		*sp = (short)(dY - 7); 
 		cp += 2;
 		
 		*cp = cDir;
@@ -1173,7 +1364,7 @@ int CGame::iClientMotion_Move_Handler(int iClientH, short sX, short sY, char cDi
 		*ip = m_pClientList[iClientH]->m_iHP;
 		cp += 4;
 		
-		iSize = iComposeMoveMapData(dX - 10, dY - 7, iClientH, cDir, cp);
+		iSize = iComposeMoveMapData((short)(dX - 10), (short)(dY - 7), iClientH, cDir, cp);
 		
 		iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, iSize + 12 + 1 + 4);
 		switch (iRet) {
@@ -1187,13 +1378,14 @@ int CGame::iClientMotion_Move_Handler(int iClientH, short sX, short sY, char cDi
 		}
 	}
 	else {
+		m_pClientList[iClientH]->m_bIsMoveBlocked = TRUE; // v2.171
 		// 이동이 불가능하다. 
 		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
 		*dwp = MSGID_RESPONSE_MOTION;
 		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
 		*wp  = DEF_OBJECTMOVE_REJECT;
 
-		wObjectID = iClientH;
+		wObjectID = (WORD) iClientH;
 
 		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
 
@@ -1238,8 +1430,8 @@ int CGame::iClientMotion_Move_Handler(int iClientH, short sX, short sY, char cDi
 		sTemp = m_pClientList[wObjectID]->m_sStatus;
 		sTemp = 0x0FFF & sTemp; // 상위 4비트 클리어
 		
-		sTemp = 0x0FFF & sTemp; // 상위 4비트 클리어
-		sTemp2 = (short)iGetPlayerABSStatus(wObjectID, iClientH); //(short)iGetPlayerRelationship(iClientH, pTile->m_sOwner);
+		// sTemp2 = (short)iGetPlayerABSStatus(wObjectID, iClientH); //(short)iGetPlayerRelationship(iClientH, pTile->m_sOwner);
+		sTemp2 = (short)iGetPlayerABSStatus(wObjectID, iClientH); // 2002-12-2
 		sTemp  = (sTemp | (sTemp2 << 12));
 		*sp = sTemp;
 		cp += 2;
@@ -1416,15 +1608,17 @@ void CGame::RequestInitPlayerHandler(int iClientH, char * pData, char cKey)
 	bSendMsgToLS(MSGID_REQUEST_PLAYERDATA, iClientH);
 }
 
-void CGame::RequestInitDataHandler(int iClientH, char * pData, char cKey)
+void CGame::RequestInitDataHandler(int iClientH, char * pData, char cKey, BOOL bIsNoNameCheck)
 {
  char  * pBuffer = NULL;
  short * sp;
  DWORD * dwp;
  WORD  * wp;
  char  * cp, cPlayerName[11], cTxt[120];
- int   * ip, i, iTotalItemA, iTotalItemB, iSize, iRet;
+ int   * ip, i, iTotalItemA, iTotalItemB, iSize, iRet, iMapSide, iTmpMapSide;
  SYSTEMTIME SysTime;
+ BOOL bFlag;
+ char cPrice;
 	
 	if (m_pClientList[iClientH] == NULL) return;
 
@@ -1432,20 +1626,22 @@ void CGame::RequestInitDataHandler(int iClientH, char * pData, char cKey)
 	ZeroMemory(pBuffer, DEF_MSGBUFFERSIZE+1);
 
 	// 최초 접속 데이터를 전송해 준다. 여기서 이름이 일치하는지 확인할 수도 있다.
-	cp = (char *)(pData + DEF_INDEX2_MSGTYPE + 2);
-	ZeroMemory(cPlayerName, sizeof(cPlayerName));
-	memcpy(cPlayerName, cp, 10);
+	if (bIsNoNameCheck == FALSE) {
+		cp = (char *)(pData + DEF_INDEX2_MSGTYPE + 2);
+		ZeroMemory(cPlayerName, sizeof(cPlayerName));
+		memcpy(cPlayerName, cp, 10);
 
-	ZeroMemory(cTxt, sizeof(cTxt)); // v1.4
-	memcpy(cTxt, cPlayerName, 10);
-	m_Misc.bDecode(cKey, cTxt);
-	ZeroMemory(cPlayerName, sizeof(cPlayerName));
-	memcpy(cPlayerName, cTxt, 10);
+		ZeroMemory(cTxt, sizeof(cTxt)); // v1.4
+		memcpy(cTxt, cPlayerName, 10);
+		m_Misc.bDecode(cKey, cTxt);
+		ZeroMemory(cPlayerName, sizeof(cPlayerName));
+		memcpy(cPlayerName, cTxt, 10);
 
-	// 이름이 일치하는지 검사한다. 일치하지 않으면 삭제하고 귀환한다. 
-	if (memcmp(m_pClientList[iClientH]->m_cCharName, cPlayerName, 10) != 0) {
-		DeleteClient(iClientH, FALSE, TRUE);
-		return;
+		// 이름이 일치하는지 검사한다. 일치하지 않으면 삭제하고 귀환한다. 
+		if ((memcmp(m_pClientList[iClientH]->m_cCharName, cPlayerName, 10) != 0)) {
+			DeleteClient(iClientH, FALSE, TRUE);
+			return;
+		}
 	}
 	
 	// 캐릭터의 신상정보를 전송한다.
@@ -1551,6 +1747,8 @@ void CGame::RequestInitDataHandler(int iClientH, char * pData, char cKey)
 	ip   = (int *)cp;
 	*ip  = m_pClientList[iClientH]->m_iFightzoneNumber;
 	cp  += 4;
+
+
 	
 	// 메시지 전송 
 	iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(pBuffer, 115);
@@ -1578,8 +1776,26 @@ void CGame::RequestInitDataHandler(int iClientH, char * pData, char cKey)
 	if (m_pClientList[iClientH]->m_pItemList[i] != NULL) 
 		iTotalItemA++;
 
-	cp = (char *)(pBuffer + DEF_INDEX2_MSGTYPE + 2);
+	// v2.05 아이템 리스트를 중간 공백이 없게 만든다.
+	bFlag = FALSE;
+	while (bFlag == FALSE) {
+		bFlag = TRUE;
+		for (i = 0; i < DEF_MAXITEMS-1; i++)
+		if ((m_pClientList[iClientH]->m_pItemList[i] == NULL) && (m_pClientList[iClientH]->m_pItemList[i+1] != NULL)) {
+			m_pClientList[iClientH]->m_pItemList[i] = m_pClientList[iClientH]->m_pItemList[i+1];
+			m_pClientList[iClientH]->m_pItemList[i+1] = NULL;
+			//아이템 위치도 변경 
+			m_pClientList[iClientH]->m_ItemPosList[i].x = m_pClientList[iClientH]->m_ItemPosList[i+1].x;
+			m_pClientList[iClientH]->m_ItemPosList[i].y = m_pClientList[iClientH]->m_ItemPosList[i+1].y;
+			bFlag = FALSE;
+		}
+	}
+
+	// 아이템 인덱스가 바뀌었으니 다시 계산.
+	m_pClientList[iClientH]->m_cArrowIndex = _iGetArrowItemIndex(iClientH);
+	CalcTotalItemEffect(iClientH, -1, FALSE);
 	
+	cp = (char *)(pBuffer + DEF_INDEX2_MSGTYPE + 2);
 	*cp = iTotalItemA;
 	cp++;
 	
@@ -1718,6 +1934,15 @@ void CGame::RequestInitDataHandler(int iClientH, char * pData, char cKey)
 		return;
 	}
 
+	//v2.19 2002-11-14 전면전 승리한쪽으 가격을 10프로 싸게 해준다.
+	if( TRUE == m_pClientList[iClientH]->m_bIsOnShop ) 
+	{
+		cPrice = 0;
+
+		if(m_iCrusadeWinnerSide == m_pClientList[iClientH]->m_cSide)
+			cPrice = -10;
+	}
+
 	// 맵데이터를 전송한다.
 	dwp  = (DWORD *)(pBuffer + DEF_INDEX4_MSGID);
 	*dwp = MSGID_RESPONSE_INITDATA;
@@ -1802,7 +2027,7 @@ void CGame::RequestInitDataHandler(int iClientH, char * pData, char cKey)
 	
 	// v1.41 여기서 관람자 모드라면 위치시키지 않는다. 
 	if (m_pClientList[iClientH]->m_bIsObserverMode == FALSE) {
-		m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->SetOwner(iClientH, 
+		m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->SetOwner((short)iClientH, 
 			                                                       DEF_OWNERTYPE_PLAYER, 
 																   m_pClientList[iClientH]->m_sX, 
 								  								   m_pClientList[iClientH]->m_sY);
@@ -1822,12 +2047,20 @@ void CGame::RequestInitDataHandler(int iClientH, char * pData, char cKey)
 	*ip = m_pClientList[iClientH]->m_iHP;
 	cp += 4;
 	
+	// 2002-11-14 물가 정보 추가
+#ifdef DEF_V219
+	*cp = cPrice;
+	cp += 1;
+#else 
+	*cp = 0;
+	cp += 1;
+#endif
 
 	// 맵의 정보를 추가한다. 
 	iSize = iComposeInitMapData(m_pClientList[iClientH]->m_sX - 10, m_pClientList[iClientH]->m_sY - 7, iClientH, cp );
 
 	// 메시지 전송 
-	iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(pBuffer, 46 + iSize +4 +4 +1 +4 +4); // v1.41
+	iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(pBuffer, 46 + iSize +4 +4 +1 +4 +4+1); // v1.41
 	switch (iRet) {
 	case DEF_XSOCKEVENT_QUENEFULL:
 	case DEF_XSOCKEVENT_SOCKETERROR:
@@ -1844,90 +2077,80 @@ void CGame::RequestInitDataHandler(int iClientH, char * pData, char cKey)
 	// 다른 클라이언트들에게 새 플레이어 접속을 알린다. 
 	SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_LOG, DEF_MSGTYPE_CONFIRM, NULL, NULL, NULL);
 
-	int iTL_;
+	// 2002-11-15 클라이언트의 Side, OnTown, OnShop 정보를 설정한다.
+	iSetSide(iClientH);
+
+	// v2.20 2002-12-31 민간인 모드 레벨 제한 과 이동지역 제한 추가 
+	// 기존의 레벨이 높은 캐릭터가 민간인 모드로 설정 되어 있으면 
+	if ((m_pClientList[iClientH]->m_iLevel > DEF_LIMITHUNTERLEVEL) && (m_pClientList[iClientH]->m_bIsHunter == TRUE ) ) 
+		SetNoHunterMode(iClientH) ;
+
+	m_pClientList[iClientH]->m_bIsWarLocation = FALSE;	
+	// v1.42
+	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 0;
 
 	// 플레이어가 다른 맵에 들어갔다. 만약 적국이라면 시간을 설정한다.
-	if ( (memcmp(m_pClientList[iClientH]->m_cLocation, "aresden", 7) == 0) && 
-		 (memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "elvine", 6) == 0) ) {
+	// v2.13 운영자는 강콜되지 않는다.
+	// 아레스덴이면 
+	if (( DEF_ARESDEN == m_pClientList[iClientH]->m_cSide ) && 
+		 (memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "elvine", 6) == 0)
+		 && (m_pClientList[iClientH]->m_iAdminUserLevel == 0) ) {
 		
 		m_pClientList[iClientH]->m_dwWarBeginTime = timeGetTime();
 		m_pClientList[iClientH]->m_bIsWarLocation = TRUE;
-		// v1.42
-		if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall == 0) {
-			// 남아있을 수 있는 잔존 시간을 설정해 준다. 
-			// 시간을 구한다음 iWarPeriod를 구한다.
-			GetLocalTime(&SysTime);
-			switch (SysTime.wDayOfWeek) {
-			case 1:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;  //월요일 2분
-			case 2:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;  //화요일 2분
-			case 3:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;  //수요일 2분
-			case 4:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;  //목요일 2분
-			case 5:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*10 +100; break; //금요일 15분
-			case 6:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*30 +300; break; //토요일 45분 
-			case 0:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*60; break; //일요일 60분
-			}
-		}
-		else {
-			// 잔존시간이 있다. 요일별 잔존시간보다 크면 1로 초기화 
-			GetLocalTime(&SysTime);
-			switch (SysTime.wDayOfWeek) {
-			case 1:	iTL_ = 40; break;   //월요일 30초
-			case 2:	iTL_ = 40; break;   //화요일 30초
-			case 3:	iTL_ = 40; break;   //수요일 30초
-			case 4:	iTL_ = 40; break;   //목요일 30초
-			case 5:	iTL_ = 20*10+100; break; //금요일 10분
-			case 6:	iTL_ = 20*30+300; break; //토요일 30분 
-			case 0:	iTL_ = 20*60; break; //일요일 60분
-			}
-			
-			if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall > iTL_) 
-				m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 1;
-		}
+		// v2.17 2002-7-15 강콜 시간을 조절 할 수 있게 수정한다.
+		SetForceRecallTime(iClientH) ;
 	}
-	else
-	if ( (memcmp(m_pClientList[iClientH]->m_cLocation, "elvine", 6) == 0) && 
-		 (memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "aresden", 7) == 0) ) {
+	// v2.13 운영자는 강콜되지 않는다. 
+	else if (( DEF_ELVINE == m_pClientList[iClientH]->m_cSide) && 
+		 (memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "aresden", 7) == 0)
+		 && (m_pClientList[iClientH]->m_iAdminUserLevel == 0)) {
 		
 		m_pClientList[iClientH]->m_dwWarBeginTime = timeGetTime();
 		m_pClientList[iClientH]->m_bIsWarLocation = TRUE;
 
-		// v1.42
-		if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall == 0) {
-			// 남아있을 수 있는 잔존 시간을 설정해 준다. 
-			// 시간을 구한다음 iWarPeriod를 구한다.
-			GetLocalTime(&SysTime);
-			switch (SysTime.wDayOfWeek) {
-			case 1:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;   //월요일 30초
-			case 2:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;   //화요일 30초
-			case 3:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;   //수요일 30초
-			case 4:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;   //목요일 30초
-			case 5:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*10 +100; break; //금요일 10분
-			case 6:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*30 +300; break; //토요일 30분 
-			case 0:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*60; break; //일요일 60분
-			}
-		}
-		else {
-			// 잔존시간이 있다. 요일별 잔존시간보다 크면 1로 초기화 
-			GetLocalTime(&SysTime);
-			switch (SysTime.wDayOfWeek) {
-			case 1:	iTL_ = 40; break;   //월요일 30초
-			case 2:	iTL_ = 40; break;   //화요일 30초
-			case 3:	iTL_ = 40; break;   //수요일 30초
-			case 4:	iTL_ = 40; break;   //목요일 30초
-			case 5:	iTL_ = 20*10 +100; break; //금요일 10분
-			case 6:	iTL_ = 20*30 +300; break; //토요일 30분 
-			case 0:	iTL_ = 20*60; break; //일요일 60분
-			}
-			
-			if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall > iTL_) 
-				m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 1;
+		// v2.17 2002-7-15 강콜 시간을 조절 할 수 있게 수정한다.
+		SetForceRecallTime(iClientH) ;
+	// v2.15 전면전시 중립이 마을로 들어가면 바로 강콜 
+	} else if (( DEF_NETURAL == m_pClientList[iClientH]->m_cSide) && 
+		(m_bIsCrusadeMode == TRUE) && ((strcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, "elvine") == 0) 
+		|| (strcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, "aresden") == 0))
+		&& (m_pClientList[iClientH]->m_iAdminUserLevel == 0)) {
+		m_pClientList[iClientH]->m_dwWarBeginTime = timeGetTime();
+		m_pClientList[iClientH]->m_bIsWarLocation = TRUE;
+		m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 1 ; 
+	}
+
+	// v2.181 2002-10-24
+	// 적 농경지나 건물에 들어가면 강콜 된다. 
+	iMapSide = iGetMapLocationSide(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName);
+
+	if (iMapSide >= 3) iTmpMapSide = iMapSide - 2 ;
+		else iTmpMapSide = iMapSide ;
+
+	m_pClientList[iClientH]->m_bIsInBuilding = FALSE ;
+	// 적마을이면 
+	if  ((m_pClientList[iClientH]->m_cSide != iTmpMapSide) && (iMapSide != 0) ) {
+
+		// 건물 안이면 
+		if ( (iMapSide <= 2) && (m_pClientList[iClientH]->m_iAdminUserLevel < 1)
+			&& (m_pClientList[iClientH]->m_cSide != DEF_NETURAL) )
+		{
+			m_pClientList[iClientH]->m_dwWarBeginTime = timeGetTime();
+			m_pClientList[iClientH]->m_bIsWarLocation = TRUE;
+			m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 1 ;
+			m_pClientList[iClientH]->m_bIsInBuilding = TRUE ;
 		}
 	}
 
 	// 다른 서버에 있는 사투장으로 입장하는 경우 
 	// v1.4311-3 추가 사투장에 입장하면 강콜타임을 시작한다.
+	// v2.13 운영자는 강콜되지 않는다. 
+	// v2.17 길드전 모드에서는 사투장에서 강콜되지 않는다.
+#ifndef DEF_GUILDWARMODE
 	else if ((m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_bIsFightZone == TRUE) &&
-		     (m_iFightzoneNoForceRecall == 0)) {  // 운영자가 강콜모드를 설정하지 않는경우에만 강콜타임이 설정된다.
+		     (m_iFightzoneNoForceRecall == 0) && (m_pClientList[iClientH]->m_iAdminUserLevel == 0)) { 
+		// 운영자가 강콜모드를 설정하지 않는경우에만 강콜타임이 설정된다.
 				
 		m_pClientList[iClientH]->m_dwWarBeginTime = timeGetTime();
 		m_pClientList[iClientH]->m_bIsWarLocation = TRUE;
@@ -1937,11 +2160,29 @@ void CGame::RequestInitDataHandler(int iClientH, char * pData, char cKey)
 		// 서버간의 시간 차이를 고려하여 여유시간 2분 있다. 즉 2시간 되기 2분전부터 리콜된다.
 		GetLocalTime(&SysTime);
 		m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 2*60*20 - ((SysTime.wHour%2)*20*60 + SysTime.wMinute*20) - 2*20; 
-		
-	} else {
-		m_pClientList[iClientH]->m_bIsWarLocation = FALSE;	
-		// v1.42
-		m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 0;
+	}
+#endif 	
+	else if (((memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "arejail", 7) == 0) || 
+		   (memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "elvjail", 7) == 0))
+		      && (m_pClientList[iClientH]->m_iAdminUserLevel == 0)) { 
+		m_pClientList[iClientH]->m_bIsWarLocation = TRUE;
+		m_pClientList[iClientH]->m_dwWarBeginTime = timeGetTime();
+
+		// v2.17 2002-7-15 
+		if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall == 0) {
+			m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*5 ; 
+		 // 강콜시간이 5분 보다 길면 
+		} else if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall > 20*5) {
+			m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*5 ;  // 5분
+		}
+	}
+
+
+	// v2.17 2002-7-15 강콜 시간을 사용자에게 보여준다.
+	if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall > 0) {
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_FORCERECALLTIME,  m_pClientList[iClientH]->m_iTimeLeft_ForceRecall , NULL, NULL, NULL);
+		wsprintf(G_cTxt,"(!) Game Server Force Recall Time  %d (%d)min", m_pClientList[iClientH]->m_iTimeLeft_ForceRecall, m_pClientList[iClientH]->m_iTimeLeft_ForceRecall/20) ;
+		PutLogList(G_cTxt) ;
 	}
 
 	// 추가로 보내줘야 할 정보를 보낸다. v1.1
@@ -1995,13 +2236,17 @@ void CGame::RequestInitDataHandler(int iClientH, char * pData, char cKey)
 	}
 
 	// v1.42
-	if (memcmp(m_pClientList[iClientH]->m_cMapName, "fightzone", 9) == 0) {
+	// 2002-7-4 사투장의 갯수를 늘릴 수 있도록 
+	if (memcmp(m_pClientList[iClientH]->m_cMapName, "fight", 5) == 0) {
 		wsprintf(G_cTxt, "Char(%s)-Enter(%s) Observer(%d)", m_pClientList[iClientH]->m_cCharName, m_pClientList[iClientH]->m_cMapName, m_pClientList[iClientH]->m_bIsObserverMode);
 		PutLogEventFileList(G_cTxt);
 	}
 
 	// Crusade
 	SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CONSTRUCTIONPOINT, m_pClientList[iClientH]->m_iConstructionPoint, m_pClientList[iClientH]->m_iWarContribution, 1, NULL);
+
+	// v2.15
+	SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_GIZONITEMUPGRADELEFT, m_pClientList[iClientH]->m_iGizonItemUpgradeLeft, NULL, NULL, NULL);
 }
 
 int CGame::iComposeInitMapData(short sX, short sY, int iClientH, char * pData)
@@ -2037,10 +2282,10 @@ int CGame::iComposeInitMapData(short sX, short sY, int iClientH, char * pData)
 			iTileExists++;
 			// 위치정보 입력 
 			sp = (short *)cp;
-			*sp = ix;
+			*sp = (short)ix;
 			cp += 2;
 			sp = (short *)cp;
-			*sp = iy;
+			*sp = (short)iy;
 			cp += 2;
 			iSize += 4;
 
@@ -2131,7 +2376,8 @@ int CGame::iComposeInitMapData(short sX, short sY, int iClientH, char * pData)
 					// sStatus의 상위 4비트가 FOE 관계를 나타낸다. 
 					sTemp = m_pClientList[pTile->m_sOwner]->m_sStatus;
 					sTemp = 0x0FFF & sTemp; // 상위 4비트 클리어
-					sTemp2 = (short)iGetPlayerABSStatus(pTile->m_sOwner, iClientH); //(short)iGetPlayerRelationship(iClientH, pTile->m_sOwner);
+					//sTemp2 = (short)iGetPlayerABSStatus(pTile->m_sOwner); // 2002-11-14
+					sTemp2 = (short)iGetPlayerABSStatus(pTile->m_sOwner, iClientH);
 					sTemp  = (sTemp | (sTemp2 << 12));
 					*sp = sTemp;
 					cp += 2;
@@ -2230,7 +2476,8 @@ int CGame::iComposeInitMapData(short sX, short sY, int iClientH, char * pData)
 					// sStatus의 상위 4비트가 FOE 관계를 나타낸다. 
 					sTemp = m_pClientList[pTile->m_sDeadOwner]->m_sStatus;
 					sTemp = 0x0FFF & sTemp; // 상위 4비트 클리어
-					sTemp2 = (short)iGetPlayerABSStatus(pTile->m_sDeadOwner, iClientH); //(short)iGetPlayerRelationship(iClientH, pTile->m_sDeadOwner);
+					//sTemp2 = (short)iGetPlayerABSStatus(pTile->m_sDeadOwner); // 2002-11-14
+					sTemp2 = (short)iGetPlayerABSStatus(pTile->m_sDeadOwner, iClientH); 
 					sTemp  = (sTemp | (sTemp2 << 12));
 					*sp = sTemp;
 					cp += 2;
@@ -2324,6 +2571,9 @@ int CGame::iComposeInitMapData(short sX, short sY, int iClientH, char * pData)
 void CGame::DeleteClient(int iClientH, BOOL bSave, BOOL bNotify, BOOL bCountLogout, BOOL bForceCloseConn)
 {
  int i, iExH;
+ char * cp, cData[120], cTmpMap[30];
+ DWORD * dwp;
+ WORD * wp;
 
 	if (m_pClientList[iClientH] == NULL) return;
 	
@@ -2334,7 +2584,8 @@ void CGame::DeleteClient(int iClientH, BOOL bSave, BOOL bNotify, BOOL bCountLogo
 		// 게임상에 있어야만 처리가 가능한 부분.
 		
 		// v1.42
-		if (memcmp(m_pClientList[iClientH]->m_cMapName, "fightzone", 9) == 0) {
+		// 2002-7-4 사투장의 갯수를 늘릴 수 있도록 
+		if (memcmp(m_pClientList[iClientH]->m_cMapName, "fight", 5) == 0) {
 			wsprintf(G_cTxt, "Char(%s)-Exit(%s)", m_pClientList[iClientH]->m_cCharName, m_pClientList[iClientH]->m_cMapName);
 			PutLogEventFileList(G_cTxt);
 		}
@@ -2357,12 +2608,24 @@ void CGame::DeleteClient(int iClientH, BOOL bSave, BOOL bNotify, BOOL bCountLogo
 		RemoveFromTarget(iClientH, DEF_OWNERTYPE_PLAYER);
 		
 		// 귓속말 모드가 설정된 다른 플레이어들을 지운다. 
+		// v2.13 성후니 수정 같은 서버인 경우 귓속말 상태 해제되었음을 알려준다.
+
 		for (i = 1; i < DEF_MAXCLIENTS; i++) 
 		if ((m_pClientList[i] != NULL) && (m_pClientList[i]->m_iWhisperPlayerIndex	== iClientH)) {
 			m_pClientList[i]->m_iWhisperPlayerIndex = -1;
 			// 귓속말 상태가 해제되었음을 통보. 
 			SendNotifyMsg(NULL, i, DEF_NOTIFY_WHISPERMODEOFF, NULL, NULL, NULL, m_pClientList[iClientH]->m_cCharName);
 		}
+		
+		
+		// v2.12 다른 서버들에게 플레이어가 나갔음을 알려준다. 귓속말 플래그를 클리어할 것이다.
+		ZeroMemory(cData, sizeof(cData));
+		cp = (char *)cData;
+		*cp = GSM_DISCONNECT;
+		cp++;
+		memcpy(cp, m_pClientList[iClientH]->m_cCharName, 10);
+		cp += 10;
+		bStockMsgToGateServer(cData, 11);
 			
 		// 맵에서 지운다.
 		m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->ClearOwner(2, iClientH, DEF_OWNERTYPE_PLAYER,
@@ -2382,31 +2645,61 @@ void CGame::DeleteClient(int iClientH, BOOL bSave, BOOL bNotify, BOOL bCountLogo
 			m_pClientList[iClientH]->m_sX = -1;
 			m_pClientList[iClientH]->m_sY = -1;
 			
+			strcpy(cTmpMap,m_pClientList[iClientH]->m_cMapName) ;
+
 			ZeroMemory(m_pClientList[iClientH]->m_cMapName, sizeof(m_pClientList[iClientH]->m_cMapName));
 			
-			if (m_pClientList[iClientH]->m_cSide == 0) {
+			if (m_pClientList[iClientH]->m_cSide == DEF_NETURAL) {
 				// 여행자라면  default맵으로 간다.
 				strcpy(m_pClientList[iClientH]->m_cMapName, "default");
 			}
 			else {
 				// 소속이 있다면 소속 마을의 부활존으로 간다.
-				if (memcmp(m_pClientList[iClientH]->m_cLocation, "aresden", 7) == 0) {
+
+				if( m_pClientList[iClientH]->m_cSide == DEF_ARESDEN  ) {
 					if (m_bIsCrusadeMode == TRUE) {
 						// 크루세이드 모드에서 사망한 경우: 마을 맵에서 일정시간 나갈 수 없다.
-						ZeroMemory(m_pClientList[iClientH]->m_cLockedMapName, sizeof(m_pClientList[iClientH]->m_cLockedMapName));
-						strcpy(m_pClientList[iClientH]->m_cLockedMapName, "aresden");
-						m_pClientList[iClientH]->m_iLockedMapTime = 60*5;
+						if (m_pClientList[iClientH]->m_iDeadPenaltyTime > 0) {
+							ZeroMemory(m_pClientList[iClientH]->m_cLockedMapName, sizeof(m_pClientList[iClientH]->m_cLockedMapName));
+							strcpy(m_pClientList[iClientH]->m_cLockedMapName, "aresden");
+							m_pClientList[iClientH]->m_iLockedMapTime = 60*5;
+							m_pClientList[iClientH]->m_iDeadPenaltyTime = 60*10; // v2.04 10분 안에 또 죽으면 마을에 갖힌다.
+						}
+						else {
+							m_pClientList[iClientH]->m_iDeadPenaltyTime = 60*10; // v2.04 10분 안에 또 죽으면 마을에 갖힌다.
+						}
 					}
-					memcpy(m_pClientList[iClientH]->m_cMapName, "resurr1", 7);
+					// v2.16 2002-5-31
+					if (strcmp(cTmpMap, "elvine") == 0){
+						strcpy(m_pClientList[iClientH]->m_cLockedMapName, "elvjail");
+						m_pClientList[iClientH]->m_iLockedMapTime = 60*3 ; // 3분 
+						memcpy(m_pClientList[iClientH]->m_cMapName, "elvjail", 7);
+					}else if (m_pClientList[iClientH]->m_iLevel > 80)
+						 memcpy(m_pClientList[iClientH]->m_cMapName, "resurr1", 7);
+					else memcpy(m_pClientList[iClientH]->m_cMapName, "arefarm", 7);
 				}
 				else {
 					if (m_bIsCrusadeMode == TRUE) {
 						// 크루세이드 모드에서 사망한 경우: 마을 맵에서 일정시간 나갈 수 없다.
-						ZeroMemory(m_pClientList[iClientH]->m_cLockedMapName, sizeof(m_pClientList[iClientH]->m_cLockedMapName));
-						strcpy(m_pClientList[iClientH]->m_cLockedMapName, "elvine");
-						m_pClientList[iClientH]->m_iLockedMapTime = 60*5;
+						if (m_pClientList[iClientH]->m_iDeadPenaltyTime > 0) {
+							ZeroMemory(m_pClientList[iClientH]->m_cLockedMapName, sizeof(m_pClientList[iClientH]->m_cLockedMapName));
+							strcpy(m_pClientList[iClientH]->m_cLockedMapName, "elvine");
+							m_pClientList[iClientH]->m_iLockedMapTime = 60*5;
+							m_pClientList[iClientH]->m_iDeadPenaltyTime = 60*10; // v2.04 10분 안에 또 죽으면 마을에 갖힌다.
+						}
+						else {
+							m_pClientList[iClientH]->m_iDeadPenaltyTime = 60*10; // v2.04 10분 안에 또 죽으면 마을에 갖힌다.
+						}
 					}
-					memcpy(m_pClientList[iClientH]->m_cMapName, "resurr2", 7);
+					// v2.16 2002-5-31
+					if (strcmp(cTmpMap, "aresden") == 0){
+						strcpy(m_pClientList[iClientH]->m_cLockedMapName, "arejail");
+						m_pClientList[iClientH]->m_iLockedMapTime = 60*3 ; // 3분 
+						memcpy(m_pClientList[iClientH]->m_cMapName, "arejail", 7);
+
+					}else if (m_pClientList[iClientH]->m_iLevel > 80)
+						 memcpy(m_pClientList[iClientH]->m_cMapName, "resurr2", 7);
+					else memcpy(m_pClientList[iClientH]->m_cMapName, "elvfarm", 7);
 				}
 			}
 		}
@@ -2420,7 +2713,8 @@ void CGame::DeleteClient(int iClientH, BOOL bSave, BOOL bNotify, BOOL bCountLogo
 			// 곧바로 못나오게 한다.
 			ZeroMemory(m_pClientList[iClientH]->m_cLockedMapName, sizeof(m_pClientList[iClientH]->m_cLockedMapName));
 			strcpy(m_pClientList[iClientH]->m_cLockedMapName, "bisle");
-			m_pClientList[iClientH]->m_iLockedMapTime = 60*60;
+			// v2.15 10분 동안 접속 금지로 변경 
+			m_pClientList[iClientH]->m_iLockedMapTime = 10*60;
 		}
 		
 		// v1.41 만약 관람자 모드였다면 접속 종료시 생사와 관계없이 소속 마을로 보낸다. 
@@ -2439,14 +2733,20 @@ void CGame::DeleteClient(int iClientH, BOOL bSave, BOOL bNotify, BOOL bCountLogo
 			}
 			else {
 				// 소속이 있다면 소속 마을로 간다.
-				memcpy(m_pClientList[iClientH]->m_cMapName, m_pClientList[iClientH]->m_cLocation, 10);
+				if( m_pClientList[iClientH]->m_cSide == DEF_ARESDEN )
+					memcpy(m_pClientList[iClientH]->m_cMapName, "aresden", 10);
+				else
+					memcpy(m_pClientList[iClientH]->m_cMapName, "elvine", 10);
+
+				// memcpy(m_pClientList[iClientH]->m_cMapName, m_pClientList[iClientH]->m_cLocation, 10);
 			}
 			m_pClientList[iClientH]->m_sX = -1;
 			m_pClientList[iClientH]->m_sY = -1;
 		}
 
 		//v1.42 경기장에 있었다면 접속 종료시 소속 마을로 간다. 
-		if (memcmp(m_pClientList[iClientH]->m_cMapName, "fightzone", 9) == 0) {
+		// 2002-7-4 사투장의 갯수를 늘릴 수 있도록 
+		if (memcmp(m_pClientList[iClientH]->m_cMapName, "fight", 5) == 0) {
 			ZeroMemory(m_pClientList[iClientH]->m_cMapName, sizeof(m_pClientList[iClientH]->m_cMapName));
 			if (m_pClientList[iClientH]->m_cSide == 0) {
 				// 여행자라면 랜덤하게 아무 마을로나 간다.
@@ -2461,13 +2761,41 @@ void CGame::DeleteClient(int iClientH, BOOL bSave, BOOL bNotify, BOOL bCountLogo
 			}
 			else {
 				// 소속이 있다면 소속 마을로 간다.
-				memcpy(m_pClientList[iClientH]->m_cMapName, m_pClientList[iClientH]->m_cLocation, 10);
+				if( m_pClientList[iClientH]->m_cSide == DEF_ARESDEN )
+					memcpy(m_pClientList[iClientH]->m_cMapName, "aresden", 10);
+				else
+					memcpy(m_pClientList[iClientH]->m_cMapName, "elvine", 10);
+
+				// memcpy(m_pClientList[iClientH]->m_cMapName, m_pClientList[iClientH]->m_cLocation, 10);
 			}
 			m_pClientList[iClientH]->m_sX = -1;
 			m_pClientList[iClientH]->m_sY = -1;
 		}
 		
 		if (m_pClientList[iClientH]->m_bIsInitComplete == TRUE) {
+			
+			// v2.06 12-3 서버간 이동이 아닌 로그아웃이라면 파티 정보를 클리어한다.
+			// v2.06 12-3 게이트 서버에 파티 정보 클리어 요청
+			if (m_pClientList[iClientH]->m_iPartyID != NULL) {
+				ZeroMemory(cData, sizeof(cData));
+				cp = (char *)cData;
+				dwp = (DWORD *)cp;
+				*dwp = MSGID_PARTYOPERATION;
+				cp += 4;
+				wp = (WORD*)cp;
+				*wp = 4; // 멤버 제거 요청
+				cp += 2;
+				wp = (WORD *)cp;
+				*wp = iClientH;
+				cp += 2;
+				memcpy(cp, m_pClientList[iClientH]->m_cCharName, 10);
+				cp += 10;
+				wp = (WORD *)cp;
+				*wp = m_pClientList[iClientH]->m_iPartyID;
+				cp += 2;
+				SendMsgToGateServer(MSGID_PARTYOPERATION, iClientH, cData);
+			}
+
 			// v1.41 메시지를 보낼 수 있는 sub-log-socket이 남아있는 한 모두 보낸다. 
 			if (bSendMsgToLS(MSGID_REQUEST_SAVEPLAYERDATALOGOUT, iClientH, bCountLogout) == FALSE) LocalSavePlayerData(iClientH);
 		}
@@ -2475,10 +2803,80 @@ void CGame::DeleteClient(int iClientH, BOOL bSave, BOOL bNotify, BOOL bCountLogo
 	}
 	else {
 		// 저장하지 않고 종료 / 서버 이동중 / 혹은 둘다 
-		if (m_pClientList[iClientH]->m_bIsOnServerChange == FALSE)
+		if (m_pClientList[iClientH]->m_bIsOnServerChange == FALSE) {
+			// 저장하지 않고 종료해도 파티 상태는 클리어 
+			if (m_pClientList[iClientH]->m_iPartyID != NULL) {
+				ZeroMemory(cData, sizeof(cData));
+				cp = (char *)cData;
+				dwp = (DWORD *)cp;
+				*dwp = MSGID_PARTYOPERATION;
+				cp += 4;
+				wp = (WORD*)cp;
+				*wp = 4; // 멤버 제거 요청
+				cp += 2;
+				wp = (WORD *)cp;
+				*wp = iClientH;
+				cp += 2;
+				memcpy(cp, m_pClientList[iClientH]->m_cCharName, 10);
+				cp += 10;
+				wp = (WORD *)cp;
+				*wp = m_pClientList[iClientH]->m_iPartyID;
+				cp += 2;
+				SendMsgToGateServer(MSGID_PARTYOPERATION, iClientH, cData);
+			}
+
 			bSendMsgToLS(MSGID_REQUEST_NOSAVELOGOUT, iClientH, bCountLogout);
-		else bSendMsgToLS(MSGID_REQUEST_SETACCOUNTWAITSTATUS, iClientH, FALSE); // 텔레포트 등에 의한 이동이므로 WLS에 통보 
+		}
+		else {
+			// 텔레포트 등에 의한 이동이므로 WLS에 통보 
+			if (m_pClientList[iClientH]->m_iPartyID != NULL) {
+				ZeroMemory(cData, sizeof(cData));
+				cp = (char *)cData;
+				dwp = (DWORD *)cp;
+				*dwp = MSGID_PARTYOPERATION;
+				cp += 4;
+				wp = (WORD*)cp;
+				*wp = 7; // 멤버 서버 이동 상태 전환
+				cp += 2;
+				wp = (WORD *)cp;
+				*wp = NULL; // 다른 서버에서 접속하므로 클라이언트 번호는 무시
+				cp += 2;
+				memcpy(cp, m_pClientList[iClientH]->m_cCharName, 10);
+				cp += 10;
+				wp = (WORD *)cp;
+				*wp = m_pClientList[iClientH]->m_iPartyID;
+				cp += 2;
+				SendMsgToGateServer(MSGID_PARTYOPERATION, iClientH, cData);
+			}
+
+			bSendMsgToLS(MSGID_REQUEST_SETACCOUNTWAITSTATUS, iClientH, FALSE); 
+		}
 	}
+
+	if (m_pClientList[iClientH]->m_iPartyID != NULL) {
+		// 게임 서버의 파티 리스트에서 등록해제.
+		for (i = 0; i < DEF_MAXPARTYMEMBERS; i++)
+		if (m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i] == iClientH) {
+			m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i] = 0;
+			m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers--;
+			//testcode
+			wsprintf(G_cTxt, "PartyID:%d member:%d Out(Delete) Total:%d", m_pClientList[iClientH]->m_iPartyID, iClientH, m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers);
+			PutLogList(G_cTxt);
+			goto DC_LOOPBREAK1;
+		}
+DC_LOOPBREAK1:;
+		// 리스트 인덱스의 빈공간을 제거한다.
+		for (i = 0; i < DEF_MAXPARTYMEMBERS-1; i++)
+		if ((m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i] == 0) && (m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i+1] != 0)) {
+			m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i]   = m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i+1];
+			m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i+1] = 0;
+		}
+	}
+
+
+	// v2.15 관리프로그램은 접속 인원수에 속하지 않는다. 2002-5-6
+	if (m_pClientList[iClientH]->m_bIsManager != TRUE)
+		m_iTotalClients--;
 
 	// 클라이언트 객체를 삭제한다.
 	delete m_pClientList[iClientH];
@@ -2486,10 +2884,9 @@ void CGame::DeleteClient(int iClientH, BOOL bSave, BOOL bNotify, BOOL bCountLogo
 	
 	// 클라이언트 인덱스 리스트에서 삭제
 	RemoveClientShortCut(iClientH);
-
-	m_iTotalClients--;
 }
 
+// 2002-12-11 중국 관련 해킹 방지 루틴 추가 
 void CGame::SendEventToNearClient_TypeA(short sOwnerH, char cOwnerType, DWORD dwMsgID, WORD wMsgType, short sV1, short sV2, short sV3)
 {
  int * ip, i, iRet, iShortCutIndex;
@@ -2498,11 +2895,13 @@ void CGame::SendEventToNearClient_TypeA(short sOwnerH, char cOwnerType, DWORD dw
  WORD  * wp;
  short * sp, sRange, sX, sY, * spStatus, sTemp, sDumm, sTemp2;
  BOOL    bOwnerSend, bFlag;
+ char  cKey ;
 
 	ZeroMemory(cData_All, sizeof(cData_All));
 	ZeroMemory(cData_Srt, sizeof(cData_Srt));
 	ZeroMemory(cData_Srt_Av, sizeof(cData_Srt_Av));
 	spStatus = (short *)&sDumm;
+	cKey = (char)(rand() % 255) +1; // v1.4
 
 	// 메시지 헤더 작성 
 	// All-Data
@@ -2658,7 +3057,8 @@ void CGame::SendEventToNearClient_TypeA(short sOwnerH, char cOwnerType, DWORD dw
 				// sStatus의 상위 4비트가 FOE 관계를 나타낸다. 
 				sTemp = *spStatus;
 				sTemp = 0x0FFF & sTemp; // 상위 4비트 클리어
-				sTemp2 = (short)iGetPlayerABSStatus(sOwnerH, i); //(short)iGetPlayerRelationship_SendEvent(sOwnerH, i);
+				//sTemp2 = (short)iGetPlayerABSStatus(sOwnerH); // 2002-11-14
+				sTemp2 = (short)iGetPlayerABSStatus(sOwnerH, i);
 				sTemp  = (sTemp | (sTemp2 << 12));
 				*spStatus = sTemp;
 				//
@@ -2675,10 +3075,10 @@ void CGame::SendEventToNearClient_TypeA(short sOwnerH, char cOwnerType, DWORD dw
 					case DEF_OBJECTNULLACTION:
 						// 이 메시지는 위치에 상관없이 모든 데이터를 보내야 한다. 
 						if (bOwnerSend == TRUE) 
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 41); // v1.4 :36
+							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 41,cKey); // v1.4 :36
 						else {
 							if (i != sOwnerH)
-								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 41); // v1.4 :36
+								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 41,cKey); // v1.4 :36
 						}
 						break;
 					
@@ -2687,19 +3087,19 @@ void CGame::SendEventToNearClient_TypeA(short sOwnerH, char cOwnerType, DWORD dw
 					case DEF_OBJECTDAMAGEMOVE:
 					//case DEF_OBJECTDYING:
 						if (bOwnerSend == TRUE) 
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 11);
+							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 11,cKey); 
 						else {
 							if (i != sOwnerH)
-								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 11);
+								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 11,cKey); 
 						}
 						break;
 
 					case DEF_OBJECTDYING:
 						if (bOwnerSend == TRUE) 
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 15);
+							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 15,cKey); 
 						else {
 							if (i != sOwnerH)
-								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 15);
+								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 15,cKey); 
 						}
 						break;
 
@@ -2707,20 +3107,20 @@ void CGame::SendEventToNearClient_TypeA(short sOwnerH, char cOwnerType, DWORD dw
 					case DEF_OBJECTATTACKMOVE:
 						// 추가 정보가 붙는 형태 
 						if (bOwnerSend == TRUE) 
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt_Av, 13);
+							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt_Av, 13,cKey); 
 						else {
 							if (i != sOwnerH)
-								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt_Av, 13);
+								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt_Av, 13,cKey); 
 						}
 						break;
 
 					default:
 						// ObjectID만을 가진 데이터를 보낸다.
 						if (bOwnerSend == TRUE) 
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 9);
+							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 9,cKey); 
 						else {
 							if (i != sOwnerH)
-								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 9);
+								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 9,cKey); 
 						}
 						break;
 					}
@@ -2734,10 +3134,10 @@ void CGame::SendEventToNearClient_TypeA(short sOwnerH, char cOwnerType, DWORD dw
 					case DEF_OBJECTNULLACTION:
 						// 이 메시지는 위치에 상관없이 모든 데이터를 보내야 한다. 
 						if (bOwnerSend == TRUE) 
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 41); // v1.4 :36
+							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 41,cKey);  // v1.4 :36
 						else {
 							if (i != sOwnerH)
-								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 41); // v1.4 :36
+								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 41,cKey);  // v1.4 :36
 						}
 						break;
 					
@@ -2746,19 +3146,19 @@ void CGame::SendEventToNearClient_TypeA(short sOwnerH, char cOwnerType, DWORD dw
 					case DEF_OBJECTDAMAGEMOVE:
 					//case DEF_OBJECTDYING:	
 						if (bOwnerSend == TRUE) 
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 11);
+							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 11,cKey); 
 						else {
 							if (i != sOwnerH)
-								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 11);
+								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 11,cKey); 
 						}
 						break;
 
 					case DEF_OBJECTDYING:	
 						if (bOwnerSend == TRUE) 
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 15);
+							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 15,cKey); 
 						else {
 							if (i != sOwnerH)
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 15);
+							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 15,cKey); 
 						}
 						break;
 
@@ -2766,20 +3166,20 @@ void CGame::SendEventToNearClient_TypeA(short sOwnerH, char cOwnerType, DWORD dw
 					case DEF_OBJECTATTACKMOVE:
 						// 추가 정보가 붙는 형태 
 						if (bOwnerSend == TRUE) 
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt_Av, 13);
+							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt_Av, 13,cKey); 
 						else {
 							if (i != sOwnerH)
-								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt_Av, 13);
+								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt_Av, 13,cKey); 
 						}
 						break;
 
 					default:
 						// 이동과 관련된 메시지. 경계 부분에 있으므로 모든 메시지를 전송.
 						if (bOwnerSend == TRUE) 
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 41); // v1.4
+							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 41,cKey); // v1.4
 						else {
 							if (i != sOwnerH)
-								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 41); // v1.4
+								iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 41,cKey);  // v1.4
 						}
 						break;
 					}
@@ -2894,27 +3294,27 @@ void CGame::SendEventToNearClient_TypeA(short sOwnerH, char cOwnerType, DWORD dw
 					case DEF_MSGTYPE_REJECT:
 					case DEF_OBJECTNULLACTION:
 						// 이 메시지는 위치에 상관없이 모든 데이터를 보내야 한다. 
-						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 25); // v1.4 : 24
+						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 25,cKey);  // v1.4 : 24
 						break;
 					
 					case DEF_OBJECTDYING:
-						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 15);
+						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 15,cKey); 
 						break;
 
 					case DEF_OBJECTDAMAGE:
 					case DEF_OBJECTDAMAGEMOVE:
-						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 11);
+						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 11,cKey); 
 						break;
 
 					case DEF_OBJECTATTACK:
 					case DEF_OBJECTATTACKMOVE:
 						// 추가 정보를 보낸다.
-						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt_Av, 13);
+						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt_Av, 13,cKey); 
 						break;
 
 					default:
 						// ObjectID만을 가진 데이터를 보낸다.
-						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 9);
+						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 9,cKey); 
 						break;
 					}
 				}
@@ -2925,27 +3325,27 @@ void CGame::SendEventToNearClient_TypeA(short sOwnerH, char cOwnerType, DWORD dw
 					case DEF_MSGTYPE_REJECT:
 					case DEF_OBJECTNULLACTION:
 						// 이 메시지는 위치에 상관없이 모든 데이터를 보내야 한다. 
-						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 25); // v1.4 : 24
+						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 25,cKey);  // v1.4 : 24
 						break;
 					
 					case DEF_OBJECTDYING:
-						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 15);
+						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 15,cKey); 
 						break;
 
 					case DEF_OBJECTDAMAGE:
 					case DEF_OBJECTDAMAGEMOVE:
-						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 11);
+						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt, 11,cKey); 
 						break;
 
 					case DEF_OBJECTATTACK:
 					case DEF_OBJECTATTACKMOVE:
 						// 추가 정보를 보낸다.
-						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt_Av, 13);
+						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_Srt_Av, 13,cKey); 
 						break;
 
 					default:
 						// 이동 관련 데이터면 모든 데이터를 보낸다. 
-						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 25); // v1.4
+						iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData_All, 25,cKey);  // v1.4
 						break;
 					}
 					// +++
@@ -2954,599 +3354,6 @@ void CGame::SendEventToNearClient_TypeA(short sOwnerH, char cOwnerType, DWORD dw
 		}
 	}
 }
-
-				/*
-				if (m_pClientList[sOwnerH]->m_iPKCount != 0) {
-					// 본인이 범죄자이하면 모두 적이다.
-					sTemp = sTemp | ((2) << 12);
-				}
-				else if (m_pClientList[i]->m_iPKCount != 0) {
-					// 상대방이 범죄자이하면 적이다.
-					sTemp = sTemp | ((2) << 12);
-				}
-				else {
-					if (m_pClientList[i]->m_cSide != m_pClientList[sOwnerH]->m_cSide) {
-						if ( (m_pClientList[i]->m_cSide != 0) && (m_pClientList[sOwnerH]->m_cSide != 0) ) {
-							// 둘 다 0(Traveler)이 아니면 적이다.
-							sTemp = sTemp | ((2) << 12);
-						}
-						else {
-							sTemp = sTemp | ((0) << 12);
-						}
-			 		}
-					else {
-						// 아군이다. 길드원여부를 판단.
-						if ( (memcmp(m_pClientList[i]->m_cGuildName, m_pClientList[sOwnerH]->m_cGuildName, 20) == 0) &&
-							 (memcmp(m_pClientList[i]->m_cGuildName, "NONE", 4) != 0) ) {
-							// 길드 이름이 같다. 
-							if (m_pClientList[sOwnerH]->m_iGuildRank == 0)
-								 sTemp = sTemp | ((5) << 12);	// 길드 랭크가 0. 길드마스터이다.
-							else sTemp = sTemp | ((3) << 12);
-						}
-						else
-						if ( (memcmp(m_pClientList[i]->m_cLocation, m_pClientList[sOwnerH]->m_cLocation, 10) == 0) &&
-							 (memcmp(m_pClientList[i]->m_cGuildName, "NONE", 4) != 0) &&
-							 (memcmp(m_pClientList[sOwnerH]->m_cGuildName, "NONE", 4) != 0) &&
-							 (memcmp(m_pClientList[i]->m_cGuildName, m_pClientList[sOwnerH]->m_cGuildName, 20) != 0) ) {
-							// 길드 위치는 같고 길드 이름이 다르다.
-							sTemp = sTemp | ((4) << 12);
-						}
-						else sTemp = sTemp  | ((1) << 12);
-					}
-			 	}
-				*/
-
-
-/*
-void CGame::SendEventToNearClient_TypeA(short sOwnerH, char cOwnerType, DWORD dwMsgID, WORD wMsgType, short sV1, short sV2, short sV3)
-{
- register int i, iRet;
- char  * cp, * cpIsNameContained, cData[100];
- DWORD * dwp, dwTime;
- WORD * wp;
- short * sp, sRange, sX, sY, * spStatus, sTemp, sDumm;
- BOOL bOwnerSend;
-
-	ZeroMemory(cData, sizeof(cData));
-	spStatus = (short *)&sDumm;
-
-	dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-	*dwp = dwMsgID;
-	wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-	*wp  = wMsgType;
-	
-	cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-	
-	if ((dwMsgID == MSGID_EVENT_LOG) || (wMsgType == DEF_OBJECTMOVE) || (wMsgType == DEF_OBJECTRUN) || (wMsgType == DEF_OBJECTDYING))
-		 sRange = 2;
-	else sRange = 0;
-	
-
-	if (cOwnerType == DEF_OWNERTYPE_PLAYER) {
-		// 플레이어의 이벤트이다.
-		if (m_pClientList[sOwnerH] == NULL) return;
-		
-		switch (wMsgType) {
-		case DEF_OBJECTNULLACTION:
-		case DEF_OBJECTDAMAGE:
-			bOwnerSend = TRUE;
-			break;
-		default:
-			bOwnerSend = FALSE;
-			break;
-		}
-
-		// 메시지의 특성에 맞게 메시지를 작성한다.
-		switch (wMsgType) {
-		case DEF_OBJECTMOVE:
-		case DEF_OBJECTRUN:
-		case DEF_MSGTYPE_CONFIRM:		// Log Event
-		case DEF_MSGTYPE_REJECT:		// Log Event
-		case DEF_OBJECTNULLACTION:
-		case DEF_OBJECTDYING:
-		case DEF_OBJECTSTOP:
-			// 위치가 변화하는 이벤트 
-			sp  = (short *)cp;
-			sX  = m_pClientList[sOwnerH]->m_sX;
-			*sp = sX;
-			cp += 2;
-			sp  = (short *)cp;
-			sY  = m_pClientList[sOwnerH]->m_sY;
-			*sp = sY;
-			cp += 2;
-			sp  = (short *)cp;
-			*sp = m_pClientList[sOwnerH]->m_sType;
-			cp += 2;
-			*cp = m_pClientList[sOwnerH]->m_cDir;
-			cp++;
-			cpIsNameContained = cp;
-			cp++;
-			// 만약 이미 보내진 데이터라면 위의 내용까지만 보내진다.
-			
-			memcpy(cp, m_pClientList[sOwnerH]->m_cCharName, 10);
-			cp += 10;
-			sp  = (short *)cp;
-			*sp = m_pClientList[sOwnerH]->m_sAppr1;
-			cp += 2;
-			sp  = (short *)cp;
-			*sp = m_pClientList[sOwnerH]->m_sAppr2;
-			cp += 2;
-			sp  = (short *)cp;
-			*sp = m_pClientList[sOwnerH]->m_sAppr3;
-			cp += 2;
-			sp  = (short *)cp;
-			*sp = m_pClientList[sOwnerH]->m_sAppr4;
-			cp += 2;
-			sp  = (short *)cp;
-			spStatus = sp;
-			*sp = m_pClientList[sOwnerH]->m_sStatus;
-			cp += 2;
-			break;
-		
-		case DEF_OBJECTATTACK:
-		case DEF_OBJECTMAGIC:
-			// 위치가 변화하지 않고 추가 정보가 붙는 이벤트 
-			sp  = (short *)cp;
-			sX  = m_pClientList[sOwnerH]->m_sX;
-			*sp = sX;
-			cp += 2;
-			sp  = (short *)cp;
-			sY  = m_pClientList[sOwnerH]->m_sY;
-			*sp = sY;
-			cp += 2;
-			sp  = (short *)cp;
-			*sp = m_pClientList[sOwnerH]->m_sType;
-			cp += 2;
-			*cp = m_pClientList[sOwnerH]->m_cDir;
-			cp++;
-			*cp = sV1 - sX;
-			cp++;
-			*cp = sV2 - sY;
-			cp++;
-			sp  = (short *)cp;
-			*sp = sV3;
-			cp += 2;
-			break;
-		
-		case DEF_OBJECTGETITEM:
-		case DEF_OBJECTDAMAGE:
-			// 위치가 변화하지 않고 발생하는 이벤트 
-			sp  = (short *)cp;
-			sX  = m_pClientList[sOwnerH]->m_sX;
-			*sp = sX;
-			cp += 2;
-			sp  = (short *)cp;
-			sY  = m_pClientList[sOwnerH]->m_sY;
-			*sp = sY;
-			cp += 2;
-			sp  = (short *)cp;
-			*sp = m_pClientList[sOwnerH]->m_sType;
-			cp += 2;
-			*cp = m_pClientList[sOwnerH]->m_cDir;
-			cp++;
-			break;
-		}
-		
-		dwTime = timeGetTime();
-		//
-		for (i = 1; i < DEF_MAXCLIENTS; i++) {
-		if (bOwnerSend == TRUE) {
-			// 이벤트 발생자 자신에게도 보낸다.
-			if ((m_pClientList[i] != NULL) && (m_pClientList[i]->m_bIsInitComplete == TRUE)) {
-				if ( (m_pClientList[i]->m_cMapIndex == m_pClientList[sOwnerH]->m_cMapIndex) &&
-					 (m_pClientList[i]->m_sX >= m_pClientList[sOwnerH]->m_sX - 10 - sRange) &&
-					 (m_pClientList[i]->m_sX <= m_pClientList[sOwnerH]->m_sX + 10 + sRange) &&
-					 (m_pClientList[i]->m_sY >= m_pClientList[sOwnerH]->m_sY - 8 - sRange) &&
-					 (m_pClientList[i]->m_sY <= m_pClientList[sOwnerH]->m_sY + 8 + sRange) ) {
-
-					// m_pClientList[i]와 m_pClientList[sOwnerH]의 관계를 입력한다.
-					// sStatus의 상위 4비트가 FOE 관계를 나타낸다. 
-					sTemp = *spStatus;
-					sTemp = 0x0FFF & sTemp; // 상위 4비트 클리어
-					if ( (memcmp(m_pClientList[i]->m_cGuildName, m_pClientList[sOwnerH]->m_cGuildName, 20) == 0) &&
-						 (memcmp(m_pClientList[i]->m_cGuildName, "NONE", 4) != 0) ) {
-						// 길드 이름이 같다. 
-						sTemp = sTemp | ((3) << 12);
-					}
-					if ( (memcmp(m_pClientList[i]->m_cLocation, m_pClientList[sOwnerH]->m_cLocation, 10) == 0) &&
-						 (memcmp(m_pClientList[i]->m_cGuildName, "NONE", 4) != 0) &&
-						 (memcmp(m_pClientList[sOwnerH]->m_cGuildName, "NONE", 4) != 0) &&
-						 (memcmp(m_pClientList[i]->m_cGuildName, m_pClientList[sOwnerH]->m_cGuildName, 20) != 0) ) {
-						// 길드 위치는 갖고 길드 이름이 다르다.
-						sTemp = sTemp | ((4) << 12);
-					}
-					if ( (memcmp(m_pClientList[i]->m_cLocation, m_pClientList[sOwnerH]->m_cLocation, 10) != 0) &&
-						 (memcmp(m_pClientList[i]->m_cGuildName, "NONE", 4) != 0) &&
-						 (memcmp(m_pClientList[sOwnerH]->m_cGuildName, "NONE", 4) != 0) ) {
-						// 서로 다른 마을 길드원이다.
-						sTemp = sTemp | ((1) << 12);
-					}
-					
-					*spStatus = sTemp;
-					//
-
-					if ( (m_pClientList[i]->m_sX >= m_pClientList[sOwnerH]->m_sX - 9) &&
-					     (m_pClientList[i]->m_sX <= m_pClientList[sOwnerH]->m_sX + 9) &&
-					     (m_pClientList[i]->m_sY >= m_pClientList[sOwnerH]->m_sY - 7) &&
-					     (m_pClientList[i]->m_sY <= m_pClientList[sOwnerH]->m_sY + 7) ) {
-						// 이미 이름과 특성치등의 데이터가 보내진 객체들이다.
-						// 전송량을 최소화 하기 위함.
-						switch (wMsgType) {
-						case DEF_MSGTYPE_CONFIRM:		// Log Event
-						case DEF_MSGTYPE_REJECT:		// Log Event
-						case DEF_OBJECTNULLACTION:
-							// 이 메시지들은 항상 이름정보가 필요하다.
-							*cpIsNameContained = 1;		
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 34);
-							break;
-
-						case DEF_OBJECTSTOP:
-						case DEF_OBJECTMOVE:
-						case DEF_OBJECTRUN:
-						case DEF_OBJECTDYING:
-							*cpIsNameContained = 1;		// 이름과 기타 정보가 포함되지 않음을 알린다.
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 34);
-							break;
-					
-						case DEF_OBJECTATTACK:
-						case DEF_OBJECTMAGIC:
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 17);
-							break;
-
-						case DEF_OBJECTGETITEM:
-						case DEF_OBJECTDAMAGE:
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 13);
-							break;
-						}
-					}
-					else {
-						// 전송량을 최소화 하기 위함.
-						switch (wMsgType) {
-						case DEF_OBJECTSTOP:
-						case DEF_OBJECTMOVE:
-						case DEF_OBJECTRUN:
-						case DEF_MSGTYPE_CONFIRM:		// Log Event
-						case DEF_MSGTYPE_REJECT:		// Log Event
-						case DEF_OBJECTNULLACTION:
-						case DEF_OBJECTDYING:
-							*cpIsNameContained = 1;		// 이름과 기타 정보가 포함되어 있음을 알린다.
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 34);
-							break;
-					
-						case DEF_OBJECTATTACK:
-						case DEF_OBJECTMAGIC:
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 17);
-							break;
-
-						case DEF_OBJECTGETITEM:
-						case DEF_OBJECTDAMAGE:
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 13);
-							break;
-						}
-					}
-
-					switch (iRet) {
-					case DEF_XSOCKEVENT_QUENEFULL:
-					case DEF_XSOCKEVENT_SOCKETERROR:
-					case DEF_XSOCKEVENT_CRITICALERROR:
-					case DEF_XSOCKEVENT_SOCKETCLOSED:
-						// 메시지를 보낼때 에러가 발생했다면 제거한다.
-						// 제거하지 않고 무시한다. 재귀호출 발생의 위험을 막고자 함. 어차피 TimeOut으로 지워진다.
-						//DeleteClient(i, TRUE, FALSE);
-						break;
-					}
-				}
-			}
-			//
-		}
-		else {
-			// 이벤트 발생자에게는 보내지 않는다.
-			if ((i != sOwnerH) && (m_pClientList[i] != NULL) && (m_pClientList[i]->m_bIsInitComplete == TRUE)) {
-				if ( (m_pClientList[i]->m_cMapIndex == m_pClientList[sOwnerH]->m_cMapIndex) &&
-					 (m_pClientList[i]->m_sX >= m_pClientList[sOwnerH]->m_sX - 10 - sRange) &&
-					 (m_pClientList[i]->m_sX <= m_pClientList[sOwnerH]->m_sX + 10 + sRange) &&
-					 (m_pClientList[i]->m_sY >= m_pClientList[sOwnerH]->m_sY - 8 - sRange) &&
-					 (m_pClientList[i]->m_sY <= m_pClientList[sOwnerH]->m_sY + 8 + sRange) ) {
-
-					// m_pClientList[i]와 m_pClientList[sOwnerH]의 관계를 입력한다.
-					// sStatus의 상위 4비트가 FOE 관계를 나타낸다. 
-					sTemp = *spStatus;
-					sTemp = 0x0FFF & sTemp; // 상위 4비트 클리어
-					if ( (memcmp(m_pClientList[i]->m_cGuildName, m_pClientList[sOwnerH]->m_cGuildName, 20) == 0) &&
-						 (memcmp(m_pClientList[i]->m_cGuildName, "NONE", 4) != 0) ) {
-						// 길드 이름이 같다. 
-						sTemp = sTemp | ((3) << 12);
-					}
-					if ( (memcmp(m_pClientList[i]->m_cLocation, m_pClientList[sOwnerH]->m_cLocation, 10) == 0) &&
-						 (memcmp(m_pClientList[i]->m_cGuildName, "NONE", 4) != 0) &&
-						 (memcmp(m_pClientList[sOwnerH]->m_cGuildName, "NONE", 4) != 0) &&
-						 (memcmp(m_pClientList[i]->m_cGuildName, m_pClientList[sOwnerH]->m_cGuildName, 20) != 0) ) {
-						// 길드 위치는 갖고 길드 이름이 다르다.
-						sTemp = sTemp | ((4) << 12);
-					}
-					if ( (memcmp(m_pClientList[i]->m_cLocation, m_pClientList[sOwnerH]->m_cLocation, 10) != 0) &&
-						 (memcmp(m_pClientList[i]->m_cGuildName, "NONE", 4) != 0) &&
-						 (memcmp(m_pClientList[sOwnerH]->m_cGuildName, "NONE", 4) != 0) ) {
-						// 서로 다른 마을 길드원이다.
-						sTemp = sTemp | ((1) << 12);
-					}
-
-					*spStatus = sTemp;
-					//
-
-					if ( (m_pClientList[i]->m_sX >= m_pClientList[sOwnerH]->m_sX - 9) &&
-					     (m_pClientList[i]->m_sX <= m_pClientList[sOwnerH]->m_sX + 9) &&
-					     (m_pClientList[i]->m_sY >= m_pClientList[sOwnerH]->m_sY - 7) &&
-					     (m_pClientList[i]->m_sY <= m_pClientList[sOwnerH]->m_sY + 7) ) {
-						// 이미 이름과 특성치등의 데이터가 보내진 객체들이다.
-						switch (wMsgType) {
-						case DEF_MSGTYPE_CONFIRM:		// Log Event
-						case DEF_MSGTYPE_REJECT:		// Log Event
-						case DEF_OBJECTNULLACTION:
-							// 이 정보는 항상 이름정보가 필요하다.
-							*cpIsNameContained = 1;		
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 34);
-							break;
-
-						case DEF_OBJECTSTOP:
-						case DEF_OBJECTMOVE:
-						case DEF_OBJECTRUN:
-						case DEF_OBJECTDYING:
-							*cpIsNameContained = 0;		// 이름과 기타 정보가 포함되지 않음을 알린다.
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 14);
-							break;
-					
-						case DEF_OBJECTATTACK:
-						case DEF_OBJECTMAGIC:
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 17);
-							break;
-
-						case DEF_OBJECTGETITEM:
-						case DEF_OBJECTDAMAGE:
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 13);
-							break;
-						}
-					}
-					else {
-						// 전송량을 최소화 하기 위함.
-						switch (wMsgType) {
-						case DEF_OBJECTSTOP:
-						case DEF_OBJECTMOVE:
-						case DEF_OBJECTRUN:
-						case DEF_MSGTYPE_CONFIRM:		// Log Event
-						case DEF_MSGTYPE_REJECT:		// Log Event
-						case DEF_OBJECTNULLACTION:
-						case DEF_OBJECTDYING:
-							*cpIsNameContained = 1;		// 이름과 기타 정보가 포함되어 있음을 알린다.
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 34);
-							break;
-					
-						case DEF_OBJECTATTACK:
-						case DEF_OBJECTMAGIC:
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 17);
-							break;
-
-						case DEF_OBJECTGETITEM:
-						case DEF_OBJECTDAMAGE:
-							iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 13);
-							break;
-						}
-					}
-					
-					switch (iRet) {
-					case DEF_XSOCKEVENT_QUENEFULL:
-					case DEF_XSOCKEVENT_SOCKETERROR:
-					case DEF_XSOCKEVENT_CRITICALERROR:
-					case DEF_XSOCKEVENT_SOCKETCLOSED:
-						// 메시지를 보낼때 에러가 발생했다면 제거한다.
-						// 제거하지 않고 무시한다. 재귀호출 발생의 위험을 막고자 함. 어차피 TimeOut으로 지워진다.
-						//DeleteClient(i, TRUE, FALSE);
-						break;
-					}
-				}
-			}
-			//
-		}
-		}
-	}
-	else {
-		// NPC의 이벤트이다. NPC의 데이터는 플레이어와는 다름.
-		
-		// 메시지의 특성에 맞게 메시지를 작성한다.
-		switch (wMsgType) {
-		case DEF_OBJECTSTOP:
-		case DEF_OBJECTMOVE:
-		case DEF_MSGTYPE_CONFIRM:		// Log Event
-		case DEF_MSGTYPE_REJECT:		// Log Event
-		case DEF_OBJECTNULLACTION:
-		case DEF_OBJECTDYING:
-			// 위치가 변화하는 이벤트 
-			sp  = (short *)cp;
-			sX  = m_pNpcList[sOwnerH]->m_sX;
-			*sp = sX;
-			cp += 2;
-			sp  = (short *)cp;
-			sY  = m_pNpcList[sOwnerH]->m_sY;
-			*sp = sY;
-			cp += 2;
-			sp  = (short *)cp;
-			*sp = m_pNpcList[sOwnerH]->m_sType;
-			cp += 2;
-			*cp = m_pNpcList[sOwnerH]->m_cDir;
-			cp++;
-			*cp = 1;	// NPC의 경우 항상 이름 정보를 갖고있다.
-			cp++;
-			memcpy(cp, m_pNpcList[sOwnerH]->m_cName, 5);
-			cp += 5;
-			sp  = (short *)cp;
-			*sp = m_pNpcList[sOwnerH]->m_sAppr2;
-			cp += 2;
-			sp  = (short *)cp;
-			spStatus = sp;
-			*sp = m_pNpcList[sOwnerH]->m_sStatus;
-			cp += 2;
-			break;
-		
-		case DEF_OBJECTATTACK:
-			// 위치가 변화하지 않고 추가 정보가 붙는 이벤트 
-			sp  = (short *)cp;
-			sX  = m_pNpcList[sOwnerH]->m_sX;
-			*sp = sX;
-			cp += 2;
-			sp  = (short *)cp;
-			sY  = m_pNpcList[sOwnerH]->m_sY;
-			*sp = sY;
-			cp += 2;
-			sp  = (short *)cp;
-			*sp = m_pNpcList[sOwnerH]->m_sType;
-			cp += 2;
-			*cp = m_pNpcList[sOwnerH]->m_cDir;
-			cp++;
-			*cp = sV1 - sX;
-			cp++;
-			*cp = sV2 - sY;
-			cp++;
-			sp  = (short *)cp;
-			*sp = sV3;
-			cp += 2;
-			break;
-		
-		case DEF_OBJECTDAMAGE:
-			// 위치가 변화하지 않고 발생하는 이벤트 
-			sp  = (short *)cp;
-			sX  = m_pNpcList[sOwnerH]->m_sX;
-			*sp = sX;
-			cp += 2;
-			sp  = (short *)cp;
-			sY  = m_pNpcList[sOwnerH]->m_sY;
-			*sp = sY;
-			cp += 2;
-			sp  = (short *)cp;
-			*sp = m_pNpcList[sOwnerH]->m_sType;
-			cp += 2;
-			*cp = m_pNpcList[sOwnerH]->m_cDir;
-			cp++;
-			break;
-		}
-		
-		dwTime = timeGetTime();
-
-		for (i = 1; i < DEF_MAXCLIENTS; i++)
-		if (m_pClientList[i] != NULL) {
-			if ( (m_pClientList[i]->m_cMapIndex == m_pNpcList[sOwnerH]->m_cMapIndex) &&
-				 ((m_pClientList[i]->m_sX - 10 - sRange) <= m_pNpcList[sOwnerH]->m_sX ) &&
-				 ((m_pClientList[i]->m_sX + 10 + sRange) >= m_pNpcList[sOwnerH]->m_sX) &&
-				 ((m_pClientList[i]->m_sY - 8 - sRange)  <= m_pNpcList[sOwnerH]->m_sY) &&
-				 ((m_pClientList[i]->m_sY + 8 + sRange)  >= m_pNpcList[sOwnerH]->m_sY) ) {
-			
-				// m_pClientList[i]와 m_pClientList[sOwnerH]의 관계를 입력한다.
-				// sStatus의 상위 4비트가 FOE 관계를 나타낸다. 
-				sTemp = *spStatus;
-				sTemp = 0x0FFF & sTemp; // 상위 4비트 클리어
-				if ( m_pClientList[i]->m_cSide != m_pNpcList[sOwnerH]->m_cSide ) {
-					// 이 NPC는 적이다.
-					 sTemp = sTemp | 0x2000;
-				}
-				else sTemp = sTemp | 0x1000; 
-				*spStatus = sTemp;
-				//
-
-				// 전송량을 최소화 하기 위함.
-				switch (wMsgType) {
-				case DEF_OBJECTSTOP:
-				case DEF_OBJECTMOVE:
-				case DEF_MSGTYPE_CONFIRM:		// Log Event
-				case DEF_MSGTYPE_REJECT:		// Log Event
-				case DEF_OBJECTNULLACTION:
-				case DEF_OBJECTDYING:
-					iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 23);
-					break;
-					
-				case DEF_OBJECTATTACK:
-					iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 17);
-					break;
-
-				case DEF_OBJECTDAMAGE:
-					iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 13);
-					break;
-				}
-
-				switch (iRet) {
-				case DEF_XSOCKEVENT_QUENEFULL:
-				case DEF_XSOCKEVENT_SOCKETERROR:
-				case DEF_XSOCKEVENT_CRITICALERROR:
-				case DEF_XSOCKEVENT_SOCKETCLOSED:
-					// 메시지를 보낼때 에러가 발생했다면 제거한다.
-					// 제거하지 않고 무시한다. 재귀호출 발생의 위험을 막고자 함. 어차피 TimeOut으로 지워진다.
-					//DeleteClient(i, TRUE, FALSE);
-					break;
-				}
-			}
-		}
-	}
-}
-*/
-
-
-/*
-void CGame::SendEventToNearClient(int iClientH, DWORD dwMsgID, WORD wMsgType)
-{
- register int i, iRet;
- char cData[100];
- DWORD * dwp, dwTime;
- WORD * wp;
- short * sp;
-
-	ZeroMemory(cData, sizeof(cData));
-	
-	dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-	*dwp = dwMsgID;
-	wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-	*wp  = wMsgType;
-	
-	sp  = (short *)(cData + DEF_INDEX2_LOCX);
-	*sp = m_pClientList[iClientH]->m_sX;
-	sp  = (short *)(cData + DEF_INDEX2_LOCY);
-	*sp = m_pClientList[iClientH]->m_sY;
-	sp  = (short *)(cData + DEF_INDEX2_OBJECTTYPE);
-	*sp = m_pClientList[iClientH]->m_sType;
-	cData[DEF_INDEX1_DIR] = m_pClientList[iClientH]->m_cDir;
-	sp  = (short *)(cData + DEF_INDEX2_APPEARANCE1);
-	*sp = m_pClientList[iClientH]->m_sAppr1;
-	sp  = (short *)(cData + DEF_INDEX2_APPEARANCE2);
-	*sp = m_pClientList[iClientH]->m_sAppr2;
-	sp  = (short *)(cData + DEF_INDEX2_APPEARANCE3);
-	*sp = m_pClientList[iClientH]->m_sAppr3;
-	sp  = (short *)(cData + DEF_INDEX2_APPEARANCE4);
-	*sp = m_pClientList[iClientH]->m_sAppr4;
-	sp  = (short *)(cData + DEF_INDEX2_STATUS);
-	*sp = m_pClientList[iClientH]->m_sStatus;
-	memcpy((cData + DEF_INDEX10_NAME), m_pClientList[iClientH]->m_cName, 10);
-
-	dwTime = timeGetTime();
-
-	for (i = 1; i < DEF_MAXCLIENTS; i++)
-	if ((i != iClientH) && (m_pClientList[i] != NULL)) {
-		if ( (m_pClientList[i]->m_sX > m_pClientList[iClientH]->m_sX - 14 - 2) &&
-			 (m_pClientList[i]->m_sX < m_pClientList[iClientH]->m_sX - 14 + 2 + DEF_MAPDATASIZEX) &&
-			 (m_pClientList[i]->m_sY > m_pClientList[iClientH]->m_sY - 12 - 2) &&
-			 (m_pClientList[i]->m_sY < m_pClientList[iClientH]->m_sY - 12 + 2 + DEF_MAPDATASIZEY) ) {
-			
-			iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, DEF_INDEXX_MOVEMAPDATA);
-			switch (iRet) {
-			case DEF_XSOCKEVENT_QUENEFULL:
-			case DEF_XSOCKEVENT_SOCKETERROR:
-			case DEF_XSOCKEVENT_CRITICALERROR:
-			case DEF_XSOCKEVENT_SOCKETCLOSED:
-				// 메시지를 보낼때 에러가 발생했다면 제거한다.
-				DeleteClient(i, TRUE);
-				break;
-			}
-		}
-	}
-}
-*/
 
 
 int CGame::iComposeMoveMapData(short sX, short sY, int iClientH, char cDir, char * pData)
@@ -3669,7 +3476,8 @@ int CGame::iComposeMoveMapData(short sX, short sY, int iClientH, char cDir, char
 					
 					sTemp = m_pClientList[pTile->m_sOwner]->m_sStatus;
 					sTemp = 0x0FFF & sTemp; // 상위 4비트 클리어
-			  		sTemp2 = (short)iGetPlayerABSStatus(pTile->m_sOwner, iClientH); //(short)iGetPlayerRelationship(iClientH, pTile->m_sOwner);
+			  		//sTemp2 = (short)iGetPlayerABSStatus(pTile->m_sOwner); // 2002-11-14
+					sTemp2 = (short)iGetPlayerABSStatus(pTile->m_sOwner, iClientH); 
 					sTemp  = (sTemp | (sTemp2 << 12));
 					*sp = sTemp;
 					cp += 2;
@@ -3766,9 +3574,9 @@ int CGame::iComposeMoveMapData(short sX, short sY, int iClientH, char cDir, char
 					sp  = (short *)cp;
 					
 					sTemp = m_pClientList[pTile->m_sDeadOwner]->m_sStatus;
-					sTemp = 0x0FFF & sTemp; // 상위 4비트 클리어
-			  
-					sTemp2 = (short)iGetPlayerABSStatus(pTile->m_sDeadOwner, iClientH); //(short)iGetPlayerRelationship(iClientH, pTile->m_sDeadOwner);
+					sTemp = 0x0FFF & sTemp; // 상위 4비트 클리어			  
+					//sTemp2 = (short)iGetPlayerABSStatus(pTile->m_sDeadOwner); // 2002-11-14
+					sTemp2 = (short)iGetPlayerABSStatus(pTile->m_sDeadOwner, iClientH);
 					sTemp  = (sTemp | (sTemp2 << 12));
 					*sp = sTemp;
 					cp += 2;
@@ -3860,6 +3668,8 @@ int CGame::iComposeMoveMapData(short sX, short sY, int iClientH, char cDir, char
 void CGame::OnTimer(char cType)
 {
  DWORD dwTime;
+ int iRet =0 ;
+
 
 	dwTime = timeGetTime();
 
@@ -3885,9 +3695,15 @@ void CGame::OnTimer(char cType)
 			(m_bIsLogSockAvailable == TRUE) && (m_bIsMagicAvailable == TRUE)     &&
 			(m_bIsSkillAvailable == TRUE)   && (m_bIsPortionAvailable == TRUE)   &&
 			(m_bIsQuestAvailable == TRUE)   && (m_bIsBuildItemAvailable == TRUE) && 
-			(m_iSubLogSockActiveCount == DEF_MAXSUBLOGSOCK)) {
+			(m_iSubLogSockActiveCount == DEF_MAXSUBLOGSOCK)
+#ifdef DEF_DEFENCEHACKING
+			// 2002-12-8 World server 보안 설정을 위해 
+			&& (m_bIsWLServerAvailable == TRUE)
+#endif 
+			) {
 			// 게임을 시작할 준비가 되었다. 메시지를 보낸다.
-			SendMessage(m_hWnd, WM_USER_STARTGAMESIGNAL, NULL, NULL); 
+			PutLogList("Sending start message...");
+			SendMessage(m_hWnd, WM_USER_STARTGAMESIGNAL, NULL, NULL);
 			m_bIsGameStarted = TRUE;
 		}
 	}
@@ -3895,7 +3711,33 @@ void CGame::OnTimer(char cType)
 	if ((dwTime - m_dwGameTime6) > 1000) {
 		DelayEventProcessor();
 		SendStockMsgToGateServer();
-		m_dwGameTime6 = dwTime;
+
+		// v2.05
+		if (m_iFinalShutdownCount != 0) {
+			m_iFinalShutdownCount--;
+			wsprintf(G_cTxt, "Final Shutdown...%d", m_iFinalShutdownCount);
+			PutLogList(G_cTxt);
+			if (m_iFinalShutdownCount <= 1) {
+				// 2.14 성후니 셧다운시 무조건 로그 저장 
+				SendMessage(m_hWnd, WM_DESTROY, NULL, NULL);
+				return;
+				
+			}
+		}
+
+		// v1.432-3 Sub-Log-Socket을 한꺼번에 만드는 것이 아니라 나누어 만든다.
+		if (m_iSubLogSockInitIndex < DEF_MAXSUBLOGSOCK) {
+			m_pSubLogSock[m_iSubLogSockInitIndex] = new class XSocket(m_hWnd, DEF_SERVERSOCKETBLOCKLIMIT);
+			m_pSubLogSock[m_iSubLogSockInitIndex]->bConnect(m_cLogServerAddr, m_iLogServerPort, (WM_ONLOGSOCKETEVENT + m_iSubLogSockInitIndex + 1));
+			m_pSubLogSock[m_iSubLogSockInitIndex]->bInitBufferSize(DEF_MSGBUFFERSIZE);
+			
+			wsprintf(G_cTxt, "(!) Try to connect sub-log-socket(%d)... Addr:%s  Port:%d", m_iSubLogSockInitIndex, m_cLogServerAddr, m_iLogServerPort);
+			PutLogList(G_cTxt);
+			
+			m_iSubLogSockInitIndex++;
+		}
+
+		m_dwGameTime6 = dwTime;	
 	}
 
 	if ((dwTime - m_dwGameTime3) > 3000) {
@@ -3910,17 +3752,6 @@ void CGame::OnTimer(char cType)
 
 	if ((dwTime - m_dwGameTime4) > 600) {
 		MobGenerator();
-
-		// v1.432-3 Sub-Log-Socket을 한꺼번에 만드는 것이 아니라 나누어 만든다.
-		if (m_iSubLogSockInitIndex < DEF_MAXSUBLOGSOCK) {
-			m_pSubLogSock[m_iSubLogSockInitIndex] = new class XSocket(m_hWnd, DEF_SERVERSOCKETBLOCKLIMIT);
-			m_pSubLogSock[m_iSubLogSockInitIndex]->bConnect(m_cLogServerAddr, m_iLogServerPort, (WM_ONLOGSOCKETEVENT + m_iSubLogSockInitIndex + 1));
-			m_pSubLogSock[m_iSubLogSockInitIndex]->bInitBufferSize(DEF_MSGBUFFERSIZE);
-			wsprintf(G_cTxt, "(!) Try to connect sub-log-socket(%d)... Addr:%s  Port:%d", m_iSubLogSockInitIndex, m_cLogServerAddr, m_iLogServerPort);
-			PutLogList(G_cTxt);
-			m_iSubLogSockInitIndex++;
-		}
-
 		m_dwGameTime4 = dwTime;
 	}
 
@@ -3941,8 +3772,8 @@ void CGame::OnTimer(char cType)
 	if ((dwTime - m_dwFishTime) > 4000) {
 		FishProcessor();
 		FishGenerator();
-		MineralGenerator();
 		SendCollectedMana();
+		CrusadeWarStarter();
 		m_dwFishTime = dwTime;
 	}
 	
@@ -3969,9 +3800,8 @@ void CGame::OnTimer(char cType)
 				m_iAutoRebootingCount++;
 			}
 			else {
-				// v1.432 서버 셧다운이 끝나면 프로그램을 종료시킨다.
-				Sleep(1000);
-				PostQuitMessage(0);
+				// v1.432 서버 셧다운이 끝나면 최종 종료 카운트 다운에 들어간다. 아직 전달되지 않은 메시지를 전송하기 위한 여유시간을 두는것이 목적. v2.05
+				if (m_iFinalShutdownCount == 0)	m_iFinalShutdownCount = 20;
 			}
 		}
 		m_dwExitProcessTime = dwTime;
@@ -3981,6 +3811,9 @@ void CGame::OnTimer(char cType)
 	if ((dwTime - m_dwMapSectorInfoTime) > 1000*10) {
 		m_dwMapSectorInfoTime = dwTime;
 		UpdateMapSectorInfo();
+
+		// v2.03 광물이 나오는 빈도수를 줄임 
+		MineralGenerator();
 
 		m_iMapSectorInfoUpdateCount++;
 		if (m_iMapSectorInfoUpdateCount >= 5) {
@@ -3993,7 +3826,9 @@ void CGame::OnTimer(char cType)
 
 void CGame::CheckClientResponseTime()
 {
- register int i, iPlusTime, iMaxSuperAttack, iValue;
+// register int i, iPlusTime, iMaxSuperAttack, iValue, iMapSide,iTmpMapSide;
+ register int i, iPlusTime, iMaxSuperAttack, iValue, iMapSide;
+
  short sTemp;
  DWORD dwTime;
  //SYSTEMTIME SysTime;
@@ -4044,7 +3879,8 @@ void CGame::CheckClientResponseTime()
 				// 배고파질 시간이 되면 카운트를 하나 깍는다.
 				if (((dwTime - m_pClientList[i]->m_dwHungerTime) > DEF_HUNGERTIME) && (m_pClientList[i]->m_bIsKilled == FALSE)) {
 					// 시간이 다 되었다.
-					if (m_pClientList[i]->m_iLevel < DEF_LEVELLIMIT) {
+					// v2.03 운영자는 배고파지지 않는다. 
+					if ((m_pClientList[i]->m_iLevel < DEF_LEVELLIMIT) || (m_pClientList[i]->m_iAdminUserLevel >= 1 )) {
 						// 레벨이 DEF_LEVELLIMIT이하이면 배고픔 지수를 깍지 않는다.
 					}
 					else m_pClientList[i]->m_iHungerStatus--;
@@ -4106,12 +3942,13 @@ void CGame::CheckClientResponseTime()
 
 				// AutoExe 계산 시점이면 
 				if ((dwTime - m_pClientList[i]->m_dwAutoExpTime) > (DWORD)DEF_AUTOEXPTIME) {
-					iValue = (m_pClientList[i]->m_iLevel/2);
+					// v2.17 2002-8-2 자동으로 올라가는 경험치를 증가 시켰다.
+					iValue = (m_pClientList[i]->m_iLevel);
 					if (iValue <= 0) iValue = 1;
 					if (m_pClientList[i]->m_iAutoExpAmount < iValue) {
 						// 자동 시간 계산 경험치로는 레벨이 오르지 않으므로 처리한다.
 						if ((m_pClientList[i]->m_iExp + iValue) < m_iLevelExpTable[m_pClientList[i]->m_iLevel+1]) {
-							m_pClientList[i]->m_iExpStock += iValue;
+							GetExp(i, iValue);
 							CalcExpStock(i);
 						}
 					}
@@ -4153,10 +3990,14 @@ void CGame::CheckClientResponseTime()
 					ZeroMemory(m_pClientList[i]->m_cLockedMapName, sizeof(m_pClientList[i]->m_cLockedMapName));
 					strcpy(m_pClientList[i]->m_cLockedMapName, "NONE");
 				}
+
+				// v2.04 죽었을때 페널티 시간 
+				m_pClientList[i]->m_iDeadPenaltyTime -= 3;
+				if (m_pClientList[i]->m_iDeadPenaltyTime < 0) m_pClientList[i]->m_iDeadPenaltyTime = 0;
 			
 				if ( (m_pClientList[i]->m_bIsWarLocation == TRUE) ) {
 					// Crusade
-					if (m_bIsCrusadeMode == FALSE)
+					if ((m_bIsCrusadeMode == FALSE) || (m_pClientList[i]->m_bIsInBuilding == TRUE))
 						m_pClientList[i]->m_iTimeLeft_ForceRecall--;
 
 					if (m_pClientList[i]->m_iTimeLeft_ForceRecall <= 0) {
@@ -4167,7 +4008,7 @@ void CGame::CheckClientResponseTime()
 											
 						// 소환된다는 메시지를 보낸다.
 						SendNotifyMsg(NULL, i, DEF_NOTIFY_TOBERECALLED, NULL, NULL, NULL, NULL);
-						RequestTeleportHandler(i, "1   ");
+						RequestTeleportHandler(i, "0   ");
 					}
 				}
 				
@@ -4186,8 +4027,8 @@ void CGame::CheckClientResponseTime()
 #ifndef DEF_TESTSERVER
 				if (m_pClientList[i] == NULL) break;
 				if ((dwTime - m_pClientList[i]->m_dwSpeedHackCheckTime) > (DWORD)1000*60*60) {
-					if ((m_pClientList[i]->m_iExp - m_pClientList[i]->m_iSpeedHackCheckExp) > 200000) {
-						// 1시간에 경험치를 6만 이상 얻었다. 
+					if ((m_pClientList[i]->m_iExp - m_pClientList[i]->m_iSpeedHackCheckExp) > 300000) {
+						// 1시간에 경험치를 30만 이상 얻었다. 
 						wsprintf(G_cTxt, "(!) 속도 조작 용의 캐릭터(%s) 1시간에 %dExp?", m_pClientList[i]->m_cCharName, (m_pClientList[i]->m_iExp - m_pClientList[i]->m_iSpeedHackCheckExp));
 						
 						SYSTEMTIME SysTime;
@@ -4216,8 +4057,8 @@ void CGame::CheckClientResponseTime()
 #endif
 				if (m_pClientList[i] == NULL) break;
 				// 하위 레벨 제한에 걸린다면 
-				//if (m_pClientList[i]->m_iLevel < m_pMapList[m_pClientList[i]->m_cMapIndex]->m_iLevelLimit) {
-				if ((m_pClientList[i]->m_iLevel < m_pMapList[m_pClientList[i]->m_cMapIndex]->m_iLevelLimit) && (m_pClientList[i]->m_iAdminUserLevel < 2) ) {
+				// v2.13 운영자는 강콜이 않된다.
+				if ((m_pClientList[i]->m_iLevel < m_pMapList[m_pClientList[i]->m_cMapIndex]->m_iLevelLimit) && (m_pClientList[i]->m_iAdminUserLevel < 1) ) {
 					// 소환된다는 메시지를 보내고 강제 리콜.
 					SendNotifyMsg(NULL, i, DEF_NOTIFY_TOBERECALLED, NULL, NULL, NULL, NULL);
 					RequestTeleportHandler(i, "0   ");
@@ -4225,46 +4066,49 @@ void CGame::CheckClientResponseTime()
 
 				if (m_pClientList[i] == NULL) break;
 				// 상위 레벨 제한에 걸린다면 
-				//if ( (m_pMapList[m_pClientList[i]->m_cMapIndex]->m_iUpperLevelLimit != 0) &&
-				//	 (m_pClientList[i]->m_iLevel > m_pMapList[m_pClientList[i]->m_cMapIndex]->m_iUpperLevelLimit) ) {
+				// v2.13 운영자는 강콜이 않된다.
 				if ( (m_pMapList[m_pClientList[i]->m_cMapIndex]->m_iUpperLevelLimit != 0) &&
-					 (m_pClientList[i]->m_iLevel > m_pMapList[m_pClientList[i]->m_cMapIndex]->m_iUpperLevelLimit) && (m_pClientList[i]->m_iAdminUserLevel < 2) ) {
+					 (m_pClientList[i]->m_iLevel > m_pMapList[m_pClientList[i]->m_cMapIndex]->m_iUpperLevelLimit) && (m_pClientList[i]->m_iAdminUserLevel < 1) ) {
 					// 소환된다는 메시지를 보내고 강제 리콜.
 					SendNotifyMsg(NULL, i, DEF_NOTIFY_TOBERECALLED, NULL, NULL, NULL, NULL);
 					RequestTeleportHandler(i, "0   ");
 				}
 
+	
+
+
+				// 사투장에서의 부활 중단. 아이템 복사의 가능성이 있다.
+				/*
 				if (m_pClientList[i] == NULL) break;
-				// 농경지맵에 적이 들어가면 리콜
-				if ((strcmp(m_pClientList[i]->m_cLocation, "aresden") == 0) &&
-					(strcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cName, "elvfarm") == 0)) {
+				if ((m_pClientList[i]->m_dwFightzoneDeadTime != NULL) && 
+					((dwTime - m_pClientList[i]->m_dwFightzoneDeadTime) > 1000*30)) {
+					// 사투장에서 죽은지 30초가 지났다. 다시 부활한다.
+					m_pClientList[i]->m_dwFightzoneDeadTime = NULL;
+					ResurrectPlayer(i);
+				}
+				*/
+
+				if (m_pClientList[i] == NULL) break;
+				// 사냥꾼이 미들이나 던전2층에 있다면 리콜  // 2002-11-16
+				// v2.13 운영자면 강콜되지 않는다.
+				// 필요없는 접경지 삭제 
+
+				// v2.20 2002-12-31 민간인 모드 레벨 제한 과 이동지역 제한 추가 
+				if ((m_bIsCrusadeMode == FALSE)
+					&& (m_pClientList[i]->m_bIsHunter == TRUE )
+					&& (((m_iMiddlelandMapIndex == m_pClientList[i]->m_cMapIndex) && (m_iMiddlelandMapIndex != -1)) 
+					   || (memcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cName, "2ndmiddle",9) == 0)
+					   || (memcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cName, "aresdend1",9) == 0)
+					   || (memcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cName, "elvined1",8) == 0)
+   					   || (memcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cName, "huntzone3",9) == 0)
+					   || (memcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cName, "huntzone4",9) == 0)
+					   || (memcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cName, "middle",6) == 0) )
+					&& (m_pClientList[i]->m_iAdminUserLevel < 1)) {
 					// 소환된다는 메시지를 보내고 강제 리콜.
 					SendNotifyMsg(NULL, i, DEF_NOTIFY_TOBERECALLED, NULL, NULL, NULL, NULL);
 					RequestTeleportHandler(i, "0   ");
 				}
 
-				if (m_pClientList[i] == NULL) break;
-				// 농경지맵에 적이 들어가면 리콜
-				if ((strcmp(m_pClientList[i]->m_cLocation, "elvine") == 0) &&
-					(strcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cName, "arefarm") == 0)) {
-					// 소환된다는 메시지를 보내고 강제 리콜.
-					SendNotifyMsg(NULL, i, DEF_NOTIFY_TOBERECALLED, NULL, NULL, NULL, NULL);
-					RequestTeleportHandler(i, "0   ");
-				}
-
-				if (m_pClientList[i] == NULL) break;
-				// 중립이 접경지나 미들랜드에 있다면 리콜 
-				if ( ((strcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cName, "middleland") == 0) ||
-					  (strcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cName, "aremidl") == 0) ||
-					  (strcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cName, "aremidr") == 0) ||
-					  (strcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cName, "elvmidl") == 0) ||
-					  (strcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cName, "elvmidr") == 0)) &&
-					 (strcmp(m_pClientList[i]->m_cLocation, "NONE") == 0) &&
-					 (m_pClientList[i]->m_iAdminUserLevel == 0) ) {
-					// 소환된다는 메시지를 보내고 강제 리콜.
-					SendNotifyMsg(NULL, i, DEF_NOTIFY_TOBERECALLED, NULL, NULL, NULL, NULL);
-					RequestTeleportHandler(i, "0   ");
-				}
 
 				if (m_pClientList[i] == NULL) break;
 				// 필살기 카운트 증가 
@@ -4318,7 +4162,7 @@ void CGame::OnMainLogSocketEvent(UINT message, WPARAM wParam, LPARAM lParam)
 		break;
 	
 	case DEF_XSOCKEVENT_BLOCK:
-		PutLogList("(!!!) Main-log-socket BLOCKED!");
+		// PutLogList("(!!!) Main-log-socket BLOCKED!");
 		break;
 	
 	case DEF_XSOCKEVENT_CONFIRMCODENOTMATCH:
@@ -4359,8 +4203,8 @@ void CGame::OnMainLogRead()
 	}	
 }
 
-
-BOOL CGame::bSendMsgToLS(DWORD dwMsg, int iClientH, BOOL bFlag)
+// v2.14 GM Log 를 윌드 서버로 보내기 위해 수정함 .
+BOOL CGame::bSendMsgToLS(DWORD dwMsg, int iClientH, BOOL bFlag,char * pData)
 {
  DWORD * dwp;
  WORD  * wp;
@@ -4522,7 +4366,7 @@ BOOL CGame::bSendMsgToLS(DWORD dwMsg, int iClientH, BOOL bFlag)
 		cp += 16;
 
 		wp  = (WORD *)cp;
-		*wp = m_iGameServerPort;
+		*wp = (WORD) m_iGameServerPort;
 		cp += 2;
 
 		*cp = m_iTotalMaps;
@@ -4651,6 +4495,22 @@ BOOL CGame::bSendMsgToLS(DWORD dwMsg, int iClientH, BOOL bFlag)
 		memcpy((char *)cp, cAccountPassword, 10);
 		cp += 10;
 
+#ifdef DEF_DBGAMESERVER
+		// v2.14 DB 저장 속도 향상 
+		dwp = (DWORD *) cp ;
+		*dwp = m_pClientList[iClientH]->m_dwCharID  ;
+		cp += 4 ;
+
+		*cp = (char)bFlag; // 카운팅 플래그 
+		cp++;
+		
+		iSize = _iComposePlayerDataFileContents(iClientH, cp);
+		
+		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(G_cData50000, 41 + iSize);
+		iSendSize = 41 + iSize;
+		break;
+#else
+
 		*cp = (char)bFlag; // 카운팅 플래그 
 		cp++;
 		
@@ -4659,6 +4519,7 @@ BOOL CGame::bSendMsgToLS(DWORD dwMsg, int iClientH, BOOL bFlag)
 		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(G_cData50000, 37 + iSize);
 		iSendSize = 37 + iSize;
 		break;
+#endif
 
 	case MSGID_REQUEST_NOSAVELOGOUT:
 
@@ -4824,6 +4685,73 @@ BOOL CGame::bSendMsgToLS(DWORD dwMsg, int iClientH, BOOL bFlag)
 		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(G_cData50000, 36);
 		iSendSize = 36;
 		break;
+	case MSGID_GAMEMASTERLOG:
+
+		// Sub-log-socket을 사용한 전송에서는 반드시 체크해야 하는 루틴.
+		if (_bCheckSubLogSocketIndex() == FALSE) return FALSE;
+		
+		if (m_pClientList[iClientH] == NULL) return FALSE;
+		if (pData == NULL) return FALSE ;
+		
+		
+		dwp  = (DWORD *)(G_cData50000 + DEF_INDEX4_MSGID);
+		*dwp = MSGID_GAMEMASTERLOG;
+		wp   = (WORD *)(G_cData50000 + DEF_INDEX2_MSGTYPE);
+		*wp  = DEF_MSGTYPE_CONFIRM;
+
+		cp = (char *)(G_cData50000 + DEF_INDEX2_MSGTYPE + 2);
+
+		iSize =  strlen(pData) ;
+		memcpy((char *)cp, pData, iSize);
+			
+		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(G_cData50000, 6 + iSize);
+		iSendSize = 6 + iSize;
+		break;
+		// v2.15 
+	case MSGID_GAMEITEMLOG:
+
+		// Sub-log-socket을 사용한 전송에서는 반드시 체크해야 하는 루틴.
+		if (_bCheckSubLogSocketIndex() == FALSE) return FALSE;
+		
+//		if (m_pClientList[iClientH] == NULL) return FALSE;
+		if (pData == NULL) return FALSE ;
+		
+		dwp  = (DWORD *)(G_cData50000 + DEF_INDEX4_MSGID);
+		*dwp = MSGID_GAMEITEMLOG;
+		wp   = (WORD *)(G_cData50000 + DEF_INDEX2_MSGTYPE);
+		*wp  = DEF_MSGTYPE_CONFIRM;
+
+		cp = (char *)(G_cData50000 + DEF_INDEX2_MSGTYPE + 2);
+
+		iSize =  strlen(pData) ;
+		memcpy((char *)cp, pData, iSize);
+			
+		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(G_cData50000, 6 + iSize);
+		iSendSize = 6 + iSize;
+		break;
+
+	case MSGID_GAMECRUSADELOG:
+
+		// Sub-log-socket을 사용한 전송에서는 반드시 체크해야 하는 루틴.
+		if (_bCheckSubLogSocketIndex() == FALSE) return FALSE;
+		
+//		if (m_pClientList[iClientH] == NULL) return FALSE;
+		if (pData == NULL) return FALSE ;
+		
+		dwp  = (DWORD *)(G_cData50000 + DEF_INDEX4_MSGID);
+		*dwp = MSGID_GAMECRUSADELOG;
+		wp   = (WORD *)(G_cData50000 + DEF_INDEX2_MSGTYPE);
+		*wp  = DEF_MSGTYPE_CONFIRM;
+
+		cp = (char *)(G_cData50000 + DEF_INDEX2_MSGTYPE + 2);
+
+		iSize =  strlen(pData) ;
+		memcpy((char *)cp, pData, iSize);
+			
+		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(G_cData50000, 6 + iSize);
+		iSendSize = 6 + iSize;
+		break;
+
 	}
 
 	switch (iRet) {
@@ -4863,802 +4791,12 @@ BOOL CGame::bSendMsgToLS(DWORD dwMsg, int iClientH, BOOL bFlag)
 	return TRUE;
 }
 
-/*
-BOOL CGame::bSendMsgToLS(DWORD dwMsg, int iClientH, BOOL bFlag)
-{
- DWORD * dwp;
- WORD  * wp;
- int     iRet, i, iSize;
- char    cData[1000], cCharName[11], cAccountName[11], cAccountPassword[11], cAddress[16], cGuildName[21], cTxt[120], * pData, * cp;
- char    cGuildLoc[11], cTemp[120];
- int   * ip, iCnt;
- BOOL	 bLoopFlag;
-
-	// 메시지를 보낼 Sub-log-socket 인덱스 전진 
-	m_iCurSubLogSockIndex++;
-	if (m_iCurSubLogSockIndex >= DEF_MAXSUBLOGSOCK) m_iCurSubLogSockIndex = 0;
-
-
-	// 메시지를 보내기에 적당한 Sub-log-socket을 찾는다.
-	iCnt = 0;
-	bLoopFlag = FALSE;
-	while (bLoopFlag == FALSE) {
-		if (m_pSubLogSock[m_iCurSubLogSockIndex] != NULL) 
-			 bLoopFlag = TRUE;
-		else m_iCurSubLogSockIndex++;
-
-		iCnt++;
-		if (iCnt >= DEF_MAXSUBLOGSOCK) {
-			// 보낼 수 있는 Sub-log-socket이 하나도 없다. 강제 셧다운 모드로 전환 
-			if (m_bOnExitProcess == FALSE) {
-				m_cShutDownCode      = 3;
-				m_bOnExitProcess     = TRUE;
-				m_dwExitProcessTime  = timeGetTime();
-				// 게임 서버 셧다운이 시작되면 더이상의 클라이언트 접속이 거부된다. 
-				PutLogList("(!) GAME SERVER SHUTDOWN PROCESS STARTED(by Log-server connection Lost)!!!");
-			}
-			return FALSE;
-		}
-	}
-
-	// v1.41
-	ZeroMemory(G_cData10000, sizeof(G_cData10000));
-	ZeroMemory(cData, sizeof(cData));
-	ZeroMemory(cCharName, sizeof(cCharName));
-	ZeroMemory(cAccountName, sizeof(cAccountName));
-	ZeroMemory(cAccountPassword, sizeof(cAccountPassword));
-	ZeroMemory(cAddress,   sizeof(cAddress));
-	ZeroMemory(cGuildName, sizeof(cGuildName));
-	ZeroMemory(cGuildLoc,  sizeof(cGuildLoc));
-
-	switch (dwMsg) {
-	case MSGID_GAMESERVERSHUTDOWNED:
-		if (m_pMainLogSock == NULL) return FALSE;
-
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_GAMESERVERSHUTDOWNED;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-		
-		// 이 메시지는 m_pMainLogSock으로 보내야 한다. 
-		iRet = m_pMainLogSock->iSendMsg(cData, 6);
-		return TRUE;
-
-	case MSGID_ENTERGAMECONFIRM:
-		if (m_pClientList[iClientH] == NULL) return FALSE;
-
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_ENTERGAMECONFIRM;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-		
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cp, m_pClientList[iClientH]->m_cAccountName, 10);
-		cp += 10;
-
-		ZeroMemory(cTxt, sizeof(cTxt));
-		m_pClientList[iClientH]->m_pXSock->iGetPeerAddress(cTxt);
-		memcpy(cp, cTxt, 16);
-		cp += 16;
-
-		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(cData, 32);
-		break;
-	
-	case MSGID_REQUEST_REGISTERGAMESERVER:
-		// 로그 서버에게 게임서버 등록을 요청한다.
-		if (m_pMainLogSock == NULL) return FALSE;
-				
-		wsprintf(cTxt, "(!) Try to register game server(%s)", m_cServerName);
-		PutLogList(cTxt);
-		
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_REQUEST_REGISTERGAMESERVER;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-		
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cAccountName, m_cServerName, 10);
-		memcpy(cAddress, m_cGameServerAddr, strlen(m_cGameServerAddr));
-
-		memcpy(cp, cAccountName, 10);
-		cp += 10;
-
-		memcpy(cp, cAddress, 16);
-		cp += 16;
-
-		wp  = (WORD *)cp;
-		*wp = m_iGameServerPort;
-		cp += 2;
-
-		*cp = m_iTotalMaps;
-		cp++;
-
-		for (i = 0; i < m_iTotalMaps; i++) {
-			memcpy(cp, m_pMapList[i]->m_cName, 11);
-			cp += 11;
-		}
-
-		// 이 메시지는 m_pMainLogSock으로 보내야 한다. 
-		iRet = m_pMainLogSock->iSendMsg(cData, 35 + m_iTotalMaps*11);
-		return TRUE;
-
-	case MSGID_REQUEST_PLAYERDATA:
-		// 로그 서버로 플레이어 데이터를 요청한다.
-		if (m_pClientList[iClientH] == NULL) return FALSE;
-
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_REQUEST_PLAYERDATA;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cCharName, m_pClientList[iClientH]->m_cCharName, 10);
-		memcpy(cAccountName, m_pClientList[iClientH]->m_cAccountName, 10);
-		memcpy(cAccountPassword, m_pClientList[iClientH]->m_cAccountPassword, 10);
-
-		memcpy((char *)cp, cCharName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountPassword, 10);
-		cp += 10;
-
-		ZeroMemory(cTemp, sizeof(cTemp));
-		iRet = m_pClientList[iClientH]->m_pXSock->iGetPeerAddress(cTemp);
-		memcpy((char *)cp, cTemp, 15);
-		cp += 15;
-		
-		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(cData, 52);
-		break;
-	
-	case MSGID_REQUEST_SAVEARESDENOCCUPYFLAGDATA:
-		if (m_iMiddlelandMapIndex < 0) return FALSE;
-		
-		//testcode
-		PutLogList("(!) Middleland Aresden OccupyFlag data saved.");
-		
-		pData = new char[30000];
-		if (pData == NULL) return FALSE;
-		ZeroMemory(pData, 30000);
-		
-		dwp  = (DWORD *)(pData + DEF_INDEX4_MSGID);
-		*dwp = dwMsg;
-		wp   = (WORD *)(pData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(pData + DEF_INDEX2_MSGTYPE + 2);
-		iSize = _iComposeFlagStatusContents(cp, 1);
-		
-		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(pData, 6 + iSize + 10);
-		delete pData;
-		break;
-
-	case MSGID_REQUEST_SAVEELVINEOCCUPYFLAGDATA:
-		if (m_iMiddlelandMapIndex < 0) return FALSE;
-		
-		//testcode
-		PutLogList("(!) Middleland Elvine OccupyFlag data saved.");
-		
-		pData = new char[30000];
-		if (pData == NULL) return FALSE;
-		ZeroMemory(pData, 30000);
-		
-		dwp  = (DWORD *)(pData + DEF_INDEX4_MSGID);
-		*dwp = dwMsg;
-		wp   = (WORD *)(pData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(pData + DEF_INDEX2_MSGTYPE + 2);
-		iSize = _iComposeFlagStatusContents(cp, 2);
-		
-		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(pData, 6 + iSize + 10);
-		delete pData;
-		break;
-
-	case MSGID_REQUEST_SAVEPLAYERDATA_REPLY:
-	case MSGID_REQUEST_SAVEPLAYERDATA:
-	case MSGID_REQUEST_SAVEPLAYERDATALOGOUT:
-		
-		if (m_pClientList[iClientH] == NULL) return FALSE;
-
-		pData = new char[30000];
-		if (pData == NULL) return FALSE;
-		ZeroMemory(pData, 30000);
-
-		dwp  = (DWORD *)(pData + DEF_INDEX4_MSGID);
-		*dwp = dwMsg;
-		wp   = (WORD *)(pData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(pData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cCharName, m_pClientList[iClientH]->m_cCharName, 10);
-		memcpy(cAccountName, m_pClientList[iClientH]->m_cAccountName, 10);
-		memcpy(cAccountPassword, m_pClientList[iClientH]->m_cAccountPassword, 10);
-
-		memcpy((char *)cp, cCharName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountPassword, 10);
-		cp += 10;
-
-		*cp = (char)bFlag; // 카운팅 플래그 
-		cp++;
-		
-		iSize = _iComposePlayerDataFileContents(iClientH, cp);
-		
-		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(pData, 37 + iSize);
-		
-		delete pData;
-		break;
-
-	case MSGID_REQUEST_NOSAVELOGOUT:
-		
-		if (m_pClientList[iClientH] == NULL) return FALSE;
-		
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_REQUEST_NOSAVELOGOUT;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cCharName, m_pClientList[iClientH]->m_cCharName, 10);
-		memcpy(cAccountName, m_pClientList[iClientH]->m_cAccountName, 10);
-		memcpy(cAccountPassword, m_pClientList[iClientH]->m_cAccountPassword, 10);
-
-		memcpy((char *)cp, cCharName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountPassword, 10);
-		cp += 10;
-		
-		*cp = (char)bFlag; // 카운팅 플래그 
-		cp++;
-		
-		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(cData, 37);
-		break;
-
-	case MSGID_REQUEST_CREATENEWGUILD:
-		
-		if (m_pClientList[iClientH] == NULL) return FALSE;
-		
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_REQUEST_CREATENEWGUILD;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cCharName, m_pClientList[iClientH]->m_cCharName, 10);
-		memcpy(cAccountName, m_pClientList[iClientH]->m_cAccountName, 10);
-		memcpy(cAccountPassword, m_pClientList[iClientH]->m_cAccountPassword, 10);
-		memcpy(cGuildName, m_pClientList[iClientH]->m_cGuildName, 20);
-		memcpy(cGuildLoc, m_pClientList[iClientH]->m_cLocation, 10);
-
-		memcpy((char *)cp, cCharName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountPassword, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cGuildName, 20);
-		cp += 20;
-		memcpy((char *)cp, cGuildLoc, 10);
-		cp += 10;
-
-		ip = (int *)cp;
-		*ip = m_pClientList[iClientH]->m_iGuildGUID;
-		cp += 4;
-
-		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(cData, 75);
-		break;
-
-	case MSGID_REQUEST_DISBANDGUILD:
-		
-		if (m_pClientList[iClientH] == NULL) return FALSE;
-		
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_REQUEST_DISBANDGUILD;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cCharName, m_pClientList[iClientH]->m_cCharName, 10);
-		memcpy(cAccountName, m_pClientList[iClientH]->m_cAccountName, 10);
-		memcpy(cAccountPassword, m_pClientList[iClientH]->m_cAccountPassword, 10);
-		memcpy(cGuildName, m_pClientList[iClientH]->m_cGuildName, 20);
-
-		memcpy((char *)cp, cCharName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountPassword, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cGuildName, 20);
-		cp += 20;
-
-		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(cData, 56);
-		break;
-
-	case MSGID_REQUEST_UPDATEGUILDINFO_NEWGUILDSMAN:
-		
-		if (m_pClientList[iClientH] == NULL) return FALSE;
-		
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_REQUEST_UPDATEGUILDINFO_NEWGUILDSMAN;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cCharName, m_pClientList[iClientH]->m_cCharName, 10);
-		memcpy(cGuildName, m_pClientList[iClientH]->m_cGuildName, 20);
-
-		memcpy((char *)cp, cCharName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cGuildName, 20);
-		cp += 20;
-
-		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(cData, 36);
-		break;
-
-	case MSGID_REQUEST_UPDATEGUILDINFO_DELGUILDSMAN:
-		
-		if (m_pClientList[iClientH] == NULL) return FALSE;
-
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_REQUEST_UPDATEGUILDINFO_DELGUILDSMAN;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cCharName, m_pClientList[iClientH]->m_cCharName, 10);
-		memcpy(cGuildName, m_pClientList[iClientH]->m_cGuildName, 20);
-
-		memcpy((char *)cp, cCharName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cGuildName, 20);
-		cp += 20;
-
-		iRet = m_pSubLogSock[m_iCurSubLogSockIndex]->iSendMsg(cData, 36);
-		break;
-	}
-
-	switch (iRet) {
-	case DEF_XSOCKEVENT_QUENEFULL:
-	case DEF_XSOCKEVENT_SOCKETERROR:
-	case DEF_XSOCKEVENT_CRITICALERROR:
-	case DEF_XSOCKEVENT_SOCKETCLOSED:
-		// Sub-log-socket을 사용해서 로그 서버로 메시지를 보낼때 에러가 발생했다.
-		PutLogList("(!) Sub log socket send error!");
-		delete m_pSubLogSock[m_iCurSubLogSockIndex];
-		m_pSubLogSock[m_iCurSubLogSockIndex] = NULL;
-		m_bIsSubLogSockAvailable[m_iCurSubLogSockIndex] = FALSE;
-				
-		// 다시 연결을 시도 
-		m_pSubLogSock[m_iCurSubLogSockIndex] = new class XSocket(m_hWnd, DEF_SERVERSOCKETBLOCKLIMIT);
-		m_pSubLogSock[m_iCurSubLogSockIndex]->bConnect(m_cLogServerAddr, m_iLogServerPort, (WM_ONLOGSOCKETEVENT + m_iCurSubLogSockIndex + 1));
-		m_pSubLogSock[m_iCurSubLogSockIndex]->bInitBufferSize(DEF_MSGBUFFERSIZE);
-
-		wsprintf(G_cTxt, "(!) Try to reconnect sub-log-socket(%d)... Addr:%s  Port:%d", m_iCurSubLogSockIndex, m_cLogServerAddr, m_iLogServerPort);
-		PutLogList(G_cTxt);
-
-		// 보내려다 실패한 메시지는 다른 소켓을 사용해서 보내야 한다. 
-
-		return FALSE;
-	}
-
-	return TRUE;
-}
-*/
-
-
-/*
-void CGame::SendMsgToLS(DWORD dwMsg, int iClientH, BOOL bFlag)
-{
- DWORD * dwp;
- WORD  * wp;
- int     iRet, i, iSize;
- char    cData[1000], cCharName[11], cAccountName[11], cAccountPassword[11], cAddress[16], cGuildName[21], cTxt[120], * pData, * cp;
- char    cGuildLoc[11], cTemp[120];
- int   * ip;
-
-	if (m_pLogSock == NULL) {
-		PutLogList("(!) SendMsgToLS fail - Socket to Log-Server not available.");
-		return;
-	}
-
-	ZeroMemory(cData, sizeof(cData));
-	ZeroMemory(cCharName, sizeof(cCharName));
-	ZeroMemory(cAccountName, sizeof(cAccountName));
-	ZeroMemory(cAccountPassword, sizeof(cAccountPassword));
-	ZeroMemory(cAddress,   sizeof(cAddress));
-	ZeroMemory(cGuildName, sizeof(cGuildName));
-	ZeroMemory(cGuildLoc,  sizeof(cGuildLoc));
-
-	switch (dwMsg) {
-	case MSGID_GAMESERVERSHUTDOWNED:
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_GAMESERVERSHUTDOWNED;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-		
-		iRet = m_pLogSock->iSendMsg(cData, 6);
-		break;
-
-	case MSGID_ENTERGAMECONFIRM:
-		if (m_pClientList[iClientH] == NULL) return;
-
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_ENTERGAMECONFIRM;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-		
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cp, m_pClientList[iClientH]->m_cAccountName, 10);
-		cp += 10;
-
-		ZeroMemory(cTxt, sizeof(cTxt));
-		m_pClientList[iClientH]->m_pXSock->iGetPeerAddress(cTxt);
-		memcpy(cp, cTxt, 16);
-		cp += 16;
-
-		iRet = m_pLogSock->iSendMsg(cData, 32);
-		break;
-	
-	case MSGID_REQUEST_REGISTERGAMESERVER:
-		// 로그 서버에게 게임서버 등록을 요청한다.
-		wsprintf(cTxt, "(!) Try to register game server(%s)", m_cServerName);
-		PutLogList(cTxt);
-		
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_REQUEST_REGISTERGAMESERVER;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-		
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cAccountName, m_cServerName, 10);
-		memcpy(cAddress, m_cGameServerAddr, strlen(m_cGameServerAddr));
-
-		memcpy(cp, cAccountName, 10);
-		cp += 10;
-
-		memcpy(cp, cAddress, 16);
-		cp += 16;
-
-		wp  = (WORD *)cp;
-		*wp = m_iGameServerPort;
-		cp += 2;
-
-		*cp = m_iTotalMaps;
-		cp++;
-
-		for (i = 0; i < m_iTotalMaps; i++) {
-			memcpy(cp, m_pMapList[i]->m_cName, 11);
-			cp += 11;
-		}
-
-		iRet = m_pLogSock->iSendMsg(cData, 35 + m_iTotalMaps*11);
-		break;
-
-	case MSGID_REQUEST_PLAYERDATA:
-		// 로그 서버로 플레이어 데이터를 요청한다.
-		if (m_pClientList[iClientH] == NULL) return;
-
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_REQUEST_PLAYERDATA;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cCharName, m_pClientList[iClientH]->m_cCharName, 10);
-		memcpy(cAccountName, m_pClientList[iClientH]->m_cAccountName, 10);
-		memcpy(cAccountPassword, m_pClientList[iClientH]->m_cAccountPassword, 10);
-
-		memcpy((char *)cp, cCharName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountPassword, 10);
-		cp += 10;
-
-		ZeroMemory(cTemp, sizeof(cTemp));
-		iRet = m_pClientList[iClientH]->m_pXSock->iGetPeerAddress(cTemp);
-		memcpy((char *)cp, cTemp, 15);
-		cp += 15;
-		
-		iRet = m_pLogSock->iSendMsg(cData, 52);
-		break;
-	
-	case MSGID_REQUEST_SAVEARESDENOCCUPYFLAGDATA:
-		if (m_iMiddlelandMapIndex < 0) return;
-		
-		//testcode
-		PutLogList("(!) Middleland Aresden OccupyFlag data saved.");
-		
-		pData = new char[30000];
-		if (pData == NULL) return;
-		ZeroMemory(pData, 30000);
-		
-		dwp  = (DWORD *)(pData + DEF_INDEX4_MSGID);
-		*dwp = dwMsg;
-		wp   = (WORD *)(pData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(pData + DEF_INDEX2_MSGTYPE + 2);
-		iSize = _iComposeFlagStatusContents(cp, 1);
-		
-		iRet = m_pLogSock->iSendMsg(pData, 6 + iSize + 10);
-		delete pData;
-		break;
-
-	case MSGID_REQUEST_SAVEELVINEOCCUPYFLAGDATA:
-		if (m_iMiddlelandMapIndex < 0) return;
-		
-		//testcode
-		PutLogList("(!) Middleland Elvine OccupyFlag data saved.");
-		
-		pData = new char[30000];
-		if (pData == NULL) return;
-		ZeroMemory(pData, 30000);
-		
-		dwp  = (DWORD *)(pData + DEF_INDEX4_MSGID);
-		*dwp = dwMsg;
-		wp   = (WORD *)(pData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(pData + DEF_INDEX2_MSGTYPE + 2);
-		iSize = _iComposeFlagStatusContents(cp, 2);
-		
-		iRet = m_pLogSock->iSendMsg(pData, 6 + iSize + 10);
-		delete pData;
-		break;
-
-	case MSGID_REQUEST_SAVEPLAYERDATA_REPLY:
-	case MSGID_REQUEST_SAVEPLAYERDATA:
-	case MSGID_REQUEST_SAVEPLAYERDATALOGOUT:
-		
-		if (m_pClientList[iClientH] == NULL) return;
-
-		pData = new char[30000];
-		if (pData == NULL) return;
-		ZeroMemory(pData, 30000);
-
-		dwp  = (DWORD *)(pData + DEF_INDEX4_MSGID);
-		*dwp = dwMsg;
-		wp   = (WORD *)(pData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(pData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cCharName, m_pClientList[iClientH]->m_cCharName, 10);
-		memcpy(cAccountName, m_pClientList[iClientH]->m_cAccountName, 10);
-		memcpy(cAccountPassword, m_pClientList[iClientH]->m_cAccountPassword, 10);
-
-		memcpy((char *)cp, cCharName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountPassword, 10);
-		cp += 10;
-
-		*cp = (char)bFlag; // 카운팅 플래그 
-		cp++;
-
-		//testcode
-		//wsprintf(G_cTxt, "CountFlag (%d)", bFlag);
-		//PutLogList(G_cTxt);
-
-		iSize = _iComposePlayerDataFileContents(iClientH, cp);
-		
-		iRet = m_pLogSock->iSendMsg(pData, 37 + iSize);
-		
-		delete pData;
-		break;
-
-	case MSGID_REQUEST_NOSAVELOGOUT:
-		
-		if (m_pClientList[iClientH] == NULL) return;
-		
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_REQUEST_NOSAVELOGOUT;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cCharName, m_pClientList[iClientH]->m_cCharName, 10);
-		memcpy(cAccountName, m_pClientList[iClientH]->m_cAccountName, 10);
-		memcpy(cAccountPassword, m_pClientList[iClientH]->m_cAccountPassword, 10);
-
-		memcpy((char *)cp, cCharName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountPassword, 10);
-		cp += 10;
-		
-		*cp = (char)bFlag; // 카운팅 플래그 
-		cp++;
-		
-		iRet = m_pLogSock->iSendMsg(cData, 37);
-		break;
-
-	case MSGID_REQUEST_CREATENEWGUILD:
-		
-		if (m_pClientList[iClientH] == NULL) return;
-		
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_REQUEST_CREATENEWGUILD;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cCharName, m_pClientList[iClientH]->m_cCharName, 10);
-		memcpy(cAccountName, m_pClientList[iClientH]->m_cAccountName, 10);
-		memcpy(cAccountPassword, m_pClientList[iClientH]->m_cAccountPassword, 10);
-		memcpy(cGuildName, m_pClientList[iClientH]->m_cGuildName, 20);
-		memcpy(cGuildLoc, m_pClientList[iClientH]->m_cLocation, 10);
-
-		memcpy((char *)cp, cCharName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountPassword, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cGuildName, 20);
-		cp += 20;
-		memcpy((char *)cp, cGuildLoc, 10);
-		cp += 10;
-
-		ip = (int *)cp;
-		*ip = m_pClientList[iClientH]->m_iGuildGUID;
-		cp += 4;
-
-		iRet = m_pLogSock->iSendMsg(cData, 75);
-		break;
-
-	case MSGID_REQUEST_DISBANDGUILD:
-		
-		if (m_pClientList[iClientH] == NULL) return;
-		
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_REQUEST_DISBANDGUILD;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cCharName, m_pClientList[iClientH]->m_cCharName, 10);
-		memcpy(cAccountName, m_pClientList[iClientH]->m_cAccountName, 10);
-		memcpy(cAccountPassword, m_pClientList[iClientH]->m_cAccountPassword, 10);
-		memcpy(cGuildName, m_pClientList[iClientH]->m_cGuildName, 20);
-
-		memcpy((char *)cp, cCharName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cAccountPassword, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cGuildName, 20);
-		cp += 20;
-
-		iRet = m_pLogSock->iSendMsg(cData, 56);
-		break;
-
-	case MSGID_REQUEST_UPDATEGUILDINFO_NEWGUILDSMAN:
-		
-		if (m_pClientList[iClientH] == NULL) return;
-		
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_REQUEST_UPDATEGUILDINFO_NEWGUILDSMAN;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cCharName, m_pClientList[iClientH]->m_cCharName, 10);
-		memcpy(cGuildName, m_pClientList[iClientH]->m_cGuildName, 20);
-
-		memcpy((char *)cp, cCharName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cGuildName, 20);
-		cp += 20;
-
-		iRet = m_pLogSock->iSendMsg(cData, 36);
-		break;
-
-	case MSGID_REQUEST_UPDATEGUILDINFO_DELGUILDSMAN:
-		
-		if (m_pClientList[iClientH] == NULL) return;
-
-		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-		*dwp = MSGID_REQUEST_UPDATEGUILDINFO_DELGUILDSMAN;
-		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-		*wp  = DEF_MSGTYPE_CONFIRM;
-
-		cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
-
-		memcpy(cCharName, m_pClientList[iClientH]->m_cCharName, 10);
-		memcpy(cGuildName, m_pClientList[iClientH]->m_cGuildName, 20);
-
-		memcpy((char *)cp, cCharName, 10);
-		cp += 10;
-
-		memcpy((char *)cp, cGuildName, 20);
-		cp += 20;
-
-		iRet = m_pLogSock->iSendMsg(cData, 36);
-		break;
-	}
-
-	switch (iRet) {
-	case DEF_XSOCKEVENT_QUENEFULL:
-	case DEF_XSOCKEVENT_SOCKETERROR:
-	case DEF_XSOCKEVENT_CRITICALERROR:
-	case DEF_XSOCKEVENT_SOCKETCLOSED:
-		// 로그 서버로 메시지를 보낼때 에러가 발생했다.
-		PutLogList("(***) Socket to Log-Server crashed! Critical error!");
-		delete m_pLogSock;
-		m_pLogSock = NULL;
-		m_bIsLogSockAvailable = FALSE;
-		
-		// 로그 서버와의 연결이 끊겼으므로 복구할 수 없다. 자동으로 서버를 셧다운한다.
-		if (m_bOnExitProcess == FALSE) {
-			m_cShutDownCode      = 3;
-			m_bOnExitProcess     = TRUE;
-			m_dwExitProcessTime  = timeGetTime();
-			// 게임 서버 셧다운이 시작되면 더이상의 클라이언트 접속이 거부된다. 
-			PutLogList("(!) GAME SERVER SHUTDOWN PROCESS STARTED(by Log-server connection Lost)!!!");
-		}
-		return;
-	}
-}
-*/
 
 
 void CGame::ResponsePlayerDataHandler(char * pData, DWORD dwSize)
 {
  WORD * wp;
+ DWORD * dwp ;
  char * cp, cCharName[11], cTxt[120];
  int  i; 
  
@@ -5682,11 +4820,23 @@ void CGame::ResponsePlayerDataHandler(char * pData, DWORD dwSize)
 	
 			case DEF_LOGRESMSGTYPE_REJECT:
 				// 이 클라이언트의 데이터 초기화가 거부되었다. 접속을 끊는다.
-				wsprintf(G_cTxt, "(HACK?) Not existing character(%s) data request! Rejected!", m_pClientList[i]->m_cCharName);
-				PutLogList(G_cTxt);
-				//PutLogFileList(G_cTxt); // v1.4
+				// v2.15 2002-5-21
+				if( *cp == 1) {
+					ZeroMemory(cTxt, sizeof(cTxt));
+					dwp  = (DWORD *)(cTxt + DEF_INDEX4_MSGID);
+					*dwp = MSGID_RESPONSE_INITPLAYER;
+					wp   = (WORD *)(cTxt + DEF_INDEX2_MSGTYPE);
+					*wp  = DEF_MSGTYPE_REJECT;
 
-				DeleteClient(i, FALSE, FALSE);
+					m_pClientList[i]->m_pXSock->iSendMsg(cTxt, 6); 
+				}
+				else {
+					wsprintf(G_cTxt, "(HACK?) Not existing character(%s) data request! Rejected!", m_pClientList[i]->m_cCharName);
+					PutLogList(G_cTxt);
+					//PutLogFileList(G_cTxt); // v1.4
+
+					DeleteClient(i, FALSE, FALSE);
+				}
 				break;
 			
 			default:
@@ -5707,8 +4857,10 @@ void CGame::InitPlayerData(int iClientH, char * pData, DWORD dwSize)
  char  * cp, cName[11], cData[256], cTxt[256], cGuildStatus;
  DWORD * dwp;
  WORD  * wp;
- int     iRet;
+ int     i, iRet;
  BOOL    bRet;
+ char  cPrice = 0;
+
 
 	if (m_pClientList[iClientH] == NULL) return;
 	if (m_pClientList[iClientH]->m_bIsInitComplete == TRUE) return; // 이미 초기화 된 캐릭터의 데이터이다. 이런일이 있을 수 있을까?
@@ -5757,12 +4909,13 @@ void CGame::InitPlayerData(int iClientH, char * pData, DWORD dwSize)
 		GetMapInitialPoint(m_pClientList[iClientH]->m_cMapIndex, &m_pClientList[iClientH]->m_sX, &m_pClientList[iClientH]->m_sY, m_pClientList[iClientH]->m_cLocation);
 	}
 
-	// 플레이어의 소속에 따라 Side를 결정한다. 여행자라면 0을 유지하고 Aresden이면 1, Elvine이면 2를 할당한다.
-	if (memcmp(m_pClientList[iClientH]->m_cLocation, "aresden", 7) == 0) 
-		m_pClientList[iClientH]->m_cSide = 1;
+	// Side, OnTown, OnShop 정보를 가져온다.
+	iSetSide(iClientH);
 
-	if (memcmp(m_pClientList[iClientH]->m_cLocation, "elvine", 6) == 0) 
-		m_pClientList[iClientH]->m_cSide = 2;
+	// v2.20 2002-12-31 민간인 모드 레벨 제한 과 이동지역 제한 추가 
+	// 기존의 레벨이 높은 캐릭터가 민간인 모드로 설정 되어 있으면 
+	if ((m_pClientList[iClientH]->m_iLevel > DEF_LIMITHUNTERLEVEL) && (m_pClientList[iClientH]->m_bIsHunter == TRUE ) ) 
+		SetNoHunterMode(iClientH) ;
 
 	// 다음 레벨의 경험치를 구한다.
 	m_pClientList[iClientH]->m_iNextLevelExp = m_iLevelExpTable[m_pClientList[iClientH]->m_iLevel + 1]; //iGetLevelExp(m_pClientList[iClientH]->m_iLevel + 1);
@@ -5773,7 +4926,13 @@ void CGame::InitPlayerData(int iClientH, char * pData, DWORD dwSize)
 	iCalcTotalWeight(iClientH);
 
 	// 특수 이벤트 계산 
-	CheckSpecialEvent(iClientH);
+//	CheckSpecialEvent(iClientH);
+
+	CheckSpecialEventThirdYear(iClientH);
+
+	// 2002-7-4 
+	if ((m_pClientList[iClientH]->m_iAdminUserLevel >= 1) && (m_pClientList[iClientH]->m_iAdminUserLevel <= 4))
+		SetInvisibilityFlag(iClientH, DEF_OWNERTYPE_PLAYER, TRUE);
 
 	// GuildName이 NONE이 아니고 GuildStatus가 0이면 접속중이 아닐때 길드가 지워졌다는 의미.
 	if ((cGuildStatus == 0) && (memcmp(m_pClientList[iClientH]->m_cGuildName, "NONE", 4) != 0)) {
@@ -5785,6 +4944,16 @@ void CGame::InitPlayerData(int iClientH, char * pData, DWORD dwSize)
 		
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_GUILDDISBANDED, NULL, NULL, NULL, m_pClientList[iClientH]->m_cGuildName);
 	}
+
+	//v2.19 2002-11-14 전면전 승리한쪽으 가격을 10프로 싸게 해준다.
+	if( TRUE == m_pClientList[iClientH]->m_bIsOnShop ) 
+	{
+		cPrice = 0;
+
+		if(m_iCrusadeWinnerSide == m_pClientList[iClientH]->m_cSide)
+			cPrice = -10;
+	}
+
 
 	// 메시지 전송 도중 에러가 발생하여 클라이언트가 삭제되었다면 처리 종료 
 	if (m_pClientList[iClientH] == NULL) {
@@ -5798,7 +4967,7 @@ void CGame::InitPlayerData(int iClientH, char * pData, DWORD dwSize)
 	*dwp = MSGID_RESPONSE_INITPLAYER;
 	wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
 	*wp  = DEF_MSGTYPE_CONFIRM;
-
+	
 	// 데이터 초기화 확인 메시지 전송
 	iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, 6);
 	switch (iRet) {
@@ -5820,6 +4989,39 @@ void CGame::InitPlayerData(int iClientH, char * pData, DWORD dwSize)
 
 	// 로그 서버에게 이 계정의 플레이어가 게임중에 들어왔음을 알려준다. 
 	bSendMsgToLS(MSGID_ENTERGAMECONFIRM, iClientH);
+
+	// v2.06 12-5 GateServer에 이 플레이어의 파티가 유효한지 묻는다.
+	if (m_pClientList[iClientH]->m_iPartyID != NULL) {
+		ZeroMemory(cData, sizeof(cData));
+		cp = (char *)cData;
+		dwp = (DWORD *)cp;
+		*dwp = MSGID_PARTYOPERATION;
+		cp += 4;
+		wp = (WORD*)cp;
+		*wp = 5; // 파티 멤버 확인 요청
+		cp += 2;
+		wp = (WORD *)cp;
+		*wp = iClientH;
+		cp += 2;
+		memcpy(cp, m_pClientList[iClientH]->m_cCharName, 10);
+		cp += 10;
+		wp = (WORD *)cp;
+		*wp = m_pClientList[iClientH]->m_iPartyID;
+		cp += 2;
+		SendMsgToGateServer(MSGID_PARTYOPERATION, iClientH, cData);
+
+		// 일단 파티 리스트에 등록한다.
+		for (i = 0; i < DEF_MAXPARTYMEMBERS; i++)
+		if (m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i] == 0) {
+			m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i] = iClientH;
+			m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers++;
+			//testcode
+			wsprintf(G_cTxt, "PartyID:%d member:%d In Total:%d", m_pClientList[iClientH]->m_iPartyID, iClientH, m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers);
+			PutLogList(G_cTxt);
+			goto IPD_LOOPBREAK1;
+		}
+IPD_LOOPBREAK1:;
+	}
 
 	// 서버 다운을 막기위한 최후의 조치이다.
 	if (m_iTotalClients > DEF_MAXONESERVERUSERS) {
@@ -5847,6 +5049,7 @@ void CGame::GameProcess()
 	DelayEventProcess();
 }
 
+/*
 BOOL CGame::bReadProgramConfigFile(char * cFn)
 {
  FILE * pFile;
@@ -5995,14 +5198,165 @@ BOOL CGame::bReadProgramConfigFile(char * cFn)
 
 	return TRUE;
 }
+*/
+BOOL CGame::bReadProgramConfigFile(char * cFn)
+{
+ FILE * pFile;
+ HANDLE hFile;
+ DWORD  dwFileSize;
+ char * cp, * token, cReadMode, cTxt[120];
+ char seps[] = "= \t\n";
+ class CStrTok * pStrTok;
 
+	cReadMode = 0;
+
+	hFile = CreateFile(cFn, GENERIC_READ, NULL, NULL, OPEN_EXISTING, NULL, NULL);
+	dwFileSize = GetFileSize(hFile, NULL);
+	if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
+
+	pFile = fopen(cFn, "rt");
+	if (pFile == NULL) {
+		// 게임서버의 초기화 파일을 읽을 수 없다.
+		//	PutLogList("(!) Cannot open configuration file.");
+		return FALSE;
+	}
+	else {
+		PutLogList("(!) Reading configuration file...");
+		cp = new char[dwFileSize+2];
+		ZeroMemory(cp, dwFileSize+2);
+		fread(cp, dwFileSize, 1, pFile);
+
+		pStrTok = new class CStrTok(cp, seps);
+		token = pStrTok->pGet();
+		//token = strtok( cp, seps );   
+		while( token != NULL )   {
+			
+			if (cReadMode != 0) {
+				switch (cReadMode) {
+				case 1:
+					ZeroMemory(m_cServerName, sizeof(m_cServerName));
+					if (strlen(token) > 10) {
+						// 서버의 이름이 너무 길다. 
+						wsprintf(cTxt, "(!!!) Game server name(%s) must within 10 chars!", token);
+						PutLogList(cTxt);
+						return FALSE;
+					}
+					strcpy(m_cServerName, token);
+					wsprintf(cTxt, "(*) Game server name : %s", m_cServerName);
+					PutLogList(cTxt);
+					cReadMode = 0;
+					break;
+
+				case 2:
+					// v2.04 게임서버 IP 자동으로 인식 
+					ZeroMemory(m_cGameServerAddr, sizeof(m_cGameServerAddr));
+					char ServerAddr[50];
+					::gethostname(ServerAddr,50); 
+					struct hostent *pHostEnt;
+					pHostEnt = ::gethostbyname(ServerAddr);
+					if( pHostEnt != NULL ){
+						wsprintf(ServerAddr, "%d.%d.%d.%d",
+						( pHostEnt->h_addr_list[0][0] & 0x00ff ),
+						( pHostEnt->h_addr_list[0][1] & 0x00ff ),
+						( pHostEnt->h_addr_list[0][2] & 0x00ff ),
+						( pHostEnt->h_addr_list[0][3] & 0x00ff ) );
+					}
+					strcpy(m_cGameServerAddr,ServerAddr );
+
+					wsprintf(cTxt, "(*) Game server address : %s", m_cGameServerAddr);
+					PutLogList(cTxt);
+
+					m_iGameServerPort = atoi(token);
+					wsprintf(cTxt, "(*) Game server port : %d", m_iGameServerPort);
+					PutLogList(cTxt);
+					cReadMode = 0;
+					break;
+
+				case 3:
+					ZeroMemory(m_cLogServerAddr, sizeof(m_cLogServerAddr));
+					if (strlen(token) > 15) {
+						// 주소가 15바이트 이상. 오류다. 
+						wsprintf(cTxt, "(!!!) Log server address(%s) must within 15 chars!", token);
+						PutLogList(cTxt);
+						return FALSE;
+					}
+					strcpy(m_cLogServerAddr, token);
+					wsprintf(cTxt, "(*) Log server address : %s", m_cLogServerAddr);
+					PutLogList(cTxt);
+					cReadMode = 0;
+					break;
+
+				case 4:
+					m_iLogServerPort = atoi(token);
+					wsprintf(cTxt, "(*) Log server port : %d", m_iLogServerPort);
+					PutLogList(cTxt);
+					cReadMode = 0;
+					break;
+					
+				case 5:
+					// 맵을 등록한다.
+					if (strlen(token) > 10) {
+						// 맵의 이름이 너무 길다.
+						wsprintf(cTxt, "(!!!) CRITICAL ERROR! Map name(%s) must within 10 chars!", token);
+						PutLogList(cTxt);
+						return FALSE;
+					}
+					if (_bRegisterMap(token) == FALSE) {
+						return FALSE;
+					}
+					cReadMode = 0;
+					break;
+
+				case 6:
+					ZeroMemory(m_cGateServerAddr, sizeof(m_cGateServerAddr));
+					if (strlen(token) > 15) {
+						// 주소가 15바이트 이상. 오류다. 
+						wsprintf(cTxt, "(!!!) Gate server address(%s) must within 15 chars!", token);
+						PutLogList(cTxt);
+						return FALSE;
+					}
+					strcpy(m_cGateServerAddr, token);
+					wsprintf(cTxt, "(*) Gate server address : %s", m_cGateServerAddr);
+					PutLogList(cTxt);
+					cReadMode = 0;
+					break;
+
+				case 7:
+					m_iGateServerPort = atoi(token);
+					wsprintf(cTxt, "(*) Gate server port : %d", m_iGateServerPort);
+					PutLogList(cTxt);
+					cReadMode = 0;
+					break;
+				}
+			}
+			else {
+				if (memcmp(token, "game-server-name", 16) == 0)			cReadMode = 1;
+				if (memcmp(token, "game-server-port", 16) == 0)			cReadMode = 2;
+				if (memcmp(token, "log-server-address", 18) == 0)		cReadMode = 3;
+				if (memcmp(token, "internal-log-server-port", 24) == 0) cReadMode = 4;
+				if (memcmp(token, "game-server-map", 15) == 0)			cReadMode = 5;
+				if (memcmp(token, "gate-server-address", 19) == 0)		cReadMode = 6;
+				if (memcmp(token, "gate-server-port", 16) == 0)			cReadMode = 7;
+			}
+			
+			token = pStrTok->pGet();
+			//token = strtok( NULL, seps );
+		}
+
+		delete pStrTok;
+		delete cp;
+	}
+	if (pFile != NULL) fclose(pFile);
+
+	return TRUE;
+}
 
 BOOL CGame::bReadCrusadeStructureConfigFile(char * cFn)
 {
  FILE * pFile;
  HANDLE hFile;
  DWORD  dwFileSize;
- char * cp, * token, cReadModeA, cReadModeB, cTxt[120];
+ char * cp, * token, cReadModeA, cReadModeB;
  char seps[] = "= \t\n";
  int   iIndex;
  class CStrTok * pStrTok;
@@ -6017,7 +5371,8 @@ BOOL CGame::bReadCrusadeStructureConfigFile(char * cFn)
 	pFile = fopen(cFn, "rt");
 	if (pFile == NULL) {
 		// 게임서버의 초기화 파일을 읽을 수 없다.
-		PutLogList("(!) Cannot open Crusade configuration file.");
+		// 12-16 성후니 변경 
+        // PutLogList("(!) Cannot open Crusade Schedule file.");
 		return FALSE;
 	}
 	else {
@@ -6046,7 +5401,7 @@ BOOL CGame::bReadCrusadeStructureConfigFile(char * cFn)
 
 						if (m_stCrusadeStructures[iIndex].cType != NULL) {
 							// 이미 할당된 번호가 있다. 에러이다.
-							PutLogList("(!!!) CRITICAL ERROR!  Crusade configuration file error - Duplicate portion number.");
+							PutLogList("(!!!) CRITICAL ERROR!  Crusade configuration file error - Duplicate potion number.");
 							delete cp;
 							delete pStrTok;
 							return FALSE;
@@ -6111,7 +5466,6 @@ BOOL CGame::bReadCrusadeStructureConfigFile(char * cFn)
 					cReadModeA = 1;
 					cReadModeB = 1;
 				}
-			
 			}
 			token = pStrTok->pGet();
 		}	
@@ -6184,6 +5538,1409 @@ BOOL CGame::_bRegisterMap(char * pName)
 	PutLogList(cTxt);
 	return FALSE;
 }
+
+// DB 서버를 사용하는 경우 메세지가 다르다.
+// 아래의 두개의 함수를 다르게 사용해야 한다.
+// BOOL CGame::_bDecodePlayerDatafileContents(int iClientH, char * pData, DWORD dwSize)
+// int CGame::_iComposePlayerDataFileContents(int iClientH, char * pData)
+
+
+
+#ifdef DEF_DBGAMESERVER
+
+BOOL CGame::_bDecodePlayerDatafileContents(int iClientH, char * pData, DWORD dwSize)
+{
+ char  cTmpName[12], cTxt[120], cItemName[22];
+ char    * cp, cItemEquip,* pContents;
+ int    i,  iTotalGold, iNotUsedItemPrice;
+ class  CStrTok * pStrTok;
+ short  sTmpType, sTmpAppr1, sItemIndex, sItemInBankIndex, sSkillIndex, sSkillID;
+ BOOL   bRet;
+ short * sp ;
+ int    iTemp, *ip;
+ SYSTEMTIME SysTime;
+ __int64 iDateSum1, iDateSum2;
+ BOOL   bIsNotUsedItemFound = FALSE;
+ DWORD * dwp, dTemp;
+ 
+
+	if (m_pClientList[iClientH] == NULL) return FALSE;
+
+	// 소지품 검사용 
+	iTotalGold = 0;
+	sItemIndex = 0;
+	sItemInBankIndex  = 0;
+	iNotUsedItemPrice = 0;
+	
+	cp = pData ;
+
+	// v2.14 DB 저장 속도 향상 
+	dwp = (DWORD *) cp ;
+	m_pClientList[iClientH]->m_dwCharID =(DWORD) *dwp ;
+	cp += 4; 
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_sCharIDnum1 = *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_sCharIDnum2 =  *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_sCharIDnum3 = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iLevel = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iStr = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iVit = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iDex = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iInt = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iMag = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iCharisma = (short) *sp ;
+	cp += 2 ;
+
+	m_pClientList[iClientH]->m_iLuck = 10 ;
+
+	ip = (int *) cp ;
+	m_pClientList[iClientH]->m_iExp = (int) *ip ;
+	cp += 4 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_cLU_Str = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_cLU_Vit = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_cLU_Dex = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_cLU_Int = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_cLU_Mag = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_cLU_Char = (short) *sp ;
+	cp += 2 ;
+
+	m_pClientList[iClientH]->m_cSex = (char) *cp  ;
+	cp ++ ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_cSkin = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_cHairStyle = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_cHairColor = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_cUnderwear = (short) *sp ;
+	cp += 2 ;
+
+	ip = (int *) cp ;
+//	rs.iApprColor = (int) *ip ;
+	cp += 4 ;
+
+	sp = (short *) cp ;
+//	rs.sAppr1 = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+//	rs.sAppr2 = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+//	rs.sAppr3 = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+//	rs.sAppr4 = (short) *sp ;
+	cp += 2 ;
+
+
+	ZeroMemory(m_pClientList[iClientH]->m_cLocation, sizeof(m_pClientList[iClientH]->m_cLocation));
+	memcpy(m_pClientList[iClientH]->m_cLocation, cp, 10);
+	cp += 10 ;	
+
+
+	ZeroMemory(m_pClientList[iClientH]->m_cMapName, sizeof(m_pClientList[iClientH]->m_cMapName));
+	memcpy(m_pClientList[iClientH]->m_cMapName, cp, 10);
+	ZeroMemory(cTmpName, sizeof(cTmpName));
+	strcpy(cTmpName, m_pClientList[iClientH]->m_cMapName);
+
+	for (i = 0; i < DEF_MAXMAPS; i++)
+		if ((m_pMapList[i] != NULL)	&& (memcmp(m_pMapList[i]->m_cName, cTmpName, 10) == 0)) {
+			// 맵의 인덱스는 i이다.
+			m_pClientList[iClientH]->m_cMapIndex = (char)i;
+		}
+				
+	if (m_pClientList[iClientH]->m_cMapIndex == -1) {
+			// 만약 플레이어가 속한 맵이 존재하지 않는다면 (이런 경우는 발생하기 힘들다. 로그 서버에서 먼저 검색한 후 접속하기 때문)
+		wsprintf(cTxt, "(!) Player(%s) tries to enter unknown map : %s", m_pClientList[iClientH]->m_cCharName, cTmpName); 
+		PutLogList(cTxt);
+		return FALSE;
+	}
+	cp += 10 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_sX = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_sY = (short) *sp ;
+	cp += 2 ;
+
+	ZeroMemory(m_pClientList[iClientH]->m_cProfile, sizeof(m_pClientList[iClientH]->m_cProfile));
+
+	strcpy(m_pClientList[iClientH]->m_cProfile, cp);
+
+	cp += 100 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iAdminUserLevel = (short) *sp;
+	cp += 2 ;
+
+	ip = (int *) cp ;
+	m_pClientList[iClientH]->m_iContribution = (int) *ip ;
+	cp += 4 ;
+
+	ip = (int *) cp ;
+	m_pClientList[iClientH]->m_iSpecialAbilityTime = (int) *ip ;
+	cp += 4 ; 
+
+	ZeroMemory(m_pClientList[iClientH]->m_cLockedMapName, sizeof(m_pClientList[iClientH]->m_cLockedMapName));
+	memcpy(m_pClientList[iClientH]->m_cLockedMapName, cp, 10);
+	cp += 10 ;
+
+	ip = (int *) cp ;
+	m_pClientList[iClientH]->m_iLockedMapTime = (int) *ip ;
+	cp += 4 ;
+	
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iPenaltyBlockYear = (short) *sp ;
+	cp += 2 ;	
+	
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iPenaltyBlockMonth = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iPenaltyBlockDay = (short) *sp ;
+	cp += 2 ;
+
+	ZeroMemory(m_pClientList[iClientH]->m_cGuildName, sizeof(m_pClientList[iClientH]->m_cGuildName));
+	memcpy(m_pClientList[iClientH]->m_cGuildName, cp, 20);
+	cp += 20 ;
+
+	ip = (int *) cp ;
+	m_pClientList[iClientH]->m_iGuildGUID = (int) *ip ;
+	cp += 4 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iGuildRank = (short) *sp ;
+	cp += 2 ;
+	
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iFightzoneNumber = (short) *sp ;
+	cp += 2 ;
+	
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iReserveTime = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iFightZoneTicketNumber = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iQuest = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;		
+	m_pClientList[iClientH]->m_iQuestID = (short) *sp ;		
+	cp += 2 ;		
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iCurQuestCount = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iQuestRewardType = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iQuestRewardAmount = (short) *sp ;
+	cp += 2 ;
+
+	m_pClientList[iClientH]->m_bIsQuestCompleted = (BOOL) *cp ;
+	cp ++ ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iSpecialEventID = (int) *ip ;
+	cp += 4 ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iWarContribution  = (int) *ip ;
+	cp += 4 ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iCrusadeDuty = (int) *ip ;
+	cp += 4 ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_dwCrusadeGUID = (int) *ip ;
+	cp += 4 ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iConstructionPoint = (int) *ip ;
+	cp += 4 ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iRating = (int) *ip ;
+	cp += 4 ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iHP = (int) *ip ;
+	cp += 4 ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iMP = (int) *ip ;
+	cp += 4 ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iSP = (int) *ip ;
+	cp += 4 ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iEnemyKillCount = (int) *ip ;
+	cp += 4 ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iPKCount = (int) *ip ;
+	cp += 4 ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iRewardGold = (int) *ip ;
+	cp += 4 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iHungerStatus = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iSuperAttackLeft = (short) *sp ;
+	cp += 2 ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iTimeLeft_ShutUp = (int) *ip ;
+	cp += 4 ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iTimeLeft_Rating = (int) *ip ;
+	cp += 4 ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = (int) *ip ;
+	cp += 4 ;
+
+   	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iTimeLeft_FirmStaminar = (int) *ip ;
+	cp += 4 ;
+
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iDeadPenaltyTime = (int) *ip ;
+	cp += 4 ;
+
+	// V2.1 성후니 파티제를 위해서 추가 
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iPartyID = (int) *ip ;
+	cp += 4 ;
+
+	// v2.15 지존 패치를 위해 추가 
+	ip = (int * )cp ;
+	m_pClientList[iClientH]->m_iGizonItemUpgradeLeft = (int) *ip ;
+	cp += 4 ;
+
+	ZeroMemory( m_pClientList[iClientH]->m_cMagicMastery, sizeof(m_pClientList[iClientH]->m_cMagicMastery)) ;
+
+	for (i = 0; i < DEF_MAXMAGICTYPE; i++) {
+		m_pClientList[iClientH]->m_cMagicMastery[i] = *cp - 48;
+		cp ++ ;
+	}
+		
+	
+	sp = (short *) cp ;
+	m_pClientList[iClientH]->m_iDownSkillIndex = (short) *sp ;
+	cp += 2 ;
+
+	sp = (short *) cp ;
+	sSkillIndex = (short) *sp ;
+	cp += 2 ;
+
+	for ( i = 0; i < DEF_MAXSKILLTYPE; i++) {	
+		m_pClientList[iClientH]->m_cSkillMastery[i] = 0 ;
+		m_pClientList[iClientH]->m_iSkillSSN[i] = 0 ;
+	}
+
+	for ( i = 0; i < sSkillIndex; i++ ) {
+
+		sp = (short *) cp ;
+		sSkillID = (short) *sp ;
+		cp += 2 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_cSkillMastery[sSkillID] = (short) *sp ;
+		cp += 2 ;
+		 
+		ip = (int *) cp ;
+		m_pClientList[iClientH]->m_iSkillSSN[sSkillID] = (int) *ip ;
+		cp += 4 ;
+
+	}
+
+	sp = (short *) cp ;
+	sItemIndex = (short) *sp ;
+	cp += 2 ;
+
+
+	// 아이템 장착 상태 초기화한 후 설정한다.
+	for (i = 0; i < DEF_MAXITEMEQUIPPOS; i++) 
+		m_pClientList[iClientH]->m_sItemEquipmentStatus[i] = -1;
+
+	// 아이템 장착상태를 초기화한다.
+	for (i = 0; i < DEF_MAXITEMS; i++) 
+		m_pClientList[iClientH]->m_bIsItemEquipped[i] = FALSE;
+
+
+	for (i = 0; i < sItemIndex; i++ ) {
+
+		m_pClientList[iClientH]->m_pItemList[i] = new class CItem;
+
+		ZeroMemory(cItemName,sizeof(cItemName)) ;
+		strcpy(cItemName, cp) ;
+		
+		if (_bInitItemAttr(m_pClientList[iClientH]->m_pItemList[i], cItemName) == FALSE) {
+			// 플레이어가 소지한 아이템이 리스트에 없다. 에러
+			wsprintf(cTxt, "(!!!) Client(%s)-Item(%s) is not existing Item! Conection closed.", m_pClientList[iClientH]->m_cCharName, cItemName); 
+			PutLogList(cTxt);
+						
+			return FALSE;
+		}
+		cp += 20 ;
+		
+		// 성후니 수정  
+		dwp = (DWORD *) cp ;
+		dTemp = (DWORD) *dwp ;
+
+		if (dTemp < 0) dTemp = 1;
+				//만약 중량이 초과되었다면 1개로 줄인다.
+
+		if ( iGetItemWeight(m_pClientList[iClientH]->m_pItemList[i], dTemp) > _iCalcMaxLoad(iClientH) ) {
+				dTemp = 1;
+				wsprintf(G_cTxt, "(!) Character (%s) Item(%s) Counts have Overflow", m_pClientList[iClientH]->m_cCharName, m_pClientList[iClientH]->m_pItemList[i]->m_cName);
+				PutLogFileList(G_cTxt);
+				PutLogList(G_cTxt);
+		 }
+					
+		m_pClientList[iClientH]->m_pItemList[i]->m_dwCount = (DWORD)dTemp;
+
+		// v1.3 소지하고 있는 골드의 총 합을 검사한다. 
+		if (memcmp(m_pClientList[iClientH]->m_pItemList[i]->m_cName, "Gold", 4) == 0)
+			iTotalGold += dTemp;
+		
+		cp += 4 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemList[i]->m_sTouchEffectType = (short) *sp ;
+		cp += 2 ;
+		 
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemList[i]->m_sTouchEffectValue1 = (short) *sp ;
+		cp += 2 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemList[i]->m_sTouchEffectValue2 = (short) *sp ;
+		cp += 2 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemList[i]->m_sTouchEffectValue3 = (short) *sp ;
+		cp += 2 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemList[i]->m_cItemColor = (short) *sp ;
+		cp += 2 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemList[i]->m_sItemSpecEffectValue1 = (short) *sp ;
+		cp += 2 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemList[i]->m_sItemSpecEffectValue2 = (short) *sp ;
+		cp += 2 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemList[i]->m_sItemSpecEffectValue3 = (short) *sp ;
+		cp += 2 ;
+
+		ip = (int * )cp ;
+		m_pClientList[iClientH]->m_pItemList[i]->m_wCurLifeSpan = (int) *ip ;
+		cp += 4 ;			
+
+		ip = (int * )cp ;
+		m_pClientList[iClientH]->m_pItemList[i]->m_dwAttribute = (int) *ip ;
+		cp += 4 ;
+
+		cItemEquip = (char) *cp ;
+
+		if ((cItemEquip == '1') && (m_pClientList[iClientH]->m_pItemList[i] != NULL)) {
+			// 장착될 수 있는 성질의 아이템이라면 장착 
+			if (m_pClientList[iClientH]->m_pItemList[i]->m_cItemType == DEF_ITEMTYPE_EQUIP) 
+				 m_pClientList[iClientH]->m_bIsItemEquipped[i] = TRUE;
+			else m_pClientList[iClientH]->m_bIsItemEquipped[i] = FALSE;
+		}
+		else m_pClientList[iClientH]->m_bIsItemEquipped[i] = FALSE;
+
+		if ((m_pClientList[iClientH] != NULL) && (m_pClientList[iClientH]->m_bIsItemEquipped[i] == TRUE)) {
+			// 아이템이 장착되어 있다면 장착 효과를 계산한다.
+			if (bEquipItemHandler(iClientH, i) == FALSE) // FALSE
+				m_pClientList[iClientH]->m_bIsItemEquipped[i] = FALSE; // 만약 특성치 변동으로 장착된 아이템이 장착되지 않아야 한다면 장착 안한것을 표시 
+		}
+		cp ++ ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_ItemPosList[i].x  = (short) *sp ;
+		cp += 2 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_ItemPosList[i].y = (short) *sp ;
+		if (m_pClientList[iClientH]->m_ItemPosList[i].y < -10) m_pClientList[iClientH]->m_ItemPosList[i].y = -10;
+		cp += 2 ;
+
+
+		// v1.41 아이템이 Custom-Made라면 설정치를 재조정한다. 
+		if ((m_pClientList[iClientH]->m_pItemList[i]->m_dwAttribute & 0x00000001 ) != NULL) {
+			// 최대 수명이 ItemSpecialEffectValue1
+			m_pClientList[iClientH]->m_pItemList[i]->m_wMaxLifeSpan = m_pClientList[iClientH]->m_pItemList[i]->m_sItemSpecEffectValue1;
+			// 무기나 방어구의 경우 가중치 ItemSpecialEffectValue2
+		}
+
+		// v2.16 2002-5-21 고광현수정 
+		int iValue = (m_pClientList[iClientH]->m_pItemList[i]->m_dwAttribute & 0xF0000000) >> 28;
+		if (iValue > 0) {
+			// 업그레이드 된 아이템. 방어구나 방패라면 최대 수명을 ItemSpecialEffectValue1로 설정한다.
+			switch (m_pClientList[iClientH]->m_pItemList[i]->m_cCategory) {
+			case 5: // 방패 
+			case 6: // 방어구 
+				m_pClientList[iClientH]->m_pItemList[i]->m_wMaxLifeSpan = m_pClientList[iClientH]->m_pItemList[i]->m_sItemSpecEffectValue1;
+				break;
+			}
+		}
+
+		// v1.42 희귀 아이템 플래그가 설정되어 있다면 최대 수명, 스피드, 무게 등을 재설정 해야 한다. 
+		_AdjustRareItemValue(m_pClientList[iClientH]->m_pItemList[i]);
+
+		// v1.41 현재 수명 최대 수명을 능가하면 버그이므로 되돌린다.
+		if (m_pClientList[iClientH]->m_pItemList[i]->m_wCurLifeSpan > m_pClientList[iClientH]->m_pItemList[i]->m_wMaxLifeSpan)
+			m_pClientList[iClientH]->m_pItemList[i]->m_wCurLifeSpan = m_pClientList[iClientH]->m_pItemList[i]->m_wMaxLifeSpan;
+
+		// v1.433
+		if ((m_pClientList[iClientH]->m_pItemList[i]->m_wCurLifeSpan == 0) && 
+			(m_pClientList[iClientH]->m_pItemList[i]->m_sItemEffectType == DEF_ITEMEFFECTTYPE_ALTERITEMDROP)) {
+			// 로그 남긴다. 
+			wsprintf(G_cTxt, "(!) character (%s) have the GemStone of Sacrifice to lifespan 0 !", m_pClientList[iClientH]->m_cCharName);
+			PutLogFileList(G_cTxt);
+			// 수명 1로 환원 
+			m_pClientList[iClientH]->m_pItemList[i]->m_wCurLifeSpan = 1;
+		}
+
+		// v1.4 이제 이 아이템이 현재 사용이 인정된 아이템인가를 찾는다. 
+		if (m_pClientList[iClientH]->m_pItemList[i]->m_cItemType == DEF_ITEMTYPE_NOTUSED) {
+			iNotUsedItemPrice += m_pClientList[iClientH]->m_pItemList[i]->m_wPrice;
+			delete m_pClientList[iClientH]->m_pItemList[i];
+			m_pClientList[iClientH]->m_pItemList[i] = NULL;
+
+			// v1.41
+			bIsNotUsedItemFound = TRUE;
+		}
+		else
+		if (_bCheckDupItemID(m_pClientList[iClientH]->m_pItemList[i]) == TRUE) {
+						// v1.42 복제된 아이템들을 삭제한다.
+			_bItemLog(DEF_ITEMLOG_DUPITEMID, iClientH, NULL, m_pClientList[iClientH]->m_pItemList[i]);
+
+			iNotUsedItemPrice += m_pClientList[iClientH]->m_pItemList[i]->m_wPrice;
+			delete m_pClientList[iClientH]->m_pItemList[i];
+			m_pClientList[iClientH]->m_pItemList[i] = NULL;
+		}
+
+	}
+
+
+	sp = (short *) cp ;
+	sItemInBankIndex = (short) *sp ;
+	cp += 2 ;
+
+	for (i = 0; i < sItemInBankIndex; i++ ) {
+
+		m_pClientList[iClientH]->m_pItemInBankList[i] = new class CItem;
+		ZeroMemory(cItemName,sizeof(cItemName)) ;
+		memcpy(cItemName, cp, 20) ;
+		
+		if (_bInitItemAttr(m_pClientList[iClientH]->m_pItemInBankList[i], cItemName) == FALSE) {
+			// 플레이어가 소지한 아이템이 리스트에 없다. 에러
+			wsprintf(cTxt, "(!!!) Client(%s)-Item(%s) is not existing Item! Conection closed.", m_pClientList[iClientH]->m_cCharName, cItemName); 
+			PutLogList(cTxt);
+	
+						
+			return FALSE;
+		}
+		cp += 20 ;
+		
+		// 성후니 수정 
+		dwp = (DWORD *) cp ;
+		dTemp = (DWORD) *dwp ;
+
+		if (dTemp < 0) dTemp = 1;
+					//만약 중량이 초과되었다면 1개로 줄인다.
+		if ( iGetItemWeight(m_pClientList[iClientH]->m_pItemInBankList[i], dTemp) > _iCalcMaxLoad(iClientH) ) {
+				dTemp = 1;
+				wsprintf(G_cTxt, "(!) character (%s) have the GemStone of Sacrifice to lifespan 0 !", m_pClientList[iClientH]->m_cCharName);
+				PutLogFileList(G_cTxt);
+				PutLogList(G_cTxt);
+		 }
+					
+		m_pClientList[iClientH]->m_pItemInBankList[i]->m_dwCount = (DWORD)dTemp;
+
+		// v1.3 소지하고 있는 골드의 총 합을 검사한다. 
+		if (memcmp(m_pClientList[iClientH]->m_pItemInBankList[i]->m_cName, "Gold", 4) == 0)
+			iTotalGold += dTemp;
+		
+		cp += 4 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemInBankList[i]->m_sTouchEffectType = (short) *sp ;
+		cp += 2 ;
+		 
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemInBankList[i]->m_sTouchEffectValue1 = (short) *sp ;
+		cp += 2 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemInBankList[i]->m_sTouchEffectValue2 = (short) *sp ;
+		cp += 2 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemInBankList[i]->m_sTouchEffectValue3 = (short) *sp ;
+		cp += 2 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemInBankList[i]->m_cItemColor = (short) *sp ;
+		cp += 2 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemInBankList[i]->m_sItemSpecEffectValue1 = (short) *sp ;
+		cp += 2 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemInBankList[i]->m_sItemSpecEffectValue2 = (short) *sp ;
+		cp += 2 ;
+
+		sp = (short *) cp ;
+		m_pClientList[iClientH]->m_pItemInBankList[i]->m_sItemSpecEffectValue3 = (short) *sp ;
+		cp += 2 ;
+
+		ip = (int * )cp ;
+		m_pClientList[iClientH]->m_pItemInBankList[i]->m_wCurLifeSpan = (int) *ip ;
+		cp += 4 ;			
+
+		ip = (int * )cp ;
+		m_pClientList[iClientH]->m_pItemInBankList[i]->m_dwAttribute = (int) *ip ;
+		cp += 4 ;
+
+
+		// v1.41 아이템이 Custom-Made라면 설정치를 재조정한다. 
+		if ((m_pClientList[iClientH]->m_pItemInBankList[i]->m_dwAttribute & 0x00000001 ) != NULL) {
+			// 최대 수명이 ItemSpecialEffectValue1
+			m_pClientList[iClientH]->m_pItemInBankList[i]->m_wMaxLifeSpan = m_pClientList[iClientH]->m_pItemInBankList[i]->m_sItemSpecEffectValue1;
+			// 무기나 방어구의 경우 가중치 ItemSpecialEffectValue2
+		}
+
+		// v2.16 2002-6-11 고광현수정 
+		int iValue = (m_pClientList[iClientH]->m_pItemInBankList[i]->m_dwAttribute & 0xF0000000) >> 28;
+		if (iValue > 0) {
+			// 업그레이드 된 아이템. 방어구나 방패라면 최대 수명을 ItemSpecialEffectValue1로 설정한다.
+			switch (m_pClientList[iClientH]->m_pItemInBankList[i]->m_cCategory) {
+			case 5: // 방패 
+			case 6: // 방어구 
+				m_pClientList[iClientH]->m_pItemInBankList[i]->m_wMaxLifeSpan = m_pClientList[iClientH]->m_pItemInBankList[i]->m_sItemSpecEffectValue1;
+				break;
+			}
+		}
+
+		// v1.42 희귀 아이템 플래그가 설정되어 있다면 최대 수명, 스피드, 무게 등을 재설정 해야 한다. 
+		_AdjustRareItemValue(m_pClientList[iClientH]->m_pItemInBankList[i]);
+
+		// v1.41 현재 수명 최대 수명을 능가하면 버그이므로 되돌린다.
+		if (m_pClientList[iClientH]->m_pItemInBankList[i]->m_wCurLifeSpan > m_pClientList[iClientH]->m_pItemInBankList[i]->m_wMaxLifeSpan)
+			m_pClientList[iClientH]->m_pItemInBankList[i]->m_wCurLifeSpan = m_pClientList[iClientH]->m_pItemInBankList[i]->m_wMaxLifeSpan;
+
+		// v1.433
+		if ((m_pClientList[iClientH]->m_pItemInBankList[i]->m_wCurLifeSpan == 0) && 
+			(m_pClientList[iClientH]->m_pItemInBankList[i]->m_sItemEffectType == DEF_ITEMEFFECTTYPE_ALTERITEMDROP)) {
+			// 로그 남긴다. 
+			wsprintf(G_cTxt, "(!) 캐릭터(%s) 수명 0짜리 희생석 소지!", m_pClientList[iClientH]->m_cCharName);
+			PutLogFileList(G_cTxt);
+			// 수명 1로 환원 
+			m_pClientList[iClientH]->m_pItemInBankList[i]->m_wCurLifeSpan = 1;
+		}
+
+		// v1.4 이제 이 아이템이 현재 사용이 인정된 아이템인가를 찾는다. 
+		if (m_pClientList[iClientH]->m_pItemInBankList[i]->m_cItemType == DEF_ITEMTYPE_NOTUSED) {
+			iNotUsedItemPrice += m_pClientList[iClientH]->m_pItemInBankList[i]->m_wPrice;
+			delete m_pClientList[iClientH]->m_pItemInBankList[i];
+			m_pClientList[iClientH]->m_pItemInBankList[i] = NULL;
+
+			// v1.41
+			bIsNotUsedItemFound = TRUE;
+		}
+		else
+		if (_bCheckDupItemID(m_pClientList[iClientH]->m_pItemInBankList[i]) == TRUE) {
+						// v1.42 복제된 아이템들을 삭제한다.
+			_bItemLog(DEF_ITEMLOG_DUPITEMID, iClientH, NULL, m_pClientList[iClientH]->m_pItemInBankList[i]);
+
+			iNotUsedItemPrice += m_pClientList[iClientH]->m_pItemInBankList[i]->m_wPrice;
+			delete m_pClientList[iClientH]->m_pItemInBankList[i];
+			m_pClientList[iClientH]->m_pItemInBankList[i] = NULL;
+		}
+
+	}		
+
+
+	
+	// 읽혀진 플레이어 데이터를 검사해서 오류가 없는지를 확인하여 리턴값을 결정한다.
+	bRet = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->bIsValidLoc(m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY);
+	if (bRet == FALSE) {
+		GetMapInitialPoint(m_pClientList[iClientH]->m_cMapIndex, &m_pClientList[iClientH]->m_sX, &m_pClientList[iClientH]->m_sY);
+		/*
+		if ((m_pClientList[iClientH]->m_sX != -1) || (m_pClientList[iClientH]->m_sY != -1)) {
+			wsprintf(cTxt, "Invalid location error! %s (%d, %d)", m_pClientList[iClientH]->m_cCharName, m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY); 
+			PutLogList(cTxt);
+			return FALSE;
+		}
+		*/
+	}
+
+	// 특성치 값에 오류가 있는지 검사 ==========================================================================
+	if ((m_pClientList[iClientH]->m_cLU_Str > DEF_TOTALLEVELUPPOINT) || (m_pClientList[iClientH]->m_cLU_Str < 0)) 
+		return FALSE;
+
+	if ((m_pClientList[iClientH]->m_cLU_Vit > DEF_TOTALLEVELUPPOINT) || (m_pClientList[iClientH]->m_cLU_Vit < 0)) 
+		return FALSE;
+
+	if ((m_pClientList[iClientH]->m_cLU_Dex > DEF_TOTALLEVELUPPOINT) || (m_pClientList[iClientH]->m_cLU_Dex < 0)) 
+		return FALSE;
+
+	if ((m_pClientList[iClientH]->m_cLU_Int > DEF_TOTALLEVELUPPOINT) || (m_pClientList[iClientH]->m_cLU_Int < 0)) 
+		return FALSE;
+
+	if ((m_pClientList[iClientH]->m_cLU_Mag > DEF_TOTALLEVELUPPOINT) || (m_pClientList[iClientH]->m_cLU_Mag < 0)) 
+		return FALSE;
+
+	if ((m_pClientList[iClientH]->m_cLU_Char > DEF_TOTALLEVELUPPOINT) || (m_pClientList[iClientH]->m_cLU_Char < 0)) 
+		return FALSE;
+
+	if ( (m_pClientList[iClientH]->m_cLU_Str + m_pClientList[iClientH]->m_cLU_Vit + m_pClientList[iClientH]->m_cLU_Dex + 
+  		  m_pClientList[iClientH]->m_cLU_Int + m_pClientList[iClientH]->m_cLU_Mag + m_pClientList[iClientH]->m_cLU_Char) > DEF_TOTALLEVELUPPOINT) 
+		return FALSE;	
+	
+	if ((m_pClientList[iClientH]->m_iStr < 10) || (m_pClientList[iClientH]->m_iStr > DEF_CHARPOINTLIMIT))
+		return FALSE;
+
+	if ((m_pClientList[iClientH]->m_iDex < 10) || (m_pClientList[iClientH]->m_iDex > DEF_CHARPOINTLIMIT))
+		return FALSE;
+
+	if ((m_pClientList[iClientH]->m_iVit < 10) || (m_pClientList[iClientH]->m_iVit > DEF_CHARPOINTLIMIT))
+		return FALSE;
+
+	if ((m_pClientList[iClientH]->m_iInt < 10) || (m_pClientList[iClientH]->m_iInt > DEF_CHARPOINTLIMIT))
+		return FALSE;
+
+	if ((m_pClientList[iClientH]->m_iMag < 10) || (m_pClientList[iClientH]->m_iMag > DEF_CHARPOINTLIMIT))
+		return FALSE;
+
+	if ((m_pClientList[iClientH]->m_iCharisma < 10) || (m_pClientList[iClientH]->m_iCharisma > DEF_CHARPOINTLIMIT))
+		return FALSE;
+
+	//특성치의 총 합이 맞지 않다면 역시 접속 불가. 
+	if ((m_pClientList[iClientH]->m_iStr + m_pClientList[iClientH]->m_iDex + m_pClientList[iClientH]->m_iVit + 
+		 m_pClientList[iClientH]->m_iInt + m_pClientList[iClientH]->m_iMag + m_pClientList[iClientH]->m_iCharisma) 
+		 !=	((m_pClientList[iClientH]->m_iLevel-1)*3 + 70)) return FALSE;
+
+	
+	// 체험판 사용자의 데이터인데 제한 레벨 이상이다. 접속이 불가능. v1.43부터 사용하지 않는다.
+	//if ((m_pClientList[iClientH]->m_cAccountStatus != 2) && (m_pClientList[iClientH]->m_iLevel > DEF_LEVELLIMIT)) 
+	//	return FALSE;
+
+	// v1.4 계정이름이나 캐릭터 이름에 잘못된 코드가 들어가 있다면 접속 불가.
+	if ((m_Misc.bCheckValidName(m_pClientList[iClientH]->m_cCharName) == FALSE) || (m_Misc.bCheckValidName(m_pClientList[iClientH]->m_cAccountName) == FALSE)) 
+		return FALSE;
+
+	// v1.4 징계 먹은 캐릭터의 징계기간 안이면 접속 불가
+	if (m_pClientList[iClientH]->m_iPenaltyBlockYear != 0) {
+		GetLocalTime(&SysTime);
+		iDateSum1 = (__int64)(m_pClientList[iClientH]->m_iPenaltyBlockYear*10000 + m_pClientList[iClientH]->m_iPenaltyBlockMonth*100 + m_pClientList[iClientH]->m_iPenaltyBlockDay);
+		iDateSum2 = (__int64)(SysTime.wYear*10000 + SysTime.wMonth*100 + SysTime.wDay);
+		if (iDateSum1 >= iDateSum2) return FALSE;
+	}
+
+	// v1.4311-3 추가 유효하지 않은 사투장 예약을 가지고 있으면 초기화 
+	if (m_pClientList[iClientH]->m_iReserveTime != 0) {
+		GetLocalTime(&SysTime);
+		iDateSum1 = (__int64)m_pClientList[iClientH]->m_iReserveTime;
+		iDateSum2 = (__int64)(SysTime.wMonth*10000 + SysTime.wDay*100 + SysTime.wHour);
+		if (iDateSum2 >= iDateSum1) {
+			// 예약이 취소됨 
+			SendNotifyMsg(NULL, i, DEF_NOTIFY_FIGHTZONERESERVE, -2, NULL, NULL, NULL);
+			m_pClientList[iClientH]->m_iFightzoneNumber = 0; 
+			m_pClientList[iClientH]->m_iReserveTime = 0;
+			m_pClientList[iClientH]->m_iFightZoneTicketNumber = 0;
+		}
+	}
+
+	// v1.42 잘못 입력된 운영자 레벨 값을 클리어 
+	if (m_pClientList[iClientH]->m_iAdminUserLevel < 0) m_pClientList[iClientH]->m_iAdminUserLevel = 0;
+
+	// ============================================================================================================
+
+
+	// 내용을 바탕으로 Appearance를 계산, 할당한다.
+	if (m_pClientList[iClientH]->m_cSex == 1) {
+		// 남자이다. 
+		sTmpType = 1;
+	}
+	else if (m_pClientList[iClientH]->m_cSex == 2) {
+		// 여자이다.
+		sTmpType = 4; 
+	}
+
+	switch (m_pClientList[iClientH]->m_cSkin) {
+	case 1:
+		// 백인이면 그대로.
+		break;
+	case 2:
+		sTmpType += 1;
+		break;
+	case 3:
+		sTmpType += 2;
+		break;
+	}
+
+	// v1.41 운영자 암행용 
+	if (m_pClientList[iClientH]->m_iAdminUserLevel >= 10) 
+		sTmpType = m_pClientList[iClientH]->m_iAdminUserLevel;
+
+	sTmpAppr1 = (m_pClientList[iClientH]->m_cHairStyle << 8) | (m_pClientList[iClientH]->m_cHairColor << 4) | (m_pClientList[iClientH]->m_cUnderwear);
+
+	m_pClientList[iClientH]->m_sType  = sTmpType;
+	m_pClientList[iClientH]->m_sAppr1 = sTmpAppr1;
+
+	// 소지품 총 중량계산 
+	iCalcTotalWeight(iClientH);
+
+	// v1.3 지나치게 많은 돈을 소지한 캐릭터 이름을 적는다. 
+	//if (iTotalGold > 800000) {
+	//	wsprintf(G_cTxt, "(!) 해킹 용의자(%s) Gold(%d)", m_pClientList[iClientH]->m_cCharName, iTotalGold);
+		//PutLogFileList(G_cTxt);
+	//}
+
+	// v.135 
+	/*
+	if ((m_pClientList[iClientH]->m_cSkillMastery[0] >= 70) || (m_pClientList[iClientH]->m_cSkillMastery[1] >= 70) ||
+		(m_pClientList[iClientH]->m_cSkillMastery[12] >= 70)) {
+		wsprintf(G_cTxt, "(!) 해킹 용의자(%s) 높은 스킬 (%d %d %d)", m_pClientList[iClientH]->m_cCharName, 
+			             m_pClientList[iClientH]->m_cSkillMastery[0], m_pClientList[iClientH]->m_cSkillMastery[1],
+						 m_pClientList[iClientH]->m_cSkillMastery[12]);
+		PutLogFileList(G_cTxt);
+	}
+	*/
+	
+	if (m_pClientList[iClientH]->m_sCharIDnum1 == 0) {
+		// v1.3 이 캐릭터의 ID 번호가 부여되지 않은 상태이다. 할당한다. 
+		int _i, _iTemp1, _iTemp2;
+		short _sID1, _sID2, _sID3;
+
+		_iTemp1 = 1;
+		_iTemp2 = 1;
+		for (_i = 0; _i < 10; _i++) {
+			_iTemp1 += m_pClientList[iClientH]->m_cCharName[_i];
+			_iTemp2 += abs(m_pClientList[iClientH]->m_cCharName[_i] ^ m_pClientList[iClientH]->m_cCharName[_i]);
+		}
+		
+		_sID1 = (short)timeGetTime(); 
+		_sID2 = (short)_iTemp1; 
+		_sID3 = (short)_iTemp2; 
+				
+		m_pClientList[iClientH]->m_sCharIDnum1 = _sID1;
+		m_pClientList[iClientH]->m_sCharIDnum2 = _sID2;
+		m_pClientList[iClientH]->m_sCharIDnum3 = _sID3;
+	}
+
+	// v1.4 없어진 아이템에 대한 보상금을 지급. 
+	m_pClientList[iClientH]->m_iRewardGold += iNotUsedItemPrice;
+
+	// 
+	m_pClientList[iClientH]->m_iSpeedHackCheckExp = m_pClientList[iClientH]->m_iExp;
+
+
+	return TRUE;
+}
+
+int CGame::_iComposePlayerDataFileContents(int iClientH, char * pData)
+{
+
+ char sql[256] ;
+ char  cTxt[120], cTmp[21];
+ char  * cp;
+ 
+ int   i, * ip;
+ short * sp, * pIDX ;
+ short Skillidx,Itemidx,BankItemidx ;
+ int   iFlag = 0 ;
+ BOOL	bFind = FALSE ;
+ DWORD * dwp, dTemp;
+
+	if (m_pClientList[iClientH] == NULL) return 0;
+
+	cp = pData ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_sCharIDnum1 ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_sCharIDnum2 ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_sCharIDnum3 ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iLevel ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iStr ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iVit ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iDex ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iInt ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iMag ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iCharisma ;
+	cp += 2 ;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iExp ;
+	cp += 4 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_cLU_Str ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_cLU_Vit ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_cLU_Dex ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_cLU_Int ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_cLU_Mag ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_cLU_Char ;
+	cp += 2 ;
+
+	*cp = (char) m_pClientList[iClientH]->m_cSex ;
+	cp++ ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_cSkin ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_cHairStyle ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_cHairColor ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_cUnderwear ;
+	cp += 2 ;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iApprColor ;
+	cp += 4 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_sAppr1 ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_sAppr2 ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_sAppr3 ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_sAppr4 ;
+	cp += 2 ;
+
+	memcpy(cp, m_pClientList[iClientH]->m_cLocation, 10 ) ;
+	cp += 10 ;
+
+	memcpy(cp, m_pClientList[iClientH]->m_cMapName, 10 ) ;
+	cp += 10 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_sX ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_sY ;
+	cp += 2 ;
+
+	if (strlen(m_pClientList[iClientH]->m_cProfile) == 0) {
+		strcpy(cp, "__________");
+	}
+	else strcpy(cp, m_pClientList[iClientH]->m_cProfile) ;
+
+	cp += 100 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iAdminUserLevel ;
+	cp += 2 ;
+
+	if (m_pClientList[iClientH]->m_iContribution < 0) m_pClientList[iClientH]->m_iContribution = 0;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iContribution ;
+	cp += 4 ;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iSpecialAbilityTime ;
+	cp += 4 ;
+
+	memcpy(cp, m_pClientList[iClientH]->m_cLockedMapName, 10) ;
+	cp += 10 ;
+
+	ip = (int *) cp ;
+	*ip = (int) m_pClientList[iClientH]->m_iLockedMapTime ;
+	cp += 4 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iPenaltyBlockYear ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iPenaltyBlockMonth ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iPenaltyBlockDay ;
+	cp += 2 ;
+
+	
+	if (m_pClientList[iClientH]->m_iGuildRank != -1) {
+	// GuildRank가 -1이면 길드이름은 무의미하다.
+		memcpy(cp, m_pClientList[iClientH]->m_cGuildName,20);
+	}
+	else strcpy(cp, "NONE");
+	cp += 20 ;
+
+	if (m_pClientList[iClientH]->m_iGuildRank != -1) {
+		// GuildRank가 -1이면 길드GUID는 무의미하다.
+		ip  = (int *)cp;
+		*ip = (int) m_pClientList[iClientH]->m_iGuildGUID;
+	} else 	{
+		ip  = (int *)cp;
+		*ip = (int) -1 ;
+	}
+	cp += 4 ; 
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iGuildRank ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iFightzoneNumber ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iReserveTime ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iFightZoneTicketNumber ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short)  m_pClientList[iClientH]->m_iQuest ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iQuestID ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iCurQuestCount ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iQuestRewardType ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iQuestRewardAmount ;
+	cp += 2 ;
+	
+	*cp = (char ) m_pClientList[iClientH]->m_bIsQuestCompleted ;
+	cp ++ ; 
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iSpecialEventID ;
+	cp += 4 ;
+
+	ip  = (int *)cp;
+	*ip = (int)  m_pClientList[iClientH]->m_iWarContribution ;
+	cp += 4 ;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iCrusadeDuty ;
+	cp += 4 ;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_dwCrusadeGUID ;
+	cp += 4 ;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iConstructionPoint ;
+	cp += 4 ;
+
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iRating ;
+	cp += 4 ;
+
+	if (m_pClientList[iClientH]->m_iHP <= 0)  
+		m_pClientList[iClientH]->m_iHP = iGetMaxHP(iClientH);	
+	
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iHP ;
+	cp += 4 ;
+
+	if (m_pClientList[iClientH]->m_iMP <= 0)  
+		m_pClientList[iClientH]->m_iMP = 30;	
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iMP ;
+	cp += 4 ;
+
+	if (m_pClientList[iClientH]->m_iSP < 0) 
+		m_pClientList[iClientH]->m_iSP = 20;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iSP ;
+	cp += 4 ;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iEnemyKillCount ;
+	cp += 4 ;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iPKCount ;
+	cp += 4 ;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iRewardGold ;
+	cp += 4 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iHungerStatus ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iSuperAttackLeft ;
+	cp += 2 ;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iTimeLeft_ShutUp ;
+	cp += 4 ;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iTimeLeft_Rating ;
+	cp += 4 ;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iTimeLeft_ForceRecall ;
+	cp += 4 ;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iTimeLeft_FirmStaminar;
+	cp += 4 ;
+
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iDeadPenaltyTime ;
+	cp += 4 ;
+
+	// V2.1 성후니 파티제를 위해서 추가 
+	ip  = (int *)cp;
+	*ip = (int) m_pClientList[iClientH]->m_iPartyID ;
+	cp += 4 ;
+	
+	// v2.15 지존 패치를 위해 추가 
+	ip = (int * )cp ;
+	*ip = (int) m_pClientList[iClientH]->m_iGizonItemUpgradeLeft ;
+	cp += 4 ;
+
+	ZeroMemory(cTxt, sizeof(cTxt)) ;
+
+	for (i = 0; i < DEF_MAXMAGICTYPE; i++) {
+		wsprintf(cTmp,"%d", (int)m_pClientList[iClientH]->m_cMagicMastery[i]);
+		strcat(cTxt, cTmp);
+	}
+
+	memcpy(cp, cTxt, 100) ;
+	cp += 100 ;
+
+	sp  = (short *)cp;
+	*sp = (short) m_pClientList[iClientH]->m_iDownSkillIndex; ;
+	cp += 2 ; 
+
+	pIDX = (short *) cp ;
+	cp += 2;
+
+	Skillidx = 0;
+	
+	for( i = 0 ; i < 60 ; i++ ) {
+		if ( m_pClientList[iClientH]->m_cSkillMastery[i] > 0 ) {
+			sp = (short *) cp ;
+			*sp = (short) i ;
+			cp += 2 ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_cSkillMastery[i] ;
+			cp += 2 ;
+				
+			ip = (int *) cp ;
+			*ip = (int) m_pClientList[iClientH]->m_iSkillSSN[i] ;
+			cp += 4 ;
+
+			Skillidx++;
+		}
+	}
+
+	*pIDX = (short) Skillidx ;
+
+	Itemidx = 0;
+
+	pIDX = (short *) cp ;
+	cp += 2;
+			
+	for (i = 0; i < DEF_MAXITEMS; i++){
+		if (m_pClientList[iClientH]->m_pItemList[i] != NULL) {
+
+			memcpy(cp, m_pClientList[iClientH]->m_pItemList[i]->m_cName,20);
+			cp += 20 ;
+
+			dwp = (DWORD *) cp ;
+			*dwp = (DWORD ) m_pClientList[iClientH]->m_pItemList[i]->m_dwCount ;
+			cp += 4 ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemList[i]->m_sTouchEffectType ;
+			cp += 2 ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemList[i]->m_sTouchEffectValue1 ;
+			cp += 2 ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemList[i]->m_sTouchEffectValue2 ;
+			cp += 2 ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemList[i]->m_sTouchEffectValue3 ;
+			cp += 2 ;
+			
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemList[i]->m_cItemColor ;
+			cp += 2 ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemList[i]->m_sItemSpecEffectValue1 ;
+			cp += 2 ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemList[i]->m_sItemSpecEffectValue2 ;
+			cp += 2 ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemList[i]->m_sItemSpecEffectValue3 ;
+			cp += 2 ;
+
+			ip = (int *) cp ;
+			*ip = (int) m_pClientList[iClientH]->m_pItemList[i]->m_wCurLifeSpan ;
+			cp += 4 ;
+
+			ip = (int *) cp ;
+			*ip = (int) m_pClientList[iClientH]->m_pItemList[i]->m_dwAttribute ;
+			cp += 4 ;
+
+			*cp = (char) m_pClientList[iClientH]->m_bIsItemEquipped[i] ;
+			cp ++ ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_ItemPosList[i].x ;
+			cp += 2 ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_ItemPosList[i].y ;
+			cp += 2 ;
+
+			Itemidx++;
+		}
+	}
+
+	// v2.13 성후니 추가 DB 부하를 줄이기 위한 변수
+	*cp = (char) m_pClientList[iClientH]->m_bIsBankModified ;
+	cp ++ ;
+
+	*pIDX = (short) Itemidx ;
+	pIDX = (short *) cp ;
+	cp += 2;
+
+	BankItemidx = 0;
+
+	for (i = 0; i < DEF_MAXBANKITEMS; i++) {
+
+		if (m_pClientList[iClientH]->m_pItemInBankList[i] != NULL) {
+			memcpy(cp, m_pClientList[iClientH]->m_pItemInBankList[i]->m_cName, 20);
+			cp += 20 ;
+
+			dwp = (DWORD *) cp ;
+			*dwp = (DWORD ) m_pClientList[iClientH]->m_pItemInBankList[i]->m_dwCount ;
+			cp += 4 ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemInBankList[i]->m_sTouchEffectType ;
+			cp += 2 ; 
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemInBankList[i]->m_sTouchEffectValue1 ;
+			cp += 2 ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemInBankList[i]->m_sTouchEffectValue2 ;
+			cp += 2 ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemInBankList[i]->m_sTouchEffectValue3;
+			cp += 2 ;
+			
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemInBankList[i]->m_cItemColor ;
+			cp += 2 ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemInBankList[i]->m_sItemSpecEffectValue1 ;
+			cp += 2 ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemInBankList[i]->m_sItemSpecEffectValue2 ;
+			cp += 2 ;
+
+			sp = (short *) cp ;
+			*sp = (short) m_pClientList[iClientH]->m_pItemInBankList[i]->m_sItemSpecEffectValue3 ;
+			cp += 2 ;
+
+			ip = (int *) cp ;
+			*ip = (int) m_pClientList[iClientH]->m_pItemInBankList[i]->m_wCurLifeSpan ;
+			cp += 4 ;
+
+			ip = (int *) cp ;
+			*ip = (int) m_pClientList[iClientH]->m_pItemInBankList[i]->m_dwAttribute ;
+			cp += 4 ;
+	
+			BankItemidx++;
+		}
+	}
+
+	*pIDX = (short) BankItemidx ;
+
+	iFlag +=  m_pClientList[iClientH]->m_sCharIDnum1 + m_pClientList[iClientH]->m_iGuildGUID + m_pClientList[iClientH]->m_iDownSkillIndex + Skillidx + Itemidx + BankItemidx ;
+
+//	ip = (int *) cp ;
+//	*ip = (int) iFlag ;
+	
+	return (582 + 4 + 8*Skillidx + 2 + 55*Itemidx + 2 + 50*BankItemidx +4  ) ;
+}
+
+#else // FILE_MODE
 
 BOOL CGame::_bDecodePlayerDatafileContents(int iClientH, char * pData, DWORD dwSize)
 {
@@ -6292,6 +7049,13 @@ BOOL CGame::_bDecodePlayerDatafileContents(int iClientH, char * pData, DWORD dwS
 				// 소지하고 있는 아이템 정보를 읽어 초기화 한다.
 				switch(cReadModeB) {
 				case 1:
+					// v2.12
+					if (iItemIndex >= DEF_MAXITEMS) {
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+
 					// token값은 아이템의 이름. 이 이름을 가진 아이템의 특성을 m_pItemConfigList에서 찾아 할당한다.
 					if (_bInitItemAttr(m_pClientList[iClientH]->m_pItemList[iItemIndex], token) == FALSE) {
 						// 플레이어가 소지한 아이템이 리스트에 없다. 에러
@@ -6477,14 +7241,14 @@ BOOL CGame::_bDecodePlayerDatafileContents(int iClientH, char * pData, DWORD dwS
 							 (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue2 != m_pClientList[iClientH]->m_sCharIDnum2) ||
 							 (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue3 != m_pClientList[iClientH]->m_sCharIDnum3) ) {
 							// 자신의 것이 아닌 아이템을 갖고 있다. 
-							wsprintf(cTxt, "(!) 다른 사람의 아이템 소지: Player(%s) Item(%s) %d %d %d - %d %d %d", m_pClientList[iClientH]->m_cCharName, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_cName,
+						/*	wsprintf(cTxt, "(!) 다른 사람의 아이템 소지: Player(%s) Item(%s) %d %d %d - %d %d %d", m_pClientList[iClientH]->m_cCharName, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_cName,
 								     m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue1,
 									 m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue2,
 									 m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue3,
 									 m_pClientList[iClientH]->m_sCharIDnum1,
 									 m_pClientList[iClientH]->m_sCharIDnum2,
 									 m_pClientList[iClientH]->m_sCharIDnum3); 
-							PutLogList(cTxt);
+							PutLogList(cTxt);*/
 							//PutLogFileList(cTxt);
 						}
 					}
@@ -6497,6 +7261,18 @@ BOOL CGame::_bDecodePlayerDatafileContents(int iClientH, char * pData, DWORD dwS
 						// 최대 수명이 ItemSpecialEffectValue1
 						m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_wMaxLifeSpan = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue1;
 						// 무기나 방어구의 경우 가중치 ItemSpecialEffectValue2
+					}
+
+					// v2.16 2002-6-11 고광현수정 
+					int iValue = (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0xF0000000) >> 28;
+					if (iValue > 0) {
+						// 업그레이드 된 아이템. 방어구나 방패라면 최대 수명을 ItemSpecialEffectValue1로 설정한다.
+						switch (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_cCategory) {
+						case 5: // 방패 
+						case 6: // 방어구 
+							m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_wMaxLifeSpan = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue1;
+							break;
+						}
 					}
 
 					// v1.42 희귀 아이템 플래그가 설정되어 있다면 최대 수명, 스피드, 무게 등을 재설정 해야 한다. 
@@ -6515,6 +7291,9 @@ BOOL CGame::_bDecodePlayerDatafileContents(int iClientH, char * pData, DWORD dwS
 						// 수명 1로 환원 
 						m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_wCurLifeSpan = 1;
 					}
+
+					// v2.05 +대미지류 아이템 특성치로 정보 변경, 변환 
+					bCheckAndConvertPlusWeaponItem(iClientH, iItemIndex);
 
 					// v1.4 이제 이 아이템이 현재 사용이 인정된 아이템인가를 찾는다. 
 					if (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_cItemType == DEF_ITEMTYPE_NOTUSED) {
@@ -6847,6 +7626,12 @@ BOOL CGame::_bDecodePlayerDatafileContents(int iClientH, char * pData, DWORD dwS
 				// Warehouse에 맡겨논 아이템 정보를 읽어 초기화 한다.
 				switch(cReadModeB) {
 				case 1:
+					// v2.12
+					if (iItemInBankIndex >= DEF_MAXBANKITEMS) {
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
 					// token값은 아이템의 이름. 이 이름을 가진 아이템의 특성을 m_pItemConfigList에서 찾아 할당한다.
 					if (_bInitItemAttr(m_pClientList[iClientH]->m_pItemInBankList[iItemInBankIndex], token) == FALSE) {
 						// 플레이어가 저장하고 있는 아이템이 리스트에 없다. 에러
@@ -7035,6 +7820,18 @@ BOOL CGame::_bDecodePlayerDatafileContents(int iClientH, char * pData, DWORD dwS
 						m_pClientList[iClientH]->m_pItemInBankList[iItemInBankIndex]->m_wMaxLifeSpan = m_pClientList[iClientH]->m_pItemInBankList[iItemInBankIndex]->m_sItemSpecEffectValue1;
 						// 무기나 방어구의 경우 가중치 ItemSpecialEffectValue2
 				
+					}
+
+					// v2.16 2002-5-21 고광현수정 
+					int iValue = (m_pClientList[iClientH]->m_pItemInBankList[iItemInBankIndex]->m_dwAttribute & 0xF0000000) >> 28;
+					if (iValue > 0) {
+						// 업그레이드 된 아이템. 방어구나 방패라면 최대 수명을 ItemSpecialEffectValue1로 설정한다.
+						switch (m_pClientList[iClientH]->m_pItemInBankList[iItemInBankIndex]->m_cCategory) {
+						case 5: // 방패 
+						case 6: // 방어구 
+							m_pClientList[iClientH]->m_pItemInBankList[iItemInBankIndex]->m_wMaxLifeSpan = m_pClientList[iClientH]->m_pItemInBankList[iItemInBankIndex]->m_sItemSpecEffectValue1;
+							break;
+						}
 					}
 
 					// v1.42 희귀 아이템 플래그가 설정되어 있다면 최대 수명, 스피드, 무게 등을 재설정 해야 한다. 
@@ -7748,6 +8545,46 @@ BOOL CGame::_bDecodePlayerDatafileContents(int iClientH, char * pData, DWORD dwS
 				m_pClientList[iClientH]->m_dwCrusadeGUID = atoi(token);
 				cReadModeA = 0;
 				break;
+
+			case 78:
+				if (_bGetIsStringIsNumber(token) == FALSE) {
+					wsprintf(cTxt, "(!!!) Player(%s) data file error! wrong Data format - Connection closed. ", m_pClientList[iClientH]->m_cCharName); 
+					PutLogList(cTxt);
+					delete pContents;
+					delete pStrTok;
+					return FALSE;
+				}
+
+				m_pClientList[iClientH]->m_iDeadPenaltyTime = atoi(token);
+				cReadModeA = 0;
+				break;
+
+			case 79: // v2.06 12-4
+				if (_bGetIsStringIsNumber(token) == FALSE) {
+					wsprintf(cTxt, "(!!!) Player(%s) data file error! wrong Data format - Connection closed. ", m_pClientList[iClientH]->m_cCharName); 
+					PutLogList(cTxt);
+					delete pContents;
+					delete pStrTok;
+					return FALSE;
+				}
+
+				m_pClientList[iClientH]->m_iPartyID = atoi(token);
+				if (m_pClientList[iClientH]->m_iPartyID != NULL) m_pClientList[iClientH]->m_iPartyStatus = DEF_PARTYSTATUS_CONFIRM;
+				cReadModeA = 0;
+				break;
+
+			case 80: // v2.15 지존아이템업그레이드
+				if (_bGetIsStringIsNumber(token) == FALSE) {
+					wsprintf(cTxt, "(!!!) Player(%s) data file error! wrong Data format - Connection closed. ", m_pClientList[iClientH]->m_cCharName); 
+					PutLogList(cTxt);
+					delete pContents;
+					delete pStrTok;
+					return FALSE;
+				}
+
+				m_pClientList[iClientH]->m_iGizonItemUpgradeLeft = atoi(token);
+				cReadModeA = 0;
+				break;
 			}
 		}
 		else {
@@ -7855,7 +8692,7 @@ BOOL CGame::_bDecodePlayerDatafileContents(int iClientH, char * pData, DWORD dwS
 			if (memcmp(token, "super-attack-left", 17) == 0)		cReadModeA = 70;
 
 			// v1.4311-3 추가 월드 서버로 부터온 메세지로부터 예약된 사투장에 관한 값 읽기 reserved-fightzone-id
-			if (memcmp(token, "reserved-fightzone-id", 21) == 0)	{
+			if (memcmp(token, "reserved-fightzone-id", 21) == 0) {
 				cReadModeA = 67;
 				cReadModeB = 1;
 			}
@@ -7868,6 +8705,9 @@ BOOL CGame::_bDecodePlayerDatafileContents(int iClientH, char * pData, DWORD dwS
 			if (memcmp(token, "crusade-job", 11) == 0)     cReadModeA = 75;
 			if (memcmp(token, "construct-point", 15) == 0) cReadModeA = 76;
 			if (memcmp(token, "crusade-GUID", 12) == 0)    cReadModeA = 77;
+			if (memcmp(token, "dead-penalty-time", 17) == 0) cReadModeA = 78;
+			if (memcmp(token, "party-id", 8) == 0)           cReadModeA = 79; // v2.06 12-4
+			if (memcmp(token, "gizon-item-upgade-left", 22) == 0) cReadModeA = 80; // v2.15 지존아이템업그레이드
 
 			if (memcmp(token, "[EOF]", 5) == 0) goto DPDC_STOP_DECODING;
 		}
@@ -7898,11 +8738,14 @@ DPDC_STOP_DECODING:;
 	// 읽혀진 플레이어 데이터를 검사해서 오류가 없는지를 확인하여 리턴값을 결정한다.
 	bRet = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->bIsValidLoc(m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY);
 	if (bRet == FALSE) {
+		GetMapInitialPoint(m_pClientList[iClientH]->m_cMapIndex, &m_pClientList[iClientH]->m_sX, &m_pClientList[iClientH]->m_sY);
+		/*
 		if ((m_pClientList[iClientH]->m_sX != -1) || (m_pClientList[iClientH]->m_sY != -1)) {
 			wsprintf(cTxt, "Invalid location error! %s (%d, %d)", m_pClientList[iClientH]->m_cCharName, m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY); 
 			PutLogList(cTxt);
 			return FALSE;
 		}
+		*/
 	}
 
 	// 특성치 값에 오류가 있는지 검사 ==========================================================================
@@ -8066,11 +8909,10 @@ DPDC_STOP_DECODING:;
 	// 
 	m_pClientList[iClientH]->m_iSpeedHackCheckExp = m_pClientList[iClientH]->m_iExp;
 
-	// v1.41 
-	if (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) m_pClientList[iClientH]->m_bIsNeutral = TRUE;
 
 	return TRUE;
 }
+
 
 int CGame::_iComposePlayerDataFileContents(int iClientH, char * pData)
 {
@@ -8152,7 +8994,7 @@ int CGame::_iComposePlayerDataFileContents(int iClientH, char * pData)
 	strcat(pData, "\n\n");
 	//
 	if (m_pClientList[iClientH]->m_iHP <= 0)  
-		m_pClientList[iClientH]->m_iHP = 30;
+		m_pClientList[iClientH]->m_iHP = iGetMaxHP(iClientH);
 
 	wsprintf(cTxt, "character-HP       = %d", m_pClientList[iClientH]->m_iHP);
 	strcat(pData, cTxt);
@@ -8348,6 +9190,7 @@ int CGame::_iComposePlayerDataFileContents(int iClientH, char * pData)
 	strcat(pData, cTxt);
 	strcat(pData,"\n");
 
+	if (m_pClientList[iClientH]->m_iContribution < 0) m_pClientList[iClientH]->m_iContribution = 0;
 	wsprintf(cTxt, "character-contribution = %d", m_pClientList[iClientH]->m_iContribution);
 	strcat(pData, cTxt);
 	strcat(pData,"\n");
@@ -8400,6 +9243,21 @@ int CGame::_iComposePlayerDataFileContents(int iClientH, char * pData)
 	strcat(pData,"\n");
 	
 	wsprintf(cTxt, "construct-point = %d", m_pClientList[iClientH]->m_iConstructionPoint);
+	strcat(pData, cTxt);
+	strcat(pData,"\n");
+
+	// v2.04 사망시 페널티 타임 
+	wsprintf(cTxt, "dead-penalty-time = %d", m_pClientList[iClientH]->m_iDeadPenaltyTime);
+	strcat(pData, cTxt);
+	strcat(pData,"\n");
+
+	// v2.06 12-4 파티 아이디
+	wsprintf(cTxt, "party-id = %d", m_pClientList[iClientH]->m_iPartyID);
+	strcat(pData, cTxt);
+	strcat(pData,"\n");
+
+	// v2.15 지존아이템업그레이드
+	wsprintf(cTxt, "gizon-item-upgade-left = %d", m_pClientList[iClientH]->m_iGizonItemUpgradeLeft);
 	strcat(pData, cTxt);
 	strcat(pData,"\n");
 
@@ -8616,6 +9474,9 @@ int CGame::_iComposePlayerDataFileContents(int iClientH, char * pData)
 	return strlen(pData);
 }
 
+#endif
+
+
 BOOL CGame::_bDecodeItemConfigFileContents(char * pData, DWORD dwMsgSize)
 {
  char * pContents, * token, cTxt[120];
@@ -8667,6 +9528,10 @@ BOOL CGame::_bDecodeItemConfigFileContents(char * pData, DWORD dwMsgSize)
 					// m_cName 
 					ZeroMemory(m_pItemConfigList[iItemConfigListIndex]->m_cName, sizeof(m_pItemConfigList[iItemConfigListIndex]->m_cName));
 					memcpy(m_pItemConfigList[iItemConfigListIndex]->m_cName, token, strlen(token));
+					if (memcmp(m_pItemConfigList[iItemConfigListIndex]->m_cName, "자이안트-소드", strlen("자이안트-소드")) == 0) {
+						int i;
+						i = 0;
+					}
 					cReadModeB = 3;
 					break;
 				case 3:
@@ -8982,6 +9847,9 @@ DICFC_STOPDECODING:;
 	wsprintf(cTxt, "(!) ITEM(Total:%d) configuration - success!", iItemConfigListIndex);
 	PutLogList(cTxt);
 
+	// 2002-09-09 #1
+	m_bReceivedItemList = true;
+
 	return TRUE;
 }
 
@@ -8989,7 +9857,7 @@ DICFC_STOPDECODING:;
 BOOL CGame::_bInitItemAttr(class CItem * pItem, char * pItemName)
 {
  register int i;
- char cTmpName[21];
+ char cTmpName[22];
 
 	ZeroMemory(cTmpName, sizeof(cTmpName));
 	strcpy(cTmpName, pItemName);
@@ -9038,6 +9906,61 @@ BOOL CGame::_bInitItemAttr(class CItem * pItem, char * pItemName)
 	// 아이템리스트를 모두 검색했음에도 발견되지 않았다. 
  	return FALSE;
 }
+
+// v2.17 2002-7-31 아이템을 아이템 고유번호로 생성할 수 있게 한다. 
+BOOL CGame::_bInitItemAttr(class CItem * pItem, int iItemID)
+{
+ register int i;
+ char cTmpName[21];
+
+	ZeroMemory(cTmpName, sizeof(cTmpName));
+	//strcpy(cTmpName, pItemName);
+
+	for (i = 0; i < DEF_MAXITEMTYPES; i++) 
+	if (m_pItemConfigList[i] != NULL) {
+		if (iItemID ==  m_pItemConfigList[i]->m_sIDnum) {
+			// 같은 이름을 가진 아이템 설정을 찾았다. 설정값을 복사한다.
+			ZeroMemory(pItem->m_cName, sizeof(pItem->m_cName));
+			strcpy(pItem->m_cName, m_pItemConfigList[i]->m_cName);
+			pItem->m_cItemType         = m_pItemConfigList[i]->m_cItemType;
+			pItem->m_cEquipPos         = m_pItemConfigList[i]->m_cEquipPos;
+			pItem->m_sItemEffectType   = m_pItemConfigList[i]->m_sItemEffectType;
+			pItem->m_sItemEffectValue1 = m_pItemConfigList[i]->m_sItemEffectValue1;
+			pItem->m_sItemEffectValue2 = m_pItemConfigList[i]->m_sItemEffectValue2;
+			pItem->m_sItemEffectValue3 = m_pItemConfigList[i]->m_sItemEffectValue3;
+			pItem->m_sItemEffectValue4 = m_pItemConfigList[i]->m_sItemEffectValue4;
+			pItem->m_sItemEffectValue5 = m_pItemConfigList[i]->m_sItemEffectValue5;
+			pItem->m_sItemEffectValue6 = m_pItemConfigList[i]->m_sItemEffectValue6;
+			pItem->m_wMaxLifeSpan      = m_pItemConfigList[i]->m_wMaxLifeSpan;
+			pItem->m_wCurLifeSpan	   = pItem->m_wMaxLifeSpan;					// 최초로 생성된 아이템의 수명은 최대치이다.
+			pItem->m_sSpecialEffect    = m_pItemConfigList[i]->m_sSpecialEffect;
+			
+			pItem->m_sSprite           = m_pItemConfigList[i]->m_sSprite;
+			pItem->m_sSpriteFrame      = m_pItemConfigList[i]->m_sSpriteFrame;
+			pItem->m_wPrice            = m_pItemConfigList[i]->m_wPrice;
+			pItem->m_wWeight           = m_pItemConfigList[i]->m_wWeight;
+			pItem->m_cApprValue        = m_pItemConfigList[i]->m_cApprValue;
+			pItem->m_cSpeed            = m_pItemConfigList[i]->m_cSpeed;
+			pItem->m_sLevelLimit       = m_pItemConfigList[i]->m_sLevelLimit;
+			pItem->m_cGenderLimit      = m_pItemConfigList[i]->m_cGenderLimit;
+			
+			pItem->m_sSpecialEffectValue1 = m_pItemConfigList[i]->m_sSpecialEffectValue1;
+			pItem->m_sSpecialEffectValue2 = m_pItemConfigList[i]->m_sSpecialEffectValue2;
+
+			pItem->m_sRelatedSkill     = m_pItemConfigList[i]->m_sRelatedSkill;
+			pItem->m_cCategory         = m_pItemConfigList[i]->m_cCategory;
+			pItem->m_sIDnum			   = m_pItemConfigList[i]->m_sIDnum;
+
+			pItem->m_bIsForSale	       = m_pItemConfigList[i]->m_bIsForSale;
+			pItem->m_cItemColor        = m_pItemConfigList[i]->m_cItemColor;
+			return TRUE;
+		}
+	}
+
+	// 아이템리스트를 모두 검색했음에도 발견되지 않았다. 
+ 	return FALSE;
+}
+
 
 
 BOOL CGame::_bGetIsStringIsNumber(char * pStr)
@@ -9371,6 +10294,9 @@ GET_VALIDLOC_SUCCESS:;
 			// 크루세이드용 건축물이라면 3단계로 완성된다.
 			m_pNpcList[i]->m_sAppr2 = 3;
 			break;
+		case 64:  //v2.19 2002-12-16 농사 스킬 관련
+			m_pNpcList[i]->m_sAppr2 = 1; //3단계로 성장한다.
+			break;
 
 		default:
 			m_pNpcList[i]->m_sAppr2 = 0;
@@ -9389,10 +10315,10 @@ GET_VALIDLOC_SUCCESS:;
 		if (bIsSummoned == TRUE) 
 			m_pNpcList[i]->m_dwSummonedTime = timeGetTime();
 
-		// 고정 Berserk 상태 추가.
+		// 고정 Berserk 상태 추가. 
 		if (bFirmBerserk == TRUE) {
 			m_pNpcList[i]->m_cMagicEffectStatus[DEF_MAGICTYPE_BERSERK] = 1;
-			m_pNpcList[i]->m_sStatus = m_pNpcList[i]->m_sStatus | 0x20;
+			m_pNpcList[i]->m_sStatus = m_pNpcList[i]->m_sStatus | 0x20; // 100000
 			// 고정 Berserk 상태의 몹은 경험치를 2배 더 많이 갖는다. 
 			m_pNpcList[i]->m_iExpDice *= 2;
 		}
@@ -9422,11 +10348,17 @@ GET_VALIDLOC_SUCCESS:;
 		case 42:
 			m_pMapList[iMapIndex]->bAddCrusadeStructureInfo(m_pNpcList[i]->m_sType, sX, sY, m_pNpcList[i]->m_cSide);
 			break;
+		case 64:	//v2.19 2002-12-16 농사 스킬 관련
+			m_pMapList[iMapIndex]->bAddCropsTotalSum();
+			return i; // 값을 더 넣을것이 있어서 농작물의 경우에만 여기서 리턴 한다.
+			break;
 		}
 		
+	
+
 		// 다른 클라이언트에게 알린다.
 		SendEventToNearClient_TypeA(i, DEF_OWNERTYPE_NPC, MSGID_EVENT_LOG, DEF_MSGTYPE_CONFIRM, NULL, NULL, NULL);
-		return TRUE;
+		return i;  //v2.19 2002-12-16 농사 스킬 관련 return 값을 m_pNpcList의 번호로 한다.
 	}
 
 	return FALSE;
@@ -9588,6 +10520,10 @@ void CGame::NpcProcess()
 					if ((dwTime - m_pNpcList[i]->m_dwSummonedTime) > 1000*90) 
 						NpcKilledHandler(NULL, NULL, i, 0);
 					break;
+				case 64: //v2.20 2002-12-20 농작물 살아 있는 시간.
+					if ((dwTime - m_pNpcList[i]->m_dwSummonedTime) > DEF_PLANTTIME) 
+						DeleteNpc(i);
+					break;
 				
 				default: // 일반적인 경우: 소환몹이 시간이 다 되어 사라져야 한다.
 					if ((dwTime - m_pNpcList[i]->m_dwSummonedTime) > DEF_SUMMONTIME) 
@@ -9606,7 +10542,7 @@ void CGame::ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize)
  WORD * wp;
  int  * ip;
  char * cp, * cp2;
- char   cBuffer[256], cTemp[256], cTemp2[256], cSendMode = NULL;
+ char   cBuffer[256], cTemp[256], cSendMode = NULL;
 
 	if (m_pClientList[iClientH] == NULL) return;
 	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE) return;
@@ -9636,34 +10572,42 @@ void CGame::ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize)
 	}
 	// 채팅 메시지의 시작 위치. ()
 	cp = (char *)(pData + 21);
+
+// v2.14 GM 말은 모두 저장 된다.
+	if (m_pClientList[iClientH]->m_iAdminUserLevel > 0) {
+			char cTemp[200] ;
+			ZeroMemory(cTemp,sizeof(cTemp)) ;
+			pData[dwMsgSize-1] = NULL;
+			wsprintf(cTemp,"GM Chat(%s):\"%s\"",m_pClientList[iClientH]->m_cCharName,cp) ;
+
+			bSendMsgToLS(MSGID_GAMEMASTERLOG, iClientH, NULL, cTemp);
+	}
+
 			
 	// 메시지에 명령어가 섞여 있는지 검사한다. 
 	switch (*cp) {
+	case '$':
+		// 파티원 메시지
+		*cp = 32;
+		
+		if ( (m_pClientList[iClientH]->m_iTimeLeft_ShutUp == 0) && (m_pClientList[iClientH]->m_iSP >= 3) ) {
+			// 스테미너가 충분하면 전체 메시지를 보낸다. 
+			if (m_pClientList[iClientH]->m_iTimeLeft_FirmStaminar == 0) {
+				m_pClientList[iClientH]->m_iSP -= 3;
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_SP, NULL, NULL, NULL, NULL);
+			}
+			cSendMode = 4;
+		}
+		else cSendMode = NULL;
+		
+		// 전체 채팅 메시지를 사용할 수 없는 경우라면 
+		if (m_pClientList[iClientH]->m_iTimeLeft_ShutUp > 0) cSendMode = NULL;
+		break;
+	
 	case '@':
 		// 같은 길드에게 보내는 메시지 
 		*cp = 32;
 		
-		if ((strlen(cp) < 90) && (m_pClientList[iClientH]->m_iGuildRank == 0)) {
-			// 다른 서버에 길드 메시지 전송 
-			ZeroMemory(cTemp, sizeof(cTemp));
-			cp2 = (char *)cTemp;
-			*cp2 = GSM_CHATMSG;
-			cp2++;
-			*cp2 = 1; // 길드 메시지
-			cp2++;
-			ip = (int *)cp2;
-			*ip = m_pClientList[iClientH]->m_iGuildGUID;
-			cp2 += 4;
-			memcpy(cp2, m_pClientList[iClientH]->m_cCharName, 10);
-			cp2 += 10;
-			wp  = (WORD *)cp2;
-			*wp = (WORD)strlen(cp);
-			cp2 += 2;
-			strcpy(cp2, cp);
-			cp2 += strlen(cp);
-			bStockMsgToGateServer(cTemp, strlen(cp) + 18);
-		}
-				
 		if ( (m_pClientList[iClientH]->m_iTimeLeft_ShutUp == 0) && (m_pClientList[iClientH]->m_iLevel > 1) && 
 			 (m_pClientList[iClientH]->m_iSP >= 3) ) {
 			// 스테미너가 충분하면 전체 메시지를 보낸다. 
@@ -9683,6 +10627,33 @@ void CGame::ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize)
 	case '!':
 		// 전체 사용자에게 전달되는 메시지이다.
 		// 같은 길드에게 보내는 메시지 
+		*cp = 32;
+		
+		if ( (m_pClientList[iClientH]->m_iTimeLeft_ShutUp == 0) && (m_pClientList[iClientH]->m_iLevel > 10) && 
+			 (m_pClientList[iClientH]->m_iSP >= 5) ) {
+			// 스테미너가 충분하면 전체 메시지를 보낸다. 
+			//v1.42 
+			if (m_pClientList[iClientH]->m_iTimeLeft_FirmStaminar == 0) {
+				m_pClientList[iClientH]->m_iSP -= 5;
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_SP, NULL, NULL, NULL, NULL);
+			}
+			cSendMode = 2;	// 메시지 창에 띄운다.
+		}
+		else cSendMode = NULL;
+		
+		// 전체 채팅 메시지를 사용할 수 없는 경우라면 
+		if (m_pClientList[iClientH]->m_iTimeLeft_ShutUp > 0) cSendMode = NULL;
+		
+		// v1.4334 전체 외치기 막기
+		if (m_pClientList[iClientH]->m_iHP <= 0) cSendMode = NULL;
+
+		// 만약 관리권한이 있다면 
+		if (m_pClientList[iClientH]->m_iAdminUserLevel > 0) cSendMode = 10;
+		break;
+
+	case '^':
+		// 전체 사용자에게 전달되는 메시지이다.
+		// 만약 관리권한이 있거나 길드마스터인경우 전체서버에 보내는 메세지 
 		*cp = 32;
 		
 		if ((strlen(cp) < 90) && (m_pClientList[iClientH]->m_iAdminUserLevel > 0)) {
@@ -9706,18 +10677,39 @@ void CGame::ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize)
 			bStockMsgToGateServer(cTemp, strlen(cp) + 18);
 		}
 
+		if ((strlen(cp) < 90) && (m_pClientList[iClientH]->m_iGuildRank != -1)) {
+			// 다른 서버에 길드 메시지 전송 
+			ZeroMemory(cTemp, sizeof(cTemp));
+			cp2 = (char *)cTemp;
+			*cp2 = GSM_CHATMSG;
+			cp2++;
+			*cp2 = 1; // 길드 메시지
+			cp2++;
+			ip = (int *)cp2;
+			*ip = m_pClientList[iClientH]->m_iGuildGUID;
+			cp2 += 4;
+			memcpy(cp2, m_pClientList[iClientH]->m_cCharName, 10);
+			cp2 += 10;
+			wp  = (WORD *)cp2;
+			*wp = (WORD)strlen(cp);
+			cp2 += 2;
+			strcpy(cp2, cp);
+			cp2 += strlen(cp);
+			bStockMsgToGateServer(cTemp, strlen(cp) + 18);
+		}
+
 		if ( (m_pClientList[iClientH]->m_iTimeLeft_ShutUp == 0) && (m_pClientList[iClientH]->m_iLevel > 10) && 
-			 (m_pClientList[iClientH]->m_iSP >= 5) ) {
+			 (m_pClientList[iClientH]->m_iSP >= 5) && (m_pClientList[iClientH]->m_iGuildRank != -1) ) {
 			// 스테미너가 충분하면 전체 메시지를 보낸다. 
 			//v1.42 
 			if (m_pClientList[iClientH]->m_iTimeLeft_FirmStaminar == 0) {
-				m_pClientList[iClientH]->m_iSP -= 5;
+				m_pClientList[iClientH]->m_iSP -= 3;
 				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_SP, NULL, NULL, NULL, NULL);
 			}
-			cSendMode = 2;	// 메시지 창에 띄운다.
+			cSendMode = 1;	// 메시지 창에 띄운다.
 		}
 		else cSendMode = NULL;
-		
+
 		// 전체 채팅 메시지를 사용할 수 없는 경우라면 
 		if (m_pClientList[iClientH]->m_iTimeLeft_ShutUp > 0) cSendMode = NULL;
 		
@@ -9727,7 +10719,8 @@ void CGame::ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize)
 		// 만약 관리권한이 있다면 
 		if (m_pClientList[iClientH]->m_iAdminUserLevel > 0) cSendMode = 10;
 		break;
-
+		
+		
 	case '~':
 		// 같은 편에게 보내는 메시지
 		*cp = 32;
@@ -9757,29 +10750,34 @@ void CGame::ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize)
 		
 		if (memcmp(cp, "/who", 4) == 0) {
 			// 전체 사용자 수를 묻는 것이다.
+#ifdef DEF_CHINESE  // 2002-7-4
+			if (m_pClientList[iClientH]->m_iAdminUserLevel < 3) return;
+#else
+			if (m_pClientList[iClientH]->m_iAdminUserLevel == 0) return;
+#endif
 			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_TOTALUSERS, NULL, NULL, NULL, NULL);
 			return;
 		}
 
-		if (memcmp(cp, "/fi ", 4) == 0) {
+		if ((memcmp(cp, "/fi ", 4) == 0) || (memcmp(cp, "/접속확인 ", 10) == 0)) {
 			// 특정 사용자가 접속중인지를 묻는 것이다. 
 			CheckAndNotifyPlayerConnection(iClientH, cp, dwMsgSize - 21);
 			return;
 		}
 
-		if (memcmp(cp, "/to", 3) == 0) {
+		if ((memcmp(cp, "/to", 3) == 0) || (memcmp(cp, "/귓속말", 7) == 0)) {
 			// 귓속말을 설정한다.
 			ToggleWhisperPlayer(iClientH, cp, dwMsgSize - 21);
 			return;
 		}
 
-		if (memcmp(cp, "/setpf ", 7) == 0) {
+		if ((memcmp(cp, "/setpf ", 7) == 0) || (memcmp(cp, "/프로필설정 ", 12) == 0)) {
 			// 플레이어 프로필을 설정한다. 
 			SetPlayerProfile(iClientH, cp, dwMsgSize - 21);
 			return;
 		}
 
-		if (memcmp(cp, "/pf ", 4) == 0) {
+		if ((memcmp(cp, "/pf ", 4) == 0) || (memcmp(cp, "/프로필보기 ", 12) == 0)) {
 			// 플레이어의 프로필을 보고자 한다. 
 			GetPlayerProfile(iClientH, cp, dwMsgSize - 21);
 			return;
@@ -9791,29 +10789,31 @@ void CGame::ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize)
 			return;
 		}
 
-		if (memcmp(cp, "/rep+ ", 6) == 0) {
+		if ((memcmp(cp, "/rep+ ", 6) == 0) || (memcmp(cp, "/좋은평가 ", 10) == 0))  {
 			// 플레이어의 좋은 평가를 내린다. 
 			SetPlayerReputation(iClientH, cp, 1, dwMsgSize - 21);
 			return;
 		}
 
-		if (memcmp(cp, "/rep- ", 6) == 0) {
+		if ((memcmp(cp, "/rep- ", 6) == 0) || (memcmp(cp, "/나쁜평가 ", 10) == 0)) {
 			// 플레이어의 나쁜 평가를 내린다. 
 			SetPlayerReputation(iClientH, cp, 0, dwMsgSize - 21);
 			return;
 		}
 
-		if (memcmp(cp, "/hold", 5) == 0) {
+		if ((memcmp(cp, "/hold", 5) == 0) || (memcmp(cp, "/멈춤", 5) == 0)) {
 			SetSummonMobAction(iClientH, 1, dwMsgSize - 21);
 			return;
 		}
-
-		if (memcmp(cp, "/tgt ", 5) == 0) {
+// 2002-12-3 [중국] /tgt 명령어를 제거한다
+// #if defined(DEF_CHINESE)
+		if ((memcmp(cp, "/tgt ", 5) == 0) || (memcmp(cp, "/공격 ", 6) == 0)) {
 			SetSummonMobAction(iClientH, 2, dwMsgSize - 21, cp);
 			return;
 		}
+// #endif
 
-		if (memcmp(cp, "/free", 5) == 0) {
+		if ((memcmp(cp, "/free", 5) == 0) || (memcmp(cp, "/자유", 5) == 0)) {
 			SetSummonMobAction(iClientH, 0, dwMsgSize - 21);
 			return;
 		}
@@ -9825,7 +10825,7 @@ void CGame::ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize)
 		}
 
 		// v1.4311-3 변경 expire -> ban
-		if (memcmp(cp, "/ban", 4) == 0) {
+		if ((memcmp(cp, "/ban", 4) == 0) || (memcmp(cp, "/강퇴", 5) == 0)) {
 			UserCommand_BanGuildsman(iClientH, cp, dwMsgSize - 21);
 			return;
 		}
@@ -9857,8 +10857,19 @@ void CGame::ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize)
 			return;
 		}
 
+		if (memcmp(cp, "/tp ", 4) == 0) {
+			AdminOrder_Teleport(iClientH, cp, dwMsgSize - 21);
+			return;
+		}
+
 		if (memcmp(cp, "/summondemon ", 13) == 0) {
 			AdminOrder_SummonDemon(iClientH);
+			return;
+		}
+
+		// v2.14 유저소환기능 추가
+		if (memcmp(cp, "/summonplayer ", 14) == 0) {
+			AdminOrder_SummonPlayer(iClientH, cp, dwMsgSize - 21);
 			return;
 		}
 
@@ -9867,8 +10878,9 @@ void CGame::ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize)
 			return;			
 		}
 
-		if (memcmp(cp, "/unsummondemon ", 15) == 0) {
-			AdminOrder_UnsummonDemon(iClientH);
+		// v2.17 2002-6-3 고광현수정
+		if (memcmp(cp, "/unsummonboss ", 14) == 0) {
+			AdminOrder_UnsummonBoss(iClientH);
 			return;			
 		}
 
@@ -9896,6 +10908,11 @@ void CGame::ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize)
 			AdminOrder_SetAttackMode(iClientH, cp, dwMsgSize - 21);
 			return;	
 		}
+		// 2002-7-15 
+		if (memcmp(cp, "/setforcerecalltime ", 20) == 0) {
+			AdminOrder_SetForceRecallTime(iClientH, cp, dwMsgSize - 21);
+			return;
+		}
 
 		if (memcmp(cp, "/summon ", 8) == 0) {
 			AdminOrder_Summon(iClientH, cp, dwMsgSize - 21);
@@ -9914,15 +10931,84 @@ void CGame::ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize)
 
 		if (memcmp(cp, "/enableadmincreateitem 147258 ", 30) == 0) {
 			AdminOrder_EnableAdminCreateItem(iClientH, cp, dwMsgSize - 21);
+		}
+		
+		// v2.18 2002-10-15 중요 GM 명령어에 패스워드 추가 
+		if (memcmp(cp, "/enableadmincommand 0909114 ", 28) == 0) {
+			AdminOrder_EnableAdminCommand(iClientH, cp, dwMsgSize - 21);
 			return;
 		}
 
 		if (memcmp(cp, "/energysphere ", 14) == 0) {
-			if (m_pClientList[iClientH]->m_iAdminUserLevel >= 4) EnergySphereProcessor(TRUE, iClientH);
+			if (m_pClientList[iClientH]->m_iAdminUserLevel >= 2)
+			{
+				#ifndef DEF_TESTSERVER	
+				if (m_pClientList[iClientH]->m_bIsAdminCommandEnabled == FALSE) return;
+				#endif
+				EnergySphereProcessor(TRUE, iClientH);
+				// v2.4 GM Log
+				wsprintf(G_cTxt, "GM Order(%s): energysphere ", m_pClientList[iClientH]->m_cCharName);
+				bSendMsgToLS(MSGID_GAMEMASTERLOG, iClientH, NULL,G_cTxt);
+			}
 			return;
 		}
 
-		if ((memcmp(cp, "/shutdownthisserverrightnow ", 28) == 0) && (m_pClientList[iClientH]->m_iAdminUserLevel >= 3)) {
+		if (memcmp(cp, "/begincrusadetotalwar ", 22) == 0) {
+			// 2002-7-4 크루세이드를 시작할 수 있는 운영자의 레벨을 낮췄다.
+			if (m_pClientList[iClientH]->m_iAdminUserLevel >= 3) {
+				#ifndef DEF_TESTSERVER	
+				if (m_pClientList[iClientH]->m_bIsAdminCommandEnabled == FALSE) return;
+				#endif
+				GlobalStartCrusadeMode();
+
+				// v2.4 GM Log
+				wsprintf(G_cTxt, "GM Order(%s): begincrusadetotalwar", m_pClientList[iClientH]->m_cCharName);
+				bSendMsgToLS(MSGID_GAMEMASTERLOG, iClientH, NULL,G_cTxt);
+			}
+			return;
+		}
+
+		// v2.15
+		if (memcmp(cp, "/endcrusadetotalwar ", 20) == 0) {
+			if (m_pClientList[iClientH]->m_iAdminUserLevel >= 3) {
+				#ifndef DEF_TESTSERVER	
+				if (m_pClientList[iClientH]->m_bIsAdminCommandEnabled == FALSE) return;
+				#endif
+				ManualEndCrusadeMode(0);
+
+				// v2.4 GM Log
+				wsprintf(G_cTxt, "GM Order(%s): endcrusadetotalwar", m_pClientList[iClientH]->m_cCharName);
+				bSendMsgToLS(MSGID_GAMEMASTERLOG, iClientH, NULL,G_cTxt);
+			}
+			return;
+		}
+
+		if (memcmp(cp, "/createparty", 12) == 0) {
+			RequestCreatePartyHandler(iClientH);
+			return;
+		}
+
+		if (memcmp(cp, "/joinparty ", 11) == 0) {
+			RequestJoinPartyHandler(iClientH, cp, dwMsgSize - 21);
+			return;
+		}
+
+		if (memcmp(cp, "/dismissparty", 13) == 0) {
+			RequestDismissPartyHandler(iClientH);
+			return;
+		}
+
+		if (memcmp(cp, "/getpartyinfo", 13) == 0) {
+			GetPartyInfoHandler(iClientH);
+			return;
+		}
+
+		if (memcmp(cp, "/deleteparty", 12) == 0) {
+			RequestDeletePartyHandler(iClientH);
+			return;
+		}
+		
+		if ((memcmp(cp, "/shutdownthisserverrightnow ", 28) == 0) && (m_pClientList[iClientH]->m_iAdminUserLevel == 4)) {
 			// 커맨드에 의한 서버 셧다운 명령 비상사태에 대비하기 위함이다.
 			m_cShutDownCode      = 2;
 			m_bOnExitProcess     = TRUE;
@@ -9941,9 +11027,19 @@ void CGame::ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize)
 			return;
 		}
 
+#ifdef DEF_TAIWAN
+		if ((memcmp(cp, "/setobservermode ", 17) == 0) && (m_pClientList[iClientH]->m_iAdminUserLevel >= 1)) {
+#else
 		if ((memcmp(cp, "/setobservermode ", 17) == 0) && (m_pClientList[iClientH]->m_iAdminUserLevel >= 3)) {
+#endif
 			// 관람자 모드로 전환
 			AdminOrder_SetObserverMode(iClientH);
+			return;
+		}
+
+		if ((memcmp(cp, "/getticket ", 11) == 0) && (m_pClientList[iClientH]->m_iAdminUserLevel >= 2)) {
+			// 사투장 입장권을 얻는다
+			AdminOrder_GetFightzoneTicket(iClientH);
 			return;
 		}
 
@@ -10049,8 +11145,13 @@ void CGame::ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize)
 					
 			case 3:
 				if (m_pClientList[i]->m_bIsInitComplete == FALSE) break;
-
 				if ( (m_pClientList[i]->m_cSide == m_pClientList[iClientH]->m_cSide) ) 
+					iRet = m_pClientList[i]->m_pXSock->iSendMsg(pData, dwMsgSize);
+				break;
+
+			case 4:
+				if (m_pClientList[i]->m_bIsInitComplete == FALSE) break;
+				if ( (m_pClientList[i]->m_iPartyID != NULL) && (m_pClientList[i]->m_iPartyID == m_pClientList[iClientH]->m_iPartyID) ) 
 					iRet = m_pClientList[i]->m_pXSock->iSendMsg(pData, dwMsgSize);
 				break;
 			}
@@ -10068,10 +11169,47 @@ void CGame::ChatMsgHandler(int iClientH, char * pData, DWORD dwMsgSize)
 		}
 	}
 	else {
+		// 귓속말 메시지
 		iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(pData, dwMsgSize);	
 		
-		if (m_pClientList[ m_pClientList[iClientH]->m_iWhisperPlayerIndex ] != NULL)
-			iRet = m_pClientList[m_pClientList[iClientH]->m_iWhisperPlayerIndex]->m_pXSock->iSendMsg(pData, dwMsgSize);	
+		if (m_pClientList[iClientH]->m_iWhisperPlayerIndex == 10000) {
+			// 다른 서버로의 귓속말 
+			ZeroMemory(cBuffer, sizeof(cBuffer));
+			cp = (char *)(cBuffer);
+			*cp =  GSM_WHISFERMSG;
+			cp++;
+
+			memcpy(cp, m_pClientList[iClientH]->m_cWhisperPlayerName, 10);
+			cp += 10;
+
+			wp = (WORD *)cp;
+			*wp = (WORD)dwMsgSize;
+			cp += 2;
+		
+			memcpy(cp, pData, dwMsgSize);
+			cp += dwMsgSize;
+
+			bStockMsgToGateServer(cBuffer, (13 +dwMsgSize));
+
+			//testcode
+			//wsprintf(G_cTxt, "Sending Whisper Msg: %s %d", m_pClientList[iClientH]->m_cWhisperPlayerName, (13 +dwMsgSize));
+			//PutLogList(G_cTxt);
+		}
+		else if (m_pClientList[ m_pClientList[iClientH]->m_iWhisperPlayerIndex ] != NULL) {
+			// 서버 내 귓속말
+			// v2.12 성후니 수정 같은 서버에 있는 경우 귓속말 상대자가 달라 지면 메세지를 보내지 않는다.
+			if( strcmp(m_pClientList[iClientH]->m_cWhisperPlayerName, m_pClientList[ m_pClientList[iClientH]->m_iWhisperPlayerIndex ]->m_cCharName) == 0)  {
+				iRet = m_pClientList[m_pClientList[iClientH]->m_iWhisperPlayerIndex]->m_pXSock->iSendMsg(pData, dwMsgSize);	
+				if (m_pClientList[m_pClientList[iClientH]->m_iWhisperPlayerIndex]->m_iAdminUserLevel > 0) {
+					char cTxt[200] ;
+					
+					ZeroMemory(cTxt,sizeof(cTxt)) ;
+
+					wsprintf(cTxt,"PC Chat(%s):\"%s\"\tto GM(%s)",m_pClientList[iClientH]->m_cCharName,pData+21,m_pClientList[iClientH]->m_cWhisperPlayerName) ;
+					bSendMsgToLS(MSGID_GAMEMASTERLOG, iClientH, NULL, cTxt);
+				}
+			}
+		}
 
 		switch (iRet) {
 		case DEF_XSOCKEVENT_QUENEFULL:
@@ -10144,7 +11282,7 @@ void CGame::ChatMsgHandlerGSM(int iMsgType, int iV1, char * pName, char * pData,
 }
 
 
-int CGame::iClientMotion_Attack_Handler(int iClientH, short sX, short sY, short dX, short dY, short wType, char cDir, WORD wTargetObjectID, BOOL bResponse)
+int CGame::iClientMotion_Attack_Handler(int iClientH, short sX, short sY, short dX, short dY, short wType, char cDir, WORD wTargetObjectID, BOOL bResponse, BOOL bIsDash)
 {
  char cData[100];
  DWORD * dwp, dwTime;
@@ -10161,6 +11299,7 @@ int CGame::iClientMotion_Attack_Handler(int iClientH, short sX, short sY, short 
 	if (m_pClientList[iClientH]->m_bIsKilled == TRUE) return 0;
 
 	dwTime = timeGetTime();
+	m_pClientList[iClientH]->m_dwLastActionTime = dwTime;
 
 #ifndef NO_MSGSPEEDCHECK	
 	m_pClientList[iClientH]->m_iAttackMsgRecvCount++;
@@ -10254,7 +11393,7 @@ int CGame::iClientMotion_Attack_Handler(int iClientH, short sX, short sY, short 
 	if (sOwner != NULL) {
 		// 공격 효과를 계산한다. 만약 비정상적인 연속공격 메시지는 무시한다. 
 		if ((wType != 0) && ((dwTime - m_pClientList[iClientH]->m_dwRecentAttackTime) > 100)) { 
-			iExp = iCalculateAttackEffect(sOwner, cOwnerType, iClientH, DEF_OWNERTYPE_PLAYER, dX, dY, wType, bNearAttack);
+			iExp = iCalculateAttackEffect(sOwner, cOwnerType, iClientH, DEF_OWNERTYPE_PLAYER, dX, dY, wType, bNearAttack, bIsDash);
 			// v1.41: iCalculateAttackEffect에서 오류로 인해 캐릭터가 접속이 끊길 수 있음에 대비한 것임.
 			if (m_pClientList[iClientH] == NULL) return 0;
 			m_pClientList[iClientH]->m_dwRecentAttackTime = dwTime;
@@ -10266,7 +11405,8 @@ int CGame::iClientMotion_Attack_Handler(int iClientH, short sX, short sY, short 
 
 	if (iExp != 0) {
 		// 공격으로 인한 경험치 할당이 있었다면 ExpStock에 더해준다. 
-		m_pClientList[iClientH]->m_iExpStock += iExp;
+		//m_pClientList[iClientH]->m_iExpStock += iExp;
+		GetExp(iClientH, iExp, TRUE);
 	}
 
 	// 클라이언트가 MSGID_RESPONSE_MOTION 메시지를 받아야만 계속 명령을 전송할 수 있다. 
@@ -10416,14 +11556,28 @@ void CGame::NpcBehavior_Move(int iNpcH)
 
 	// 공격할 대상을 검색한다.
 	TargetSearch(iNpcH, &sTarget, &cTargetType);				
-	if ((sTarget != NULL) && (iDice(1,3) == 3)) {
+	if (sTarget != NULL) {
 		// 공격목표 발견. 
-		m_pNpcList[iNpcH]->m_cBehavior          = DEF_BEHAVIOR_ATTACK;
-		m_pNpcList[iNpcH]->m_sBehaviorTurnCount = 0;		
-		m_pNpcList[iNpcH]->m_iTargetIndex = sTarget;
-		m_pNpcList[iNpcH]->m_cTargetType  = cTargetType;
-		// 여기서 표효 동작같은것을 위한 메시지 발송. 
-		return;
+		if (m_pNpcList[iNpcH]->m_dwActionTime < 1000) {
+			// 액션 스피드 1000ms 미만의 NPC는 33% 확률로 목표를 획득한다.
+			if (iDice(1,3) == 3) {
+				m_pNpcList[iNpcH]->m_cBehavior          = DEF_BEHAVIOR_ATTACK;
+				m_pNpcList[iNpcH]->m_sBehaviorTurnCount = 0;		
+				m_pNpcList[iNpcH]->m_iTargetIndex = sTarget;
+				m_pNpcList[iNpcH]->m_cTargetType  = cTargetType;
+				// 여기서 표효 동작같은것을 위한 메시지 발송. 
+				return;
+			}
+		}
+		else {
+			// 액션 스피드 1000ms 이상의 NPC는 목표물이 발견되면 무조건 할당한다.
+			m_pNpcList[iNpcH]->m_cBehavior          = DEF_BEHAVIOR_ATTACK;
+			m_pNpcList[iNpcH]->m_sBehaviorTurnCount = 0;		
+			m_pNpcList[iNpcH]->m_iTargetIndex = sTarget;
+			m_pNpcList[iNpcH]->m_cTargetType  = cTargetType;
+			// 여기서 표효 동작같은것을 위한 메시지 발송. 
+			return;
+		}
 	}
 	
 	// 마스터 몹은 이동 속도가 느리다.
@@ -10445,9 +11599,11 @@ void CGame::NpcBehavior_Move(int iNpcH)
 			dY = m_pClientList[m_pNpcList[iNpcH]->m_iFollowOwnerIndex]->m_sY;
 			break;
 		case DEF_OWNERTYPE_NPC:
-			// 따라다니던 개체가 죽으면 랜덤이동으로 전환.
+			// 따라다니던 개체가 죽으면 랜덤이동으로 전환. -> 01-12-19 주변의 다른 동급 몬스터를 마스터로 선택한다. 찾을 수 없었다면 랜덤 무브
 			if (m_pNpcList[m_pNpcList[iNpcH]->m_iFollowOwnerIndex] == NULL) {
 				m_pNpcList[iNpcH]->m_cMoveType = DEF_MOVETYPE_RANDOM;
+				m_pNpcList[iNpcH]->m_iFollowOwnerIndex = NULL;
+				//bSerchMaster(iNpcH);
 				return;
 			}
 			
@@ -10512,8 +11668,8 @@ void CGame::TargetSearch(int iNpcH, short * pTarget, char * pTargetType)
  register short sX, sY, rX, rY, dX, dY;
  short sOwner, sTargetOwner, sDistance, sTempDistance;
  char  cOwnerType, cTargetType, cTargetSide;
- int   iInv;
-
+ int   iInv, iSearchType;
+ 
 	sTargetOwner = NULL;
 	cTargetType  = NULL;
 	sDistance    = 100;
@@ -10524,6 +11680,11 @@ void CGame::TargetSearch(int iNpcH, short * pTarget, char * pTargetType)
 	// 인덱스 iNpcH에 해당하는 NPC가 공격대상을 찾는다. 
 	rX = m_pNpcList[iNpcH]->m_sX - m_pNpcList[iNpcH]->m_cTargetSearchRange;
 	rY = m_pNpcList[iNpcH]->m_sY - m_pNpcList[iNpcH]->m_cTargetSearchRange;
+
+	iSearchType = NULL; // 공격 제한 없음
+	switch (m_pNpcList[iNpcH]->m_sType) {
+	case 51: iSearchType = 1; break; // 건축물만 공격함
+	}
 	
 	for (ix = rX; ix < rX + m_pNpcList[iNpcH]->m_cTargetSearchRange*2 + 1; ix++)
 	for (iy = rY; iy < rY + m_pNpcList[iNpcH]->m_cTargetSearchRange*2 + 1; iy++) {
@@ -10532,7 +11693,7 @@ void CGame::TargetSearch(int iNpcH, short * pTarget, char * pTargetType)
 		if (sOwner != NULL) {
 			// 무언가 발견되었다. 
 			if ((sOwner == iNpcH) && (cOwnerType == DEF_OWNERTYPE_NPC)) break; // 자기 자신이면 무시 
-			
+		
 			// 목표 설정
 			// 위치를 구한다.
 			iPKCount = 0;
@@ -10544,6 +11705,10 @@ void CGame::TargetSearch(int iNpcH, short * pTarget, char * pTargetType)
 				}
 				else {
 					if (m_pClientList[sOwner]->m_iAdminUserLevel > 0) goto SKIP_SEARCH;
+					switch (iSearchType) {
+					case 1: goto SKIP_SEARCH; break;
+					case NULL: break;
+					}
 
 					dX = m_pClientList[sOwner]->m_sX;
 					dY = m_pClientList[sOwner]->m_sY;
@@ -10559,6 +11724,26 @@ void CGame::TargetSearch(int iNpcH, short * pTarget, char * pTargetType)
 					m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->ClearOwner(6, sOwner, DEF_OWNERTYPE_NPC, ix, iy);
 				}
 				else {
+					// 목표물 검색 제한 조건이 있다면 고려한다.
+					switch (iSearchType) {
+					case 1: // 구조물만 공격하는 모드 
+						switch (m_pNpcList[sOwner]->m_sType) {
+						case 36:
+						case 37:
+						case 38:
+						case 39:
+						case 40: // 전쟁용 건축물들
+						case 41: break;
+
+						default:
+							goto SKIP_SEARCH;
+							break;
+						}
+						break;
+					case NULL: 
+						break;
+					}
+					
 					dX = m_pNpcList[sOwner]->m_sX;
 					dY = m_pNpcList[sOwner]->m_sY;
 					cTargetSide = m_pNpcList[sOwner]->m_cSide;
@@ -10620,9 +11805,8 @@ SKIP_SEARCH:;
 void CGame::NpcBehavior_Attack(int iNpcH)
 {
  int   iMagicType;
- short sX, sY, dX, dY, dX_follow, dY_follow, sDistance;
+ short sX, sY, dX, dY;
  char  cDir;
- WORD  wWeaponType;
  DWORD dwTime = timeGetTime();
 
 	if (m_pNpcList[iNpcH] == NULL) return;
@@ -10737,10 +11921,18 @@ void CGame::NpcBehavior_Attack(int iNpcH)
 				break;
 			}
 		}
+	
 		else {
 			// 일반 NPC인 경우
-			SendEventToNearClient_TypeA(iNpcH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTATTACK, m_pNpcList[iNpcH]->m_sX + _tmp_cTmpDirX[cDir], m_pNpcList[iNpcH]->m_sY + _tmp_cTmpDirY[cDir], 1); // 1 : 칼등의 근접무기로 공격하는 의미 
-			iCalculateAttackEffect(m_pNpcList[iNpcH]->m_iTargetIndex, m_pNpcList[iNpcH]->m_cTargetType, iNpcH, DEF_OWNERTYPE_NPC, dX, dY, 1); // 공격에 대한 효과를 계산한다. 
+			if (m_pNpcList[iNpcH]->m_cMagicLevel == 11) {// v2.20 2002-12-20 Ice-Golem의 공격 형태
+				SendEventToNearClient_TypeA(iNpcH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTATTACK, m_pNpcList[iNpcH]->m_sX, m_pNpcList[iNpcH]->m_sY, 1); 
+				m_pNpcList[iNpcH]->m_iMagicHitRatio = 1000;
+				NpcMagicHandler(iNpcH, m_pNpcList[iNpcH]->m_sX, m_pNpcList[iNpcH]->m_sY, 75);
+			} else 
+			{
+				SendEventToNearClient_TypeA(iNpcH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTATTACK, m_pNpcList[iNpcH]->m_sX + _tmp_cTmpDirX[cDir], m_pNpcList[iNpcH]->m_sY + _tmp_cTmpDirY[cDir], 1); // 1 : 칼등의 근접무기로 공격하는 의미 
+				iCalculateAttackEffect(m_pNpcList[iNpcH]->m_iTargetIndex, m_pNpcList[iNpcH]->m_cTargetType, iNpcH, DEF_OWNERTYPE_NPC, dX, dY, 1); // 공격에 대한 효과를 계산한다. 
+			}
 		}
 		// 연속 공격 카운트 증가.
 		m_pNpcList[iNpcH]->m_iAttackCount++;
@@ -10862,6 +12054,13 @@ void CGame::NpcBehavior_Attack(int iNpcH)
 				if ((m_pMagicConfigList[74]->m_sValue1 <= m_pNpcList[iNpcH]->m_iMana) && (iDice(1,3) == 2)) 
 					iMagicType = 74;
 				break;
+			case 10: // 2002-12-21 아이스 스트라이크
+				if ((m_pMagicConfigList[57]->m_sValue1 <= m_pNpcList[iNpcH]->m_iMana) && (iDice(1,3) == 2)) 
+					iMagicType = 57;
+				break;
+			case 11: // 2002-12-20 Magic Level 11추가 : 추격
+					goto NBA_CHASE;
+				break;
 			}
 
 			if (iMagicType != -1) {
@@ -10944,16 +12143,68 @@ void CGame::NpcBehavior_Attack(int iNpcH)
 
 				case 37: // Cannon Guard Tower: 매스 파이어 스트라이크 공격
 					SendEventToNearClient_TypeA(iNpcH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTATTACK, dX, dY, 1); 
-					//iCalculateAttackEffect(m_pNpcList[iNpcH]->m_iTargetIndex, m_pNpcList[iNpcH]->m_cTargetType, iNpcH, DEF_OWNERTYPE_NPC, dX, dY, 1);
 					m_pNpcList[iNpcH]->m_iMagicHitRatio = 1000;
 					NpcMagicHandler(iNpcH, dX, dY, 61);
 					break;
 				}
 			}
 			else {
-				SendEventToNearClient_TypeA(iNpcH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTATTACK, dX, dY, 20); // 20: 필살기 
-				// 공격에 대한 효과를 계산한다. 
-				iCalculateAttackEffect(m_pNpcList[iNpcH]->m_iTargetIndex, m_pNpcList[iNpcH]->m_cTargetType, iNpcH, DEF_OWNERTYPE_NPC, dX, dY, 20);
+				switch (m_pNpcList[iNpcH]->m_sType) {
+				case 51: // v2.05 Catapult: 매스 파이어 스트라이크 공격 
+					SendEventToNearClient_TypeA(iNpcH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTATTACK, dX, dY, 1); 
+					m_pNpcList[iNpcH]->m_iMagicHitRatio = 1000;
+					NpcMagicHandler(iNpcH, dX, dY, 61);
+					break;
+
+				case 54: // Dark Elf: 활 공격을 한다.
+					SendEventToNearClient_TypeA(iNpcH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTATTACK, dX, dY, 2); // 2: 활공격 
+					iCalculateAttackEffect(m_pNpcList[iNpcH]->m_iTargetIndex, m_pNpcList[iNpcH]->m_cTargetType, iNpcH, DEF_OWNERTYPE_NPC, dX, dY, 2);
+					break;
+				case 63: //v2.20 2002-12-20 frost : 냉동 공격 
+				case 53: //Beholder: 냉동 공격을 한다.
+					switch (m_pNpcList[iNpcH]->m_cTargetType) {
+					case DEF_OWNERTYPE_PLAYER:
+						if (m_pClientList[m_pNpcList[iNpcH]->m_iTargetIndex] == NULL) goto NBA_BREAK1;
+						// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+						if ((m_pClientList[m_pNpcList[iNpcH]->m_iTargetIndex]->m_iHP > 0) && 
+							(bCheckResistingIceSuccess(m_pNpcList[iNpcH]->m_cDir, m_pNpcList[iNpcH]->m_iTargetIndex, DEF_OWNERTYPE_PLAYER, m_pNpcList[iNpcH]->m_iMagicHitRatio) == FALSE)) {
+							if (m_pClientList[m_pNpcList[iNpcH]->m_iTargetIndex]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pClientList[m_pNpcList[iNpcH]->m_iTargetIndex]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(m_pNpcList[iNpcH]->m_iTargetIndex, DEF_OWNERTYPE_PLAYER, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (5*1000), 
+									                m_pNpcList[iNpcH]->m_iTargetIndex, DEF_OWNERTYPE_PLAYER, NULL, NULL, NULL, 1, NULL, NULL);
+								// 대상이 플레이어인 경우 알려준다.
+								SendNotifyMsg(NULL, m_pNpcList[iNpcH]->m_iTargetIndex, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+							}
+						}
+						break;
+
+					case DEF_OWNERTYPE_NPC:
+						if (m_pNpcList[m_pNpcList[iNpcH]->m_iTargetIndex] == NULL) goto NBA_BREAK1;
+						if ((m_pNpcList[m_pNpcList[iNpcH]->m_iTargetIndex]->m_iHP > 0) && 
+							(bCheckResistingIceSuccess(m_pNpcList[iNpcH]->m_cDir, m_pNpcList[iNpcH]->m_iTargetIndex, DEF_OWNERTYPE_NPC, m_pNpcList[iNpcH]->m_iMagicHitRatio) == FALSE)) {
+							if (m_pNpcList[m_pNpcList[iNpcH]->m_iTargetIndex]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pNpcList[m_pNpcList[iNpcH]->m_iTargetIndex]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(m_pNpcList[iNpcH]->m_iTargetIndex, DEF_OWNERTYPE_NPC, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (5*1000), 
+								                    m_pNpcList[iNpcH]->m_iTargetIndex, DEF_OWNERTYPE_NPC, NULL, NULL, NULL, 1, NULL, NULL);
+							}
+						}
+						break;
+					}
+NBA_BREAK1:;
+					SendEventToNearClient_TypeA(iNpcH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTATTACK, dX, dY, 20); // 20: 필살기
+					iCalculateAttackEffect(m_pNpcList[iNpcH]->m_iTargetIndex, m_pNpcList[iNpcH]->m_cTargetType, iNpcH, DEF_OWNERTYPE_NPC, dX, dY, 20);
+					break;
+							
+				default:
+					SendEventToNearClient_TypeA(iNpcH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTATTACK, dX, dY, 20); // 20: 필살기 
+					// 공격에 대한 효과를 계산한다. 
+					iCalculateAttackEffect(m_pNpcList[iNpcH]->m_iTargetIndex, m_pNpcList[iNpcH]->m_cTargetType, iNpcH, DEF_OWNERTYPE_NPC, dX, dY, 20);
+					break;
+				}
 			}
 			// 연속 공격 카운트 증가.
 			m_pNpcList[iNpcH]->m_iAttackCount++;
@@ -10987,96 +12238,6 @@ NBA_CHASE:;
 		// 연속 공격 카운트 초기화 
 		m_pNpcList[iNpcH]->m_iAttackCount = 0;
 
-		// Crusade 집단 이동 모드일때라도 적은 끝까지 추격하게 변경 
-		/*
-		if (m_pNpcList[iNpcH]->m_cMoveType == DEF_MOVETYPE_FOLLOW) {
-			
-			switch (m_pNpcList[iNpcH]->m_cFollowOwnerType) {
-			case DEF_OWNERTYPE_PLAYER:
-				if (m_pClientList[m_pNpcList[iNpcH]->m_iFollowOwnerIndex] == NULL) {
-					// 이동모드로 전환 
-					m_pNpcList[iNpcH]->m_sBehaviorTurnCount = 0;
-					m_pNpcList[iNpcH]->m_cBehavior    = DEF_BEHAVIOR_MOVE;
-					m_pNpcList[iNpcH]->m_cMoveType = DEF_MOVETYPE_RANDOMWAYPOINT;
-					return;
-				}
-
-				dX_follow = m_pClientList[m_pNpcList[iNpcH]->m_iFollowOwnerIndex]->m_sX;
-				dY_follow = m_pClientList[m_pNpcList[iNpcH]->m_iFollowOwnerIndex]->m_sY;
-				break;
-			case DEF_OWNERTYPE_NPC:
-				if (m_pNpcList[m_pNpcList[iNpcH]->m_iFollowOwnerIndex] == NULL) {
-					// 이동모드로 전환 
-					m_pNpcList[iNpcH]->m_sBehaviorTurnCount = 0;
-					m_pNpcList[iNpcH]->m_cBehavior    = DEF_BEHAVIOR_MOVE;
-					m_pNpcList[iNpcH]->m_cMoveType = DEF_MOVETYPE_RANDOMWAYPOINT;
-					return;
-				}
-				
-				dX_follow = m_pNpcList[m_pNpcList[iNpcH]->m_iFollowOwnerIndex]->m_sX;
-				dY_follow = m_pNpcList[m_pNpcList[iNpcH]->m_iFollowOwnerIndex]->m_sY;
-				break;
-			}
-
-			if (abs(sX - dX_follow) >= abs(sY - dY_follow)) 
-				 sDistance = abs(sX - dX_follow);
-			else sDistance = abs(sY - dY_follow);
-
-			if (sDistance < 8) {
-				// 따르는 대상과 어느정도 거리가 여유가 있다면 추격한다.
-				cDir = cGetNextMoveDir(sX, sY, dX, dY, m_pNpcList[iNpcH]->m_cMapIndex, m_pNpcList[iNpcH]->m_cTurn, &m_pNpcList[iNpcH]->m_tmp_iError);
-				if (cDir == 0) {
-				// 이동할 수 없다.
-				}
-				else {
-					dX = m_pNpcList[iNpcH]->m_sX + _tmp_cTmpDirX[cDir];
-					dY = m_pNpcList[iNpcH]->m_sY + _tmp_cTmpDirY[cDir];
-					// 예전 위치에서 지운다. 
-					m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->ClearOwner(7, iNpcH, DEF_OWNERTYPE_NPC, m_pNpcList[iNpcH]->m_sX, m_pNpcList[iNpcH]->m_sY);
-					// 새 위치에 표시한다. 
-					m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->SetOwner(iNpcH, DEF_OWNERTYPE_NPC, dX, dY);
-					m_pNpcList[iNpcH]->m_sX   = dX;
-					m_pNpcList[iNpcH]->m_sY   = dY;
-					m_pNpcList[iNpcH]->m_cDir = cDir;
-					SendEventToNearClient_TypeA(iNpcH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTMOVE, NULL, NULL, NULL);
-				}
-			}
-			else {
-				// 단 영구 공격 모드라면 거리와 상관없이 무조건 추격. 전환되지 않는다.
-				if (m_pNpcList[iNpcH]->m_bIsPermAttackMode == FALSE) {
-					if (iDice(1,5) == 3) {
-						// 5분의 1확률로 집단 이동 모드를 벗어나 독자적 행동을 한다.
-						m_pNpcList[iNpcH]->m_cMoveType = DEF_MOVETYPE_RANDOMWAYPOINT;
-						m_pNpcList[iNpcH]->m_sBehaviorTurnCount = 0;		
-						m_pNpcList[iNpcH]->m_cBehavior          = DEF_BEHAVIOR_MOVE;
-					}
-					else {
-						m_pNpcList[iNpcH]->m_sBehaviorTurnCount = 0;		
-						m_pNpcList[iNpcH]->m_cBehavior          = DEF_BEHAVIOR_MOVE;
-					}
-				}
-				else {
-					cDir = cGetNextMoveDir(sX, sY, dX, dY, m_pNpcList[iNpcH]->m_cMapIndex, m_pNpcList[iNpcH]->m_cTurn, &m_pNpcList[iNpcH]->m_tmp_iError);
-					if (cDir == 0) {
-						// 이동할 수 없다.
-					}
-					else {
-						dX = m_pNpcList[iNpcH]->m_sX + _tmp_cTmpDirX[cDir];
-						dY = m_pNpcList[iNpcH]->m_sY + _tmp_cTmpDirY[cDir];
-						// 예전 위치에서 지운다. 
-						m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->ClearOwner(8, iNpcH, DEF_OWNERTYPE_NPC, m_pNpcList[iNpcH]->m_sX, m_pNpcList[iNpcH]->m_sY);
-						// 새 위치에 표시한다. 
-						m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->SetOwner(iNpcH, DEF_OWNERTYPE_NPC, dX, dY);
-						m_pNpcList[iNpcH]->m_sX   = dX;
-						m_pNpcList[iNpcH]->m_sY   = dY;
-						m_pNpcList[iNpcH]->m_cDir = cDir;
-						SendEventToNearClient_TypeA(iNpcH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTMOVE, NULL, NULL, NULL);
-					}
-	  			}
-			}
-		}
-		else 
-		*/
 		{
 			// 이동모드가 Follow가 아니라면 공격목표를 무조건 추격한다.	움직임에 제한이 없다.
 			cDir = cGetNextMoveDir(sX, sY, dX, dY,m_pNpcList[iNpcH]->m_cMapIndex, m_pNpcList[iNpcH]->m_cTurn, &m_pNpcList[iNpcH]->m_tmp_iError);
@@ -11142,26 +12303,26 @@ void CGame::RemoveFromTarget(short sTargetH, char cTargetType, int iCode)
 }
 
 
-int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttackerH, char cAttackerType, int tdX, int tdY, int iAttackMode, BOOL bNearAttack)
+int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttackerH, char cAttackerType, int tdX, int tdY, int iAttackMode, BOOL bNearAttack, BOOL bIsDash)
 {
- int    iAP_SM, iAP_L, i, iAttackerHitRatio, iTargetDefenseRatio, iDestHitRatio, iResult, iAP_Abs_Armor, iAP_Abs_Shield;
+ int    iAP_SM, iAP_L, iAttackerHitRatio, iTargetDefenseRatio, iDestHitRatio, iResult, iAP_Abs_Armor, iAP_Abs_Shield;
  char   cAttackerName[21], cAttackerDir, cAttackerSide, cTargetDir, cProtect;
- short  sWeaponIndex, sAttackerWeapon, dX, dY, sX, sY, aX, aY, sAtkX, sAtkY, sTgtX, sTgtY;
+ short  sWeaponIndex, sAttackerWeapon, dX, dY, sX, sY, sAtkX, sAtkY, sTgtX, sTgtY;
  DWORD  dwTime = timeGetTime();
  WORD   wWeaponType;
  double dTmp1, dTmp2, dTmp3;
  BOOL   bKilled = FALSE;
  BOOL   bNormalMissileAttack = FALSE;
  BOOL   bIsAttackerBerserk;
- int    iKilledDice, iDamage, iExp, iWepLifeOff, iSideCondition, iMaxSuperAttack, iWeaponSkill, iComboBonus, iTemp;
+ int    iKilledDice, iDamage, iExp, iWepLifeOff, iSideCondition, iMaxSuperAttack, iWeaponSkill, iComboBonus, iTemp,iTemp2;
  int    iAttackerHP, iMoveDamage;
- class  CTile * pTile;
  char   cAttackerSA;
  int    iAttackerSAvalue, iHitPoint;
  char   cDamageMoveDir;
- int    iConstructionPoint, iWarContribution, tX, tY, iDst1, iDst2;
-
+ int    iPartyID, iConstructionPoint, iWarContribution, tX, tY, iDst1, iDst2;
+ int	iSkillLV,iCropLimit;
 	iExp = 0;
+	iPartyID = 0;
 
 	ZeroMemory(cAttackerName, sizeof(cAttackerName));
 	cAttackerSA      = NULL;
@@ -11173,9 +12334,14 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 	case DEF_OWNERTYPE_PLAYER:
 		
 		if (m_pClientList[sAttackerH] == NULL) return 0;
+
 		// 공격위치가 공격 불가능 맵이라면 공격 불가능 
 		if (m_pMapList[ m_pClientList[sAttackerH]->m_cMapIndex ]->m_bIsAttackEnabled == FALSE) return 0;
 			
+		// 2002-11-14 사냥꾼 모드 추가 (사냥꾼은 다른 Player를 공격하지 않는다. 전면전시 제외)
+		if ( m_bIsCrusadeMode == FALSE &&
+			(m_pClientList[sAttackerH]->m_bIsHunter == TRUE) && (cTargetType == DEF_OWNERTYPE_PLAYER) ) return 0;
+
 		// 투명 모드였다면 공격시에 해제된다.
 		if ( (m_pClientList[sAttackerH]->m_sStatus & 0x10) != 0 ) {
 			SetInvisibilityFlag(sAttackerH, DEF_OWNERTYPE_PLAYER, FALSE);
@@ -11203,6 +12369,9 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 			if (iAP_SM <= 0) iAP_SM = 1;
 			if (iAP_L  <= 0) iAP_L  = 1;
 			iAttackerHitRatio = m_pClientList[sAttackerH]->m_iHitRatio + m_pClientList[sAttackerH]->m_cSkillMastery[5];
+			// v2.17 2002-7-2 성후니 변경 주먹버그 수정을 위해 
+			m_pClientList[sAttackerH]->m_sUsingWeaponSkill = 5 ;
+
 		}
 		else if ((wWeaponType >= 1) && (wWeaponType < 40)) {
 			// 칼, 매이스 종류
@@ -11214,7 +12383,7 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 			iAP_L  += m_pClientList[sAttackerH]->m_cAttackBonus_L;
 		
 			iAttackerHitRatio = m_pClientList[sAttackerH]->m_iHitRatio;
-
+			
 			// Str 보너스 데미지를 가산한다. +0.5f는 반올림
 			dTmp1 = (double)iAP_SM;
 			if (m_pClientList[sAttackerH]->m_iStr <= 0)
@@ -11243,11 +12412,10 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 			// 보너스 가산 
 			iAP_SM += m_pClientList[sAttackerH]->m_cAttackBonus_SM;
 			iAP_L  += m_pClientList[sAttackerH]->m_cAttackBonus_L;
-		
+			
 			iAttackerHitRatio = m_pClientList[sAttackerH]->m_iHitRatio;
-
 			bNormalMissileAttack = TRUE;
-
+			
 			// Str 보너스 가산 
 			iAP_SM += iDice(1, (m_pClientList[sAttackerH]->m_iStr / 20));
 			iAP_L  += iDice(1, (m_pClientList[sAttackerH]->m_iStr / 20));
@@ -11271,7 +12439,7 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 				iAP_L = m_pClientList[sAttackerH]->m_iMaxAP_L;
 			}
 		}
-		
+				
 		cAttackerDir = m_pClientList[sAttackerH]->m_cDir;
 		strcpy(cAttackerName, m_pClientList[sAttackerH]->m_cCharName);
 		
@@ -11281,6 +12449,7 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 
 		// v1.2 여기서 필살기에 따른 대미지 가중을 결정한다.
 		if ((m_pClientList[sAttackerH]->m_iSuperAttackLeft > 0) && (iAttackMode >= 20)) {
+			
 			// 기본적으로 파워가 레벨%만큼 증가한다.
 			dTmp1 = (double)iAP_SM;
 			dTmp2 = (double)m_pClientList[sAttackerH]->m_iLevel;
@@ -11296,22 +12465,48 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 			iTemp = (int)(dTmp2 +0.5f);
 			iAP_L += iTemp;
 
+			// v2.16 2002-5-27 무기 종류에 따른 대미지 추가  해머의 경우 필살기 사용시 보너스 명중률 적용 
+			switch (m_pClientList[sAttackerH]->m_sUsingWeaponSkill) {
+			case 6:  iAP_SM += (iAP_SM/10); iAP_L += (iAP_L/10); iAttackerHitRatio  += 30 ; break;	// 활 공격 +10%
+			case 7:  iAP_SM *= 2; iAP_L *= 2; break; // 단검 공격 +200%
+			case 8:  iAP_SM += (iAP_SM/10); iAP_L += (iAP_L/10); iAttackerHitRatio += 30 ; break;	// 긴칼 공격 +10%
+			case 10:  iAP_SM += (iAP_SM/5); iAP_L += (iAP_L/5) ;                           break;   // 도끼 공격 +20%
+			case 14:  iAP_SM += (iAP_SM/5); iAP_L += (iAP_L/5) ; iAttackerHitRatio += 20 ; break;   // 해머 공격 +20%
+			case 21:  iAP_SM += (iAP_SM/5); iAP_L += (iAP_L/5); iAttackerHitRatio +=  50 ; break;   // 지팡이 공격 +20%
+			
+			default: break;		// 기타 공격
+			}
+						
 			// v1.3 필살기의 경우 기본적으로 명중값이 100 올라간다.
 			iAttackerHitRatio += 100;
-
 			// v1.41 필살기의 명중값을 조정한다.
 			iAttackerHitRatio += m_pClientList[sAttackerH]->m_iCustomItemValue_Attack;
 		}
 
+		// v2.12 대쉬 공격에 보너스 명중률 적용 
+		if (bIsDash == TRUE) {
+			// 무기 종류에 따른 대미지 추가 
+
+			iAttackerHitRatio += 20;
+
+			switch (m_pClientList[sAttackerH]->m_sUsingWeaponSkill) {
+			case 8:  iAP_SM += (iAP_SM/10); iAP_L += (iAP_L/10); break;	// 긴칼 공격 +10%
+			case 10: iAP_SM += (iAP_SM/5); iAP_L += (iAP_L/5);break;    // 도끼 공격 +20%
+			case 14: iAP_SM += (iAP_SM/5); iAP_L += (iAP_L/5);break;    // 해머 공격 +20%
+			default: break;		// 기타 공격
+			}
+		}
+
 		// v1.41
 		iAttackerHP = m_pClientList[sAttackerH]->m_iHP;
-
 		// v1.42 추가 Attack Rating 
 		iAttackerHitRatio += m_pClientList[sAttackerH]->m_iAddAR;
 
 		//v1.43
 		sAtkX = m_pClientList[sAttackerH]->m_sX;
 		sAtkY = m_pClientList[sAttackerH]->m_sY;
+		
+		iPartyID = m_pClientList[sAttackerH]->m_iPartyID;
 		break;
 
 	case DEF_OWNERTYPE_NPC:
@@ -11358,14 +12553,46 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 		break;
 	}
 
-	// 공격당한 대상의 방어률을 얻는다. 
+	// 공격당한 대상의 방어률을 얻는다.
 	switch (cTargetType) {
 	case DEF_OWNERTYPE_PLAYER:
 		// 존재하지 않는 캐릭터는 공격할 수 없다. 
 		if (m_pClientList[sTargetH] == NULL) return 0;
 		// 죽은자에 대한 공격은 무의미하다.
 		if (m_pClientList[sTargetH]->m_bIsKilled == TRUE) return 0;
-		
+
+		// 2002-11-14 사냥꾼 모드 추가 (사냥꾼은 공격 당하지 않는다. 전면전시 제외)
+		if ((m_bIsCrusadeMode == FALSE) &&
+			(m_pClientList[sTargetH]->m_iPKCount == 0) && 
+			(m_pClientList[sTargetH]->m_bIsHunter == TRUE ) && 
+			(cAttackerType == DEF_OWNERTYPE_PLAYER) ) return 0;
+
+#ifdef DEF_ALLPLAYERPROTECT
+		// v2.19 마을에서 공격당하지 않는다. 범죄자와 NPC는 예외 현재 초보 미들은 마을과 같은 룰이 적용되며 다른편도 공격이 가능하지 않는다.
+		if(cAttackerType == DEF_OWNERTYPE_PLAYER)
+		{
+			if( m_pClientList[sTargetH]->m_iIsOnTown == DEF_NEVERNONPK )
+			{
+				if (m_pClientList[sTargetH]->m_iPKCount == 0)  return 0;
+			}
+			else
+			{
+				if ((m_bIsCrusadeMode == FALSE) &&			
+					(m_pClientList[sTargetH]->m_iPKCount == 0) &&
+					(m_pClientList[sTargetH]->m_cSide == m_pClientList[sAttackerH]->m_cSide ) &&
+					(m_pClientList[sTargetH]->m_iIsOnTown == DEF_NONPK)) return 0;
+			}
+		}
+#endif 
+
+#ifdef DEF_SAMESIDETOWNPROTECT
+		// v2.172 같은편끼리는 마을에서 공격당하지 않는다. 범죄자와 NPC는 예외 중립도 공격 않되게 
+		if ((m_pClientList[sTargetH]->m_iPKCount == 0) && (cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sTargetH]->m_cSide == cAttackerSide) && (m_pClientList[sTargetH]->m_iIsOnTown == DEF_NONPK)) return 0;
+#endif 		
+#ifdef DEF_BEGINNERTOWNPROTECT
+		if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sTargetH]->m_bIsNeutral == TRUE)
+			&& (m_pClientList[sTargetH]->m_iPKCount == 0) && (m_pClientList[sTargetH]->m_iIsOnTown == DEF_NONPK)) return 0;
+#endif
 		// 공격자의 좌표가 일치하지 않아도 무의미하다. 
 		if ((m_pClientList[sTargetH]->m_sX != tdX) || (m_pClientList[sTargetH]->m_sY != tdY)) return 0;
 		
@@ -11375,6 +12602,9 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 		// v1.41 공격자가 중립이면 대인 공격이 불가능하다. 
 		if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sAttackerH]->m_bIsNeutral == TRUE) && (m_pClientList[sTargetH]->m_iPKCount == 0)) return 0;
 		
+		// 01-12-17 같은 파티원이면 공격 불가 
+		if ((m_pClientList[sTargetH]->m_iPartyID != NULL) && (iPartyID == m_pClientList[sTargetH]->m_iPartyID)) return 0;
+
 		cTargetDir = m_pClientList[sTargetH]->m_cDir;
 		iTargetDefenseRatio = m_pClientList[sTargetH]->m_iDefenseRatio;
 		
@@ -11400,6 +12630,7 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 			}
 		}
 		
+		/*
 		// v1.3 공격자가 플레이어라면 
 		if (cAttackerType == DEF_OWNERTYPE_PLAYER) {
 			// 점령지역 명중률 보너스를 계산한다. 
@@ -11430,6 +12661,7 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 				}
 			}
 		}
+		*/
 
 		// v1.42 추가 방어값 
 		iTargetDefenseRatio += m_pClientList[sTargetH]->m_iAddDR;
@@ -11461,6 +12693,7 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 				break;
 			}
 			
+			/*
 			// 점령지역 명중률 보너스를 계산한다. 
 			if ((m_pClientList[sAttackerH]->m_cMapIndex == m_iMiddlelandMapIndex) && (m_pClientList[sAttackerH]->m_cSide > 0)) {
 				aX = m_pClientList[sAttackerH]->m_sX;
@@ -11488,6 +12721,7 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 					}
 				}
 			}
+			*/
 
 			// 만약 플레이어의 공격 무기가 곡괭이고 NPC가 건물 건설중이라면 iBuildCount를 줄인다.
 			if ((wWeaponType == 25) && (m_pNpcList[sTargetH]->m_cActionLimit == 5) && (m_pNpcList[sTargetH]->m_iBuildCount > 0)) {
@@ -11505,11 +12739,12 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 						m_pNpcList[sTargetH]->m_sAppr2 = 0;
 						SendEventToNearClient_TypeA(sTargetH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTNULLACTION, NULL, NULL, NULL);
 
+						// v2.19 2002-12-4 건설할때 오르는 건설 포인트는 낮춘다.
 						switch (m_pNpcList[sTargetH]->m_sType) {
-						case 36: iConstructionPoint = 700; iWarContribution = 1400; break;	// 애로우 가드 타워 
-						case 37: iConstructionPoint = 700; iWarContribution = 1400; break;	// 캐논 가드 타워
-						case 38: iConstructionPoint = 500; iWarContribution = 1000; break;	// 마나 콜렉터
-						case 39: iConstructionPoint = 500; iWarContribution = 1000; break;	// 디텍터
+						case 36: iConstructionPoint = 700; iWarContribution = 700; break;	// 애로우 가드 타워 
+						case 37: iConstructionPoint = 700; iWarContribution = 700; break;	// 캐논 가드 타워
+						case 38: iConstructionPoint = 500; iWarContribution = 500; break;	// 마나 콜렉터
+						case 39: iConstructionPoint = 500; iWarContribution = 500; break;	// 디텍터
 						}
 										
 						m_pClientList[sAttackerH]->m_iWarContribution   += iWarContribution;
@@ -11541,6 +12776,115 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 				}
 				return 0;
 			}
+
+			//v2.19 2002-12-16 농사 스킬 관련
+			// 만약 플레이어의 공격 무기가 호미(27)면 iBuildCount를 줄인다. 또한 npc가 Crops형태이어야 한다.
+			if ((wWeaponType == 27) && (m_pNpcList[sTargetH]->m_iNpcCrops != 0) && (m_pNpcList[sTargetH]->m_cActionLimit == 5) && (m_pNpcList[sTargetH]->m_iBuildCount > 0)) {
+				
+				iSkillLV = m_pClientList[sAttackerH]->m_cSkillMastery[2];
+				iCropLimit = m_pNpcList[sTargetH]->m_iCropsSkillLV;
+				
+				if(20 > iSkillLV) return 0;  //v2.19 2002-12-16 스킬레벨 20부터 가능..
+
+				if(m_pClientList[sAttackerH]->m_iLevel <  20 ) return 0 ; //v2.20 2002-12-20 농사 스킬 레벨 20부터 가능
+				
+				
+				switch (m_pNpcList[sTargetH]->m_sType) {
+				case 64:
+					switch (m_pNpcList[sTargetH]->m_iBuildCount) {
+					case 1: // 없어졌다.
+	
+						m_pNpcList[sTargetH]->m_sAppr2 = m_pNpcList[sTargetH]->m_iNpcCrops << 8 | 3;						
+//						m_pNpcList[sTargetH]->m_sAppr2 = (char)0;
+
+						if(iSkillLV <= iCropLimit + 10)
+							CalculateSSN_SkillIndex(sAttackerH, 2, 1);
+
+						SendEventToNearClient_TypeA(sTargetH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTNULLACTION, NULL, NULL, NULL);
+
+						//농작물을 떨어트린다.
+						if(bProbabilityTable(iSkillLV,iCropLimit,2) > 0)
+						{
+							bCropsItemDrop(sAttackerH,sTargetH,TRUE);
+						}
+						DeleteNpc(sTargetH);
+
+						break;
+					case 8: // 두번째 업그레이드
+						m_pNpcList[sTargetH]->m_sAppr2 = m_pNpcList[sTargetH]->m_iNpcCrops << 8 | 3;
+//						m_pNpcList[sTargetH]->m_sAppr2 = (char)3;
+
+						if(iSkillLV <= iCropLimit + 10)
+							CalculateSSN_SkillIndex(sAttackerH, 2, 1);
+
+						SendEventToNearClient_TypeA(sTargetH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTNULLACTION, NULL, NULL, NULL);
+
+						//농작물을 떨어트린다.
+						if(bProbabilityTable(iSkillLV,iCropLimit,2) > 0)
+						{
+							if(iSkillLV <= iCropLimit + 10)
+								CalculateSSN_SkillIndex(sAttackerH, 2, 1);
+							bCropsItemDrop(sAttackerH,sTargetH);
+						}
+						break;
+
+					case 18: // 첫번째 업그레이드 
+					    m_pNpcList[sTargetH]->m_sAppr2 = m_pNpcList[sTargetH]->m_iNpcCrops << 8 | 2;
+//						m_pNpcList[sTargetH]->m_sAppr2 = (char)2;
+
+						if(iSkillLV <= iCropLimit + 10)
+							CalculateSSN_SkillIndex(sAttackerH, 2, 1);
+						
+						SendEventToNearClient_TypeA(sTargetH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTNULLACTION, NULL, NULL, NULL);
+						
+						//농작물을 떨어트린다.
+						if(bProbabilityTable(iSkillLV,iCropLimit,2) > 0)
+						{
+							if(iSkillLV <= iCropLimit + 10)
+								CalculateSSN_SkillIndex(sAttackerH, 2, 1);
+							bCropsItemDrop(sAttackerH,sTargetH);
+						}
+						break;
+					}
+					break;
+				}
+				
+				if(m_pNpcList[sTargetH] == NULL)
+				{
+					return 0;
+				}
+
+				if(bProbabilityTable(iSkillLV,iCropLimit,1) > 0 
+					|| m_pNpcList[sTargetH]->m_iBuildCount == 1
+					|| m_pNpcList[sTargetH]->m_iBuildCount == 8
+					|| m_pNpcList[sTargetH]->m_iBuildCount == 18) {
+
+					iTemp = m_pClientList[sAttackerH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_RHAND];
+					
+					if ((iTemp != -1) || (m_pClientList[sAttackerH]->m_pItemList[iTemp] != NULL)) {
+						//호미 수명을 줄인다.
+						if (m_pClientList[sAttackerH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0)	
+							m_pClientList[sAttackerH]->m_pItemList[iTemp]->m_wCurLifeSpan--;
+						
+						if (m_pClientList[sAttackerH]->m_pItemList[iTemp]->m_wCurLifeSpan <= 0) {
+							// 수명이 다 되었으므로 장착을 해제한다.
+							// 아이템이 망가졌다는 메시지 <- 이걸 받으면 장착화면에서 해제시켜야 한다.
+							SendNotifyMsg(NULL, sAttackerH, DEF_NOTIFY_ITEMLIFESPANEND, m_pClientList[sAttackerH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
+							// 아이템을 장착 해제 시킨다.
+							ReleaseItemHandler(sAttackerH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+						}
+					}
+
+					//성장 카운트...
+					m_pNpcList[sTargetH]->m_iBuildCount--;
+				}
+
+				if (m_pNpcList[sTargetH]->m_iBuildCount <= 0) {
+					m_pNpcList[sTargetH]->m_iBuildCount = 0;
+				}
+
+				return 0;
+			}
 		}
 
 		//v1.43
@@ -11570,7 +12914,7 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 		}
 	}
 	
-	// 활 무기의 경우 날씨에 의한 명중률 변경. 5, 10, 25% 감소 
+	// 활 무기의 경우 날씨에 의한 명중률 변경. 5, 10, 25% 감소
 	if (wWeaponType >= 40) {
 		switch (m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cWhetherStatus) {
 		case 0:	break;
@@ -11594,7 +12938,7 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 	}
 
 	// 공격 성공 여부와는 상관없이 활을 쐈다면 화살을 감소시킨다. 
-	// 양손무기가 장착되어 있고 활이라면 
+	// 양손무기가 장착되어 있고 활이라면
 	if (cAttackerType == DEF_OWNERTYPE_PLAYER) {
 		// BUG POINT! Item == NULL
 		if (m_pClientList[sAttackerH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_TWOHAND] != -1) {
@@ -11640,7 +12984,7 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 				// 일반 무기를 사용한 공격이다. 마법 방패가 구현되어 있다면 방어값 증가시킨다. 
 				// 칼, 도끼, 맨손 
 				switch (cProtect) {
-				case 3: iTargetDefenseRatio += 30;  break; //  Magic Shield
+				case 3: iTargetDefenseRatio += 40;  break; //  Magic Shield
 				case 4: iTargetDefenseRatio += 100; break; //  Great Magic Shield
 				}
 				if (iTargetDefenseRatio < 0) iTargetDefenseRatio = 1;
@@ -11650,7 +12994,13 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 	else {
 		// NPC의 공격이다.
 		switch (cProtect) {
-		case 3: iTargetDefenseRatio += 30;  break; //  Magic Shield
+		case 1: 
+			switch (m_pNpcList[sAttackerH]->m_sType) {
+			case 54: // 다크 엘프는 장거리 공격시에 활방이 적용 된다.
+				if ((abs(sTgtX - m_pNpcList[sAttackerH]->m_sX) >= 1) || (abs(sTgtY - m_pNpcList[sAttackerH]->m_sY) >= 1)) return 0; 
+			}
+			break;
+		case 3: iTargetDefenseRatio += 40;  break; //  Magic Shield
 		case 4: iTargetDefenseRatio += 100; break; //  Great Magic Shield
 		}
 		if (iTargetDefenseRatio < 0) iTargetDefenseRatio = 1;
@@ -11760,16 +13110,31 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 				break;
 			}
 
-			// v1.44 사투장 내이면 공격력 1.5배 
+			// v1.44 사투장 내이면 공격력 1.33배 
 			if (m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_bIsFightZone == TRUE) {
-				iAP_SM += iAP_SM/2;
-				iAP_L  += iAP_L/2;
+				iAP_SM += iAP_SM/3;
+				iAP_L  += iAP_L/3;
 			}
 
 			// Crusade : 전면전 모드일때 군인 공격력 1.33배 
-			if ((cTargetType == DEF_OWNERTYPE_PLAYER) && (m_bIsCrusadeMode == TRUE) && (m_pClientList[sAttackerH]->m_iCrusadeDuty == 1)) {
-				iAP_SM += iAP_SM/3;
-				iAP_L  += iAP_L/3;
+			if ((cTargetType == DEF_OWNERTYPE_PLAYER) && (m_bIsCrusadeMode == TRUE) && (m_pClientList[sAttackerH]->m_iCrusadeDuty == 1)) 
+			{
+				// v2.15 저랩의 경우는 데미지가 증가한다. 2 배 
+				if (m_pClientList[sAttackerH]->m_iLevel <= 80) 
+				{
+					iAP_SM += iAP_SM ;
+					iAP_L += iAP_L ;
+				}
+				// v2.15 저랩의 경우는 데미지가 증가한다. 1.7 배 
+				else if (m_pClientList[sAttackerH]->m_iLevel <= 100)
+				{
+					iAP_SM += (iAP_SM* 7)/10 ;
+					iAP_L += (iAP_L* 7)/10 ;
+				} else 
+				{
+					iAP_SM += iAP_SM/3; ;
+					iAP_L += iAP_L/3 ;
+				}
 			}
 		}
 
@@ -11880,7 +13245,7 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 						if ((iTemp != -1) && (m_pClientList[sTargetH]->m_pItemList[iTemp] != NULL)) {
 							
 							// v1.432 중립인 경우 수명을 감소시키지 않는다.
-							if ((m_pClientList[sTargetH]->m_cSide != 0) && (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
+							if ((m_pClientList[sTargetH]->m_cSide != DEF_NETURAL) && (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
 								m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan--;
 							
 							if (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan == 0) {
@@ -11912,7 +13277,7 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 							m_pClientList[sTargetH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
 							SetIceFlag(sTargetH, DEF_OWNERTYPE_PLAYER, TRUE);
 							// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
-							bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (10*1000), 
+							bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (30*1000), 
 								                sTargetH, DEF_OWNERTYPE_PLAYER, NULL, NULL, NULL, 1, NULL, NULL);
 							
 							SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
@@ -11969,23 +13334,115 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 					iAP_SM = m_pClientList[sTargetH]->m_iHP - 1;
 				}
 
+				// v2.16 2002-5-23 고광현  아래 무기 수명 변경 부분 전부 
+				// 무기별 수명 닳는 정도 계산
+				// // v2.16 2002-5-27 성후니 변경 3 -> 30 도끼도 아머 수명 다는 기능 추가 
+				// 같은 편의 경우는 수명이 달지 않는다. 수명이 음수인 경우에 관한 루틴 추가 6-03
+				int iDownValue = 1 ;
+				if ((cAttackerType	== DEF_OWNERTYPE_PLAYER) && (m_pClientList[sTargetH] != NULL) && (m_pClientList[sAttackerH] != NULL) && (m_pClientList[sTargetH]->m_cSide != m_pClientList[sAttackerH]->m_cSide)){
+
+					switch (m_pClientList[sAttackerH]->m_sUsingWeaponSkill) {
+					case 14: 
+						// v2.17 2002-7-21 배틀해머를 사용해야 30씩 단다.
+						if(31 == ((m_pClientList[sAttackerH]->m_sAppr2  & 0x0FF0) >> 4))
+						{
+							//v2.20 2003-1-28 자이언트 배틀해머. 버그 수정.. 
+							iTemp2 = m_pClientList[sAttackerH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_TWOHAND];
+							if ((iTemp2 != -1) && (m_pClientList[sAttackerH]->m_pItemList[iTemp2] != NULL)) 
+							{
+								if(m_pClientList[sAttackerH]->m_pItemList[iTemp2]->m_sIDnum == 761)
+								{
+									iDownValue = 30; // 해머: 한방에 30씩 준다.
+								}
+								else if(m_pClientList[sAttackerH]->m_pItemList[iTemp2]->m_sIDnum == 762)
+								{
+									iDownValue = 35; // 해머: 한방에 35씩 준다.
+								}
+							}
+						}
+//							iDownValue = 30; // 해머: 한방에 30씩 준다.
+//						else if(32 == ((m_pClientList[sAttackerH]->m_sAppr2  & 0x0FF0) >> 4))  //v2.20 2002-12-18 자이언트 배틀해머. 
+//							iDownValue = 35; // 해머: 한방에 35씩 준다.
+						else
+							iDownValue = 20; // 해머: 한방에 20씩 준다.
+						break; 
+						
+
+					case 10: iDownValue = 3; break;  // 도끼: 한방에 3씩 준다.
+					default: iDownValue = 1; break;  // 기타 무기
+					}
+					
+				}
+
+				int iHammerChance = 100 ; // v2.172
 				// v1.3 피격당했으므로 장착하고 있는 몸통 방어구의 수명을 줄인다. 
 				switch (iHitPoint) {
 				case 1:
 					// 몸통 갑옷 
 					iTemp = m_pClientList[sTargetH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_BODY];
+					if( iTemp == -1) //v2.19 2002-12-11 산타복 수명 DEF_EQUIPPOS_FULLBODY경우에도 DEF_EQUIPPOS_BODY처럼 계산 한다.
+					{
+						iTemp = m_pClientList[sTargetH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_FULLBODY];
+					}
 					if ((iTemp != -1) && (m_pClientList[sTargetH]->m_pItemList[iTemp] != NULL)) {
 						
 						// v1.432 중립인 경우 수명 줄지 않는다.
-						if ((m_pClientList[sTargetH]->m_cSide != 0) && (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
-							m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan--;
+						if ((m_pClientList[sTargetH]->m_cSide != DEF_NETURAL) && (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
+							m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan -= iDownValue; // v2.16
 							
-						if (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan == 0) {
+						if (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan <= 0) {
 							// 수명이 다 되었으므로 장착을 해제한다.
 							// 아이템이 망가졌다는 메시지 <- 이걸 받으면 장착화면에서 해제시켜야 한다.
+							m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan = 0 ;
 							SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_ITEMLIFESPANEND, m_pClientList[sTargetH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
 							// 아이템을 장착 해제 시킨다.
 							ReleaseItemHandler(sTargetH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+						}
+						else if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sAttackerH] != NULL) && (m_pClientList[sAttackerH]->m_sUsingWeaponSkill == 14)) { // v2.172
+							// 해머에 의해 공격을 받았다면 확률에 의해 갑옷이 벗겨질 수 있다.
+
+							if ( m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wMaxLifeSpan <  2000 )
+								iHammerChance = iDice(6, (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wMaxLifeSpan - m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan));
+							else 
+								iHammerChance = iDice(4, (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wMaxLifeSpan - m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan));
+							
+							// v2.17 2002-7-21 배틀해머를 사용해야 잘 벗겨진다.
+							if(31 == ((m_pClientList[sAttackerH]->m_sAppr2  & 0x0FF0) >> 4))
+							{
+								iTemp2 = m_pClientList[sAttackerH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_TWOHAND];
+								if ((iTemp2 != -1) && (m_pClientList[sAttackerH]->m_pItemList[iTemp2] != NULL)) 
+								{
+									if(m_pClientList[sAttackerH]->m_pItemList[iTemp2]->m_sIDnum == 761)
+									{
+										iHammerChance = iHammerChance / 2 ;
+									}
+									else if(m_pClientList[sAttackerH]->m_pItemList[iTemp2]->m_sIDnum == 762)
+									{
+										iHammerChance = (5 * iHammerChance) / 8 ;  //v2.20 2002-12-18 자이언트 배틀해머.
+									}
+								}
+							}
+//								iHammerChance = iHammerChance / 2 ;
+//							else if(32 == ((m_pClientList[sAttackerH]->m_sAppr2  & 0x0FF0) >> 4))  
+//								iHammerChance = (5 * iHammerChance) / 8 ;  //v2.20 2002-12-18 자이언트 배틀해머.
+							else 
+								iHammerChance = iHammerChance / 4 ;
+							
+							// v2.19 2002-11-17 메리엔시리즈는 해머의 공격에 벗겨지지 않는다.
+							switch (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_sIDnum) {
+								case 621: // 메리엔-플레이트메일M
+								case 622: // 메리엔-플레이트메일W
+								iHammerChance = 0 ;
+								break;
+							}
+
+							if (iHammerChance >  m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan) {
+
+								ReleaseItemHandler(sTargetH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+
+								// 클라이언트에게 알려준다.
+								SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_ITEMRELEASED, m_pClientList[sTargetH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
+							}
 						}
 					}
 					break;
@@ -11996,15 +13453,64 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 					if ((iTemp != -1) && (m_pClientList[sTargetH]->m_pItemList[iTemp] != NULL)) {
 						
 						// v1.432 중립인 경우 수명이 줄지 않음
-						if ((m_pClientList[sTargetH]->m_cSide != 0) && (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
-							m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan--;
+						if ((m_pClientList[sTargetH]->m_cSide != DEF_NETURAL) && (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
+							m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan -= iDownValue; // v2.16
 							
-						if (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan == 0) {
+						if (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan <= 0) {
 							// 수명이 다 되었으므로 장착을 해제한다.
 							// 아이템이 망가졌다는 메시지 <- 이걸 받으면 장착화면에서 해제시켜야 한다.
+							m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan = 0 ;
 							SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_ITEMLIFESPANEND, m_pClientList[sTargetH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
 							// 아이템을 장착 해제 시킨다.
 							ReleaseItemHandler(sTargetH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+						}
+						else if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sAttackerH] != NULL) && (m_pClientList[sAttackerH]->m_sUsingWeaponSkill == 14)) { // v2.172
+							// 해머에 의해 공격을 받았다면 확률에 의해 갑옷이 벗겨질 수 있다.
+							if ( m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wMaxLifeSpan <  2000 )
+								iHammerChance = iDice(6, (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wMaxLifeSpan - m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan));
+							else 
+								iHammerChance = iDice(4, (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wMaxLifeSpan - m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan));
+							
+							
+							// v2.17 2002-7-21 배틀해머를 사용해야 잘 벗겨진다.
+							if(31 == ((m_pClientList[sAttackerH]->m_sAppr2  & 0x0FF0) >> 4))
+							{
+								iTemp2 = m_pClientList[sAttackerH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_TWOHAND];
+								if ((iTemp2 != -1) && (m_pClientList[sAttackerH]->m_pItemList[iTemp2] != NULL)) 
+								{
+									if(m_pClientList[sAttackerH]->m_pItemList[iTemp2]->m_sIDnum == 761)
+									{
+										iHammerChance = iHammerChance / 2 ;
+									}
+									else if(m_pClientList[sAttackerH]->m_pItemList[iTemp2]->m_sIDnum == 762)
+									{
+										iHammerChance = (5 * iHammerChance) / 8 ;  //v2.20 2002-12-18 자이언트 배틀해머.
+									}
+								}
+							}
+//								iHammerChance = iHammerChance / 2 ;
+//							else if(32 == ((m_pClientList[sAttackerH]->m_sAppr2  & 0x0FF0) >> 4))  
+//								iHammerChance = (5 * iHammerChance) / 8 ;  //v2.20 2002-12-18 자이언트 배틀해머.
+							else 
+								iHammerChance = iHammerChance / 4 ;
+
+							// v2.19 2002-11-17 메리엔시리즈는 해머의 공격에 벗겨지지 않는다.
+							switch (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_sIDnum) {
+								case 621: // 메리엔-플레이트메일M
+								case 622: // 메리엔-플레이트메일W
+								iHammerChance = 0 ;
+								break;
+							}
+
+							if (iHammerChance >  m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan) {
+
+
+								ReleaseItemHandler(sTargetH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+
+								// 클라이언트에게 알려준다.
+								SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_ITEMRELEASED, m_pClientList[sTargetH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
+							}
+
 						}
 					}
 
@@ -12012,15 +13518,62 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 					if ((iTemp != -1) && (m_pClientList[sTargetH]->m_pItemList[iTemp] != NULL)) {
 						
 						// v1.432 중립인 경우 수명이 줄지 않음
-						if ((m_pClientList[sTargetH]->m_cSide != 0) && (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
-							m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan--;
+						if ((m_pClientList[sTargetH]->m_cSide != DEF_NETURAL) && (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
+							m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan -= iDownValue; // v2.16
 							
-						if (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan == 0) {
+						if (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan <= 0) {
 							// 수명이 다 되었으므로 장착을 해제한다.
 							// 아이템이 망가졌다는 메시지 <- 이걸 받으면 장착화면에서 해제시켜야 한다.
+							m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan = 0 ;
 							SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_ITEMLIFESPANEND, m_pClientList[sTargetH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
 							// 아이템을 장착 해제 시킨다.
 							ReleaseItemHandler(sTargetH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+						}
+						else if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sAttackerH] != NULL) && (m_pClientList[sAttackerH]->m_sUsingWeaponSkill == 14)) { // v2.172
+							// 해머에 의해 공격을 받았다면 확률에 의해 갑옷이 벗겨질 수 있다.
+							if ( m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wMaxLifeSpan <  2000 )
+								iHammerChance = iDice(6, (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wMaxLifeSpan - m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan));
+							else 
+								iHammerChance = iDice(4, (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wMaxLifeSpan - m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan));
+							
+							// v2.17 2002-7-21 배틀해머를 사용해야 잘 벗겨진다.
+							if(31 == ((m_pClientList[sAttackerH]->m_sAppr2  & 0x0FF0) >> 4))
+							{
+								iTemp2 = m_pClientList[sAttackerH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_TWOHAND];
+								if ((iTemp2 != -1) && (m_pClientList[sAttackerH]->m_pItemList[iTemp2] != NULL)) 
+								{
+									if(m_pClientList[sAttackerH]->m_pItemList[iTemp2]->m_sIDnum == 761)
+									{
+										iHammerChance = iHammerChance / 2 ;
+									}
+									else if(m_pClientList[sAttackerH]->m_pItemList[iTemp2]->m_sIDnum == 762)
+									{
+										iHammerChance = (5 * iHammerChance) / 8 ;  //v2.20 2002-12-18 자이언트 배틀해머.
+									}
+								}
+							}
+//								iHammerChance = iHammerChance / 2 ;
+//							else if(32 == ((m_pClientList[sAttackerH]->m_sAppr2  & 0x0FF0) >> 4))  
+//								iHammerChance = (5 * iHammerChance) / 8 ;  //v2.20 2002-12-18 자이언트 배틀해머.
+							else 
+								iHammerChance = iHammerChance / 4 ;
+
+							// v2.19 2002-11-17 메리엔시리즈는 해머의 공격에 벗겨지지 않는다.
+							switch (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_sIDnum) {
+								case 621: // 메리엔-플레이트메일M
+								case 622: // 메리엔-플레이트메일W
+								iHammerChance = 0 ;
+								break;
+							}
+
+
+							if (iHammerChance >  m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan) {
+
+								ReleaseItemHandler(sTargetH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+								// 클라이언트에게 알려준다.
+								SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_ITEMRELEASED, m_pClientList[sTargetH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
+								
+							}
 						}
 					}
 					break;
@@ -12031,33 +13584,125 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 					if ((iTemp != -1) && (m_pClientList[sTargetH]->m_pItemList[iTemp] != NULL)) {
 							
 						// v1.432 중립인 경우 수명이 줄지 않음
-						if ((m_pClientList[sTargetH]->m_cSide != 0) && (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
-							m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan--;
+						if ((m_pClientList[sTargetH]->m_cSide != DEF_NETURAL) && (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
+							m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan -= iDownValue; // v2.16
 							
-						if (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan == 0) {
+						if (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan <= 0) {
 							// 수명이 다 되었으므로 장착을 해제한다.
 							// 아이템이 망가졌다는 메시지 <- 이걸 받으면 장착화면에서 해제시켜야 한다.
+							m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan = 0 ;
 							SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_ITEMLIFESPANEND, m_pClientList[sTargetH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
 							// 아이템을 장착 해제 시킨다.
 							ReleaseItemHandler(sTargetH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+						}
+						else if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sAttackerH] != NULL) && (m_pClientList[sAttackerH]->m_sUsingWeaponSkill == 14)) { // v2.172
+							// 해머에 의해 공격을 받았다면 확률에 의해 갑옷이 벗겨질 수 있다.
+							if ( m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wMaxLifeSpan <  2000 )
+								iHammerChance = iDice(6, (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wMaxLifeSpan - m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan));
+							else 
+								iHammerChance = iDice(4, (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wMaxLifeSpan - m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan));
+							
+							// v2.17 2002-7-21 배틀해머를 사용해야 잘 벗겨진다.
+							if(31 == ((m_pClientList[sAttackerH]->m_sAppr2  & 0x0FF0) >> 4))
+							{
+								iTemp2 = m_pClientList[sAttackerH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_TWOHAND];
+								if ((iTemp2 != -1) && (m_pClientList[sAttackerH]->m_pItemList[iTemp2] != NULL)) 
+								{
+									if(m_pClientList[sAttackerH]->m_pItemList[iTemp2]->m_sIDnum == 761)
+									{
+										iHammerChance = iHammerChance / 2 ;
+									}
+									else if(m_pClientList[sAttackerH]->m_pItemList[iTemp2]->m_sIDnum == 762)
+									{
+										iHammerChance = (5 * iHammerChance) / 8 ;  //v2.20 2002-12-18 자이언트 배틀해머.
+									}
+								}
+							}
+//								iHammerChance = iHammerChance / 2 ;
+//							else if(32 == ((m_pClientList[sAttackerH]->m_sAppr2  & 0x0FF0) >> 4))  
+//								iHammerChance = (5 * iHammerChance) / 8 ;  //v2.20 2002-12-18 자이언트 배틀해머.
+							else 
+								iHammerChance = iHammerChance / 4 ;
+
+							// v2.19 2002-11-17 메리엔시리즈는 해머의 공격에 벗겨지지 않는다.
+							switch (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_sIDnum) {
+								case 621: // 메리엔-플레이트메일M
+								case 622: // 메리엔-플레이트메일W
+								iHammerChance = 0 ;
+								break;
+							}
+
+							if (iHammerChance >  m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan) {
+
+
+								ReleaseItemHandler(sTargetH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+								// 클라이언트에게 알려준다.
+								SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_ITEMRELEASED, m_pClientList[sTargetH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
+							}
 						}
 					}
 					break;
 
 				case 4:
+					// 머리 갑옷
 					iTemp = m_pClientList[sTargetH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_HEAD];
 					if ((iTemp != -1) && (m_pClientList[sTargetH]->m_pItemList[iTemp] != NULL)) {
 							
 						// v1.432 중립인 경우 수명이 줄지 않음
-						if ((m_pClientList[sTargetH]->m_cSide != 0) && (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
-							m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan--;
+						if ((m_pClientList[sTargetH]->m_cSide != DEF_NETURAL) && (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
+							m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan -= iDownValue; // v2.16
 							
-						if (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan == 0) {
+						if (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan <= 0) {
 							// 수명이 다 되었으므로 장착을 해제한다.
 							// 아이템이 망가졌다는 메시지 <- 이걸 받으면 장착화면에서 해제시켜야 한다.
+							m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan = 0 ;
 							SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_ITEMLIFESPANEND, m_pClientList[sTargetH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
 							// 아이템을 장착 해제 시킨다.
 							ReleaseItemHandler(sTargetH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+						}
+						else if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sAttackerH] != NULL) && (m_pClientList[sAttackerH]->m_sUsingWeaponSkill == 14)) { // v2.172
+							// 해머에 의해 공격을 받았다면 확률에 의해 갑옷이 벗겨질 수 있다.
+							if ( m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wMaxLifeSpan <  3000 )
+								iHammerChance = iDice(6, (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wMaxLifeSpan - m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan));
+							else 
+								iHammerChance = iDice(4, (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wMaxLifeSpan - m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan));
+							
+							// v2.17 2002-7-21 배틀해머를 사용해야 잘 벗겨진다.
+							if(31 == ((m_pClientList[sAttackerH]->m_sAppr2  & 0x0FF0) >> 4))
+							{
+								iTemp2 = m_pClientList[sAttackerH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_TWOHAND];
+								if ((iTemp2 != -1) && (m_pClientList[sAttackerH]->m_pItemList[iTemp2] != NULL)) 
+								{
+									if(m_pClientList[sAttackerH]->m_pItemList[iTemp2]->m_sIDnum == 761)
+									{
+										iHammerChance = iHammerChance / 2 ;
+									}
+									else if(m_pClientList[sAttackerH]->m_pItemList[iTemp2]->m_sIDnum == 762)
+									{
+										iHammerChance = (5 * iHammerChance) / 8 ;  //v2.20 2002-12-18 자이언트 배틀해머.
+									}
+								}
+							}
+//								iHammerChance = iHammerChance / 2 ;
+//							else if(32 == ((m_pClientList[sAttackerH]->m_sAppr2  & 0x0FF0) >> 4))  
+//								iHammerChance = (5 * iHammerChance) / 8 ;  //v2.20 2002-12-18 자이언트 배틀해머.
+							else 
+								iHammerChance = iHammerChance / 4 ;
+
+							// v2.19 2002-11-17 메리엔시리즈는 해머의 공격에 벗겨지지 않는다.
+							switch (m_pClientList[sTargetH]->m_pItemList[iTemp]->m_sIDnum) {
+								case 621: // 메리엔-플레이트메일M
+								case 622: // 메리엔-플레이트메일W
+								iHammerChance = 0 ;
+								break;
+							}
+
+							if (iHammerChance >  m_pClientList[sTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan) {
+
+								ReleaseItemHandler(sTargetH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+								// 클라이언트에게 알려준다.
+								SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_ITEMRELEASED, m_pClientList[sTargetH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
+							}
 						}
 					}
 					break;
@@ -12085,6 +13730,9 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 						m_pClientList[sTargetH]->m_dwPoisonTime = dwTime;
 						// 중독되었음을 알린다. 
 						SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_POISON, m_pClientList[sTargetH]->m_iPoisonLevel, NULL, NULL);
+#ifdef DEF_TAIWANLOG
+						_bItemLog(DEF_ITEMLOG_POISONED,sTargetH,(char *) NULL,NULL) ;
+#endif
 					}
 				}
 
@@ -12103,6 +13751,29 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 				}
 				else {
 					if (iAP_SM > 0) {
+						// v2.04 타격을 받았는데 마나 변환 특성치가 있었다면 
+						if (m_pClientList[sTargetH]->m_iAddTransMana > 0) {
+							dTmp1 = (double)m_pClientList[sTargetH]->m_iAddTransMana;
+							dTmp2 = (double)iAP_SM;
+							dTmp3 = (dTmp1/100.0f)*dTmp2;
+
+							// 최대 마나치 
+							iTemp = (2*m_pClientList[sTargetH]->m_iMag) + (2*m_pClientList[sTargetH]->m_iLevel) + (m_pClientList[sTargetH]->m_iInt/2);
+							m_pClientList[sTargetH]->m_iMP += (int)dTmp3;
+							if (m_pClientList[sTargetH]->m_iMP > iTemp) m_pClientList[sTargetH]->m_iMP = iTemp;
+						}
+
+						// v2.04 타격을 받았는데 필살 충전의 특성치가 있었다면 
+						if (m_pClientList[sTargetH]->m_iAddChargeCritical > 0) {
+							// 확률 계산에 따라서 필살기가 충전된다.
+							if (iDice(1,100) < (m_pClientList[sTargetH]->m_iAddChargeCritical)) {
+								iMaxSuperAttack = (m_pClientList[sTargetH]->m_iLevel / 10);
+								if (m_pClientList[sTargetH]->m_iSuperAttackLeft < iMaxSuperAttack) m_pClientList[sTargetH]->m_iSuperAttackLeft++;
+								// v1.12 서버와 클라이언트 간에 카운트가 일치하지 않는 경우가 있을 수 있으므로 가감에 상관없이 보낸다.
+								SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_SUPERATTACKLEFT, NULL, NULL, NULL, NULL);
+							}
+						}
+
 						// 받은 대미지를 통보한다. <- HP를 그대로 알린다.
 						SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_HP, NULL, NULL, NULL, NULL);
 												
@@ -12144,11 +13815,15 @@ int CGame::iCalculateAttackEffect(short sTargetH, char cTargetType, short sAttac
 CAE_SKIPDAMAGEMOVE:;
 							int iProb;
 							// 충격을 받았다면 충격동작 전송: 단 무기별로 충격 동작 회피가 된다.
+							// v2.16 2002-5-27 성후니 추가 해머 공격 
 							if (cAttackerType == DEF_OWNERTYPE_PLAYER) {
 								switch (m_pClientList[sAttackerH]->m_sUsingWeaponSkill) {
 								case 6 : iProb = 3500; break;		// 활쏘기
-								case 8 : iProb = 2500; break;		// 긴칼 공격 
-								case 10: iProb = 1200; break;		// 도끼 공격
+								case 8 : iProb = 1000; break;		// 긴칼 공격 
+								case 9 : iProb = 2900; break;       // 펜싱 공격
+								case 10: iProb = 2500; break;		// 도끼 공격
+								case 14: iProb = 2000; break;		// 해머 공격
+								case 21: iProb = 2000; break;		// 지팡이 공격
 								default: iProb = 1; break;			// 기타 공격
 								}
 							}
@@ -12200,7 +13875,10 @@ CAE_SKIPDAMAGEMOVE:;
 					case 44:
 					case 45:
 					case 46:
-					case 47: return 0;
+					case 47: 
+					case 51:
+						return 0;
+
 					default: break;
 					}
 				}
@@ -12215,6 +13893,9 @@ CAE_SKIPDAMAGEMOVE:;
 								m_pNpcList[sTargetH]->m_iV1 = 0;
 								m_pNpcList[sTargetH]->m_iManaStock--;
 								if (m_pNpcList[sTargetH]->m_iManaStock <= 0) m_pNpcList[sTargetH]->m_iManaStock = 0;
+								//testcode
+								wsprintf(G_cTxt, "ManaStock down: %d", m_pNpcList[sTargetH]->m_iManaStock);
+								PutLogList(G_cTxt);
 							}
 						}
 						break;
@@ -12225,6 +13906,7 @@ CAE_SKIPDAMAGEMOVE:;
 			switch (m_pNpcList[sTargetH]->m_cActionLimit) {
 			case 1:
 			case 2:
+			case 6: //v2.20 2002-12-20 마을 NPC 공격 않되게 
 				return 0;
 			}
 
@@ -12242,6 +13924,13 @@ CAE_SKIPDAMAGEMOVE:;
 				dTmp2 = dTmp1 - dTmp3;
 				iDamage = (int)dTmp2;
 				if (iDamage < 0) iDamage = 1;
+			}
+
+			if((31 == m_pNpcList[sTargetH]->m_sType) &&  //v2.19 2002-12-18졸라 이상하닷 수정 필요
+			(cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sAttackerH] != NULL)
+			&& (m_pClientList[sAttackerH]->m_iSpecialAbilityType == 7) ) // 데몬 슬레이어 
+			{
+				iDamage = iDamage + iDice(3,2);
 			}
 
 			// v1.411 목표물이 마법 보호중이었고 공격자가 마법 방어를 무효화 시키는 공격 능력이 있다면 
@@ -12275,13 +13964,18 @@ CAE_SKIPDAMAGEMOVE:;
 				// PermAttackMode가 설정되어 있다면 공격 받아도 목표를 바꾸지 않는다.
 				
 				// 편이 같으면 반격하지 않는다.
-				if (m_pNpcList[sTargetH]->m_cSide == cAttackerSide) goto CAE_SKIPCOUNTERATTACK;
+				// v2.15 경비는 같은 편도 반격한다.
+				if ((m_pNpcList[sTargetH]->m_sType != 21) && (m_pNpcList[sTargetH]->m_sType != 55) && (m_pNpcList[sTargetH]->m_sType != 56)
+					&& (m_pNpcList[sTargetH]->m_cSide == cAttackerSide)) goto CAE_SKIPCOUNTERATTACK;
+
 
 				if (m_pNpcList[sTargetH]->m_cActionLimit != 0) goto CAE_SKIPCOUNTERATTACK;
 				if (m_pNpcList[sTargetH]->m_bIsPermAttackMode == TRUE) goto CAE_SKIPCOUNTERATTACK;
 				// 소환몹이고 제어 모드가 Hold라면 맞아도 반격하지 않는다.
 				if ((m_pNpcList[sTargetH]->m_bIsSummoned == TRUE) && 
 					(m_pNpcList[sTargetH]->m_iSummonControlMode == 1)) goto CAE_SKIPCOUNTERATTACK;
+				// v2.05 발석차는 반격하지 않는다.
+				if (m_pNpcList[sTargetH]->m_sType == 51) goto CAE_SKIPCOUNTERATTACK;
 				
 				// 반격할 것인지의 여부를 결정한다. 
 				if (iDice(1,3) == 2) {
@@ -12437,7 +14131,8 @@ CAE_SKIPCOUNTERATTACK:;
 							// Crusade
 							if ((m_bIsCrusadeMode == TRUE) && (iExp > 10)) iExp = 10;
 
-							m_pClientList[sAttackerH]->m_iExpStock += iExp;
+							//m_pClientList[sAttackerH]->m_iExpStock += iExp;
+							GetExp(sAttackerH, iExp);
 
 							// NPC 오브젝트 삭제
 							DeleteNpc(sTargetH);
@@ -12490,6 +14185,18 @@ CAE_SKIPDAMAGEMOVE2:;
 					}
 
 					if (m_bIsCrusadeMode == TRUE) iExp = iExp/3;
+
+					// v2.17 2002-8-6 공격자의 레벨이 100 이상이면 토끼나 고양이를 잡을때 경험치가 올라가지 않는다.
+					if (m_pClientList[sAttackerH]->m_iLevel > 100 ) {
+						switch (m_pNpcList[sTargetH]->m_sType) {
+						case 55:
+						case 56:
+							iExp = 0 ;
+						break ;
+						default: break;
+						}
+					}
+
 				}
 			}
 			break;
@@ -12742,7 +14449,7 @@ ATTACK_SUCCESS:;
 void CGame::NpcKilledHandler(short sAttackerH, char cAttackerType, int iNpcH, short sDamage)
 {
  short  sAttackerWeapon;
- int    * ip, i, iQuestIndex, iExp, iConstructionPoint, iGuildGUID, iWarContribution;
+ int    * ip, i, iQuestIndex, iExp, iConstructionPoint, iWarContribution;
  double dTmp1, dTmp2, dTmp3;
  char   * cp, cData[120];
 
@@ -12770,6 +14477,7 @@ void CGame::NpcKilledHandler(short sAttackerH, char cAttackerType, int iNpcH, sh
 		sAttackerWeapon = ((m_pClientList[sAttackerH]->m_sAppr2 & 0x0FF0) >> 4);	
 	}
 	else sAttackerWeapon = 1;
+
 	SendEventToNearClient_TypeA(iNpcH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTDYING, sDamage, sAttackerWeapon, NULL);
 	// 정상 위치에서 지운다.
 	m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->ClearOwner(10, iNpcH, DEF_OWNERTYPE_NPC, m_pNpcList[iNpcH]->m_sX, m_pNpcList[iNpcH]->m_sY);
@@ -12789,6 +14497,9 @@ void CGame::NpcKilledHandler(short sAttackerH, char cAttackerType, int iNpcH, sh
 	// v1.42 아이템 드롭을 관장한다.
 	NpcDeadItemGenerator(iNpcH, sAttackerH, cAttackerType);
 
+
+
+
 	// 새로운 경험치 배분 공식.
 	// NPC에 대한 공격이 성공했으므로 공격자가 플레이어라면 입힌 대미지 만큼의 경험치를 공격자에게 준다. 
 	if ( (m_pNpcList[iNpcH]->m_bIsSummoned != TRUE) && (cAttackerType == DEF_OWNERTYPE_PLAYER) && 
@@ -12807,12 +14518,28 @@ void CGame::NpcKilledHandler(short sAttackerH, char cAttackerType, int iNpcH, sh
 			iExp += (int)dTmp3;
 		}
 
-		// 크루세이드 모드일때 몬스터를 죽여서 얻을 수 있는 경험치는 1/3
+		// 크루세이드 모드일때 몬스터를 죽여서 얻을 수 있는 경험치는 1/4
+		// v2.17 2002-7-21 초보존과 농경지에서는 경험치를 그대로 얻을 수 있다. 
 		if (m_bIsCrusadeMode == TRUE) {
-			if (iExp > 10) iExp = iExp/3;
+			if (  (strcmp(m_pClientList[sAttackerH]->m_cMapName, "default") != 0)  
+				|| (strcmp(m_pClientList[sAttackerH]->m_cMapName, "arefarm") != 0)
+				|| (strcmp(m_pClientList[sAttackerH]->m_cMapName, "elvfarm") != 0) )
+				if (iExp > 10) iExp = iExp/4;
 		}
 
-		m_pClientList[sAttackerH]->m_iExpStock += iExp;
+		//m_pClientList[sAttackerH]->m_iExpStock += iExp;
+		// v2.17 2002-8-6 공격자의 레벨이 100 이상이면 토끼나 고양이를 잡을때 경험치가 올라가지 않는다.
+		if (m_pClientList[sAttackerH]->m_iLevel > 100 ) {
+			switch (m_pNpcList[iNpcH]->m_sType) {
+			case 55:
+			case 56:
+				iExp = 0 ;
+			break ;
+			default: break;
+			}
+		}
+
+		GetExp(sAttackerH, iExp);
 
 		// Quest 여부를 판단한다.
 		iQuestIndex = m_pClientList[sAttackerH]->m_iQuest;
@@ -12843,6 +14570,7 @@ void CGame::NpcKilledHandler(short sAttackerH, char cAttackerType, int iNpcH, sh
 			break;
 
 		case 33:
+
 			break;
 		}
 	}
@@ -12868,6 +14596,11 @@ void CGame::NpcKilledHandler(short sAttackerH, char cAttackerType, int iNpcH, sh
 	case 45: iConstructionPoint = 1500; iWarContribution = 3000; break;	// 고즈 핸드 기병
 	case 46: iConstructionPoint = 1000; iWarContribution = 2000; break;	// 템플 나이트
 	case 47: iConstructionPoint = 1500; iWarContribution = 3000; break;	// 배틀 골렘
+	case 51: iConstructionPoint = 800; iWarContribution = 1500; break;	// 캐터팔트
+
+	case 64:	//v2.19 2002-12-16 농사 스킬 관련
+		m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->bRemoveCropsTotalSum();
+		break;
 	}
 	
 	// Crusade
@@ -12893,6 +14626,7 @@ void CGame::NpcKilledHandler(short sAttackerH, char cAttackerType, int iNpcH, sh
 			}
 			else {
 				// 같은편 NPC를 죽이면 전쟁 공헌도가 2배로 떨어진다.
+				/*
 				m_pClientList[sAttackerH]->m_iWarContribution   -= (iWarContribution*2);
 				if (m_pClientList[sAttackerH]->m_iWarContribution < 0)
 					m_pClientList[sAttackerH]->m_iWarContribution = 0;
@@ -12900,6 +14634,13 @@ void CGame::NpcKilledHandler(short sAttackerH, char cAttackerType, int iNpcH, sh
 				//testcode
 				wsprintf(G_cTxt, "Friendly Npc Killed by player! WarContribution: -%d", iWarContribution);
 				PutLogList(G_cTxt);
+				*/
+
+				// 2002-09-05 #2 전쟁 공헌도 로그 남기기 (같은편 NPC를 죽일때)
+				m_pClientList[sAttackerH]->m_iWarContribution = 0;
+
+				wsprintf(G_cTxt, "WarContribution: Friendly Npc Killed by player(%s)! ", m_pClientList[sAttackerH]->m_cAccountName);
+				PutLogEventFileList(G_cTxt);
 
 				SendNotifyMsg(NULL, sAttackerH, DEF_NOTIFY_CONSTRUCTIONPOINT, m_pClientList[sAttackerH]->m_iConstructionPoint, m_pClientList[sAttackerH]->m_iWarContribution, NULL, NULL);
 			}
@@ -13144,6 +14885,10 @@ void CGame::MsgProcess()
 			wpMsgType  = (WORD *)(pData + DEF_INDEX2_MSGTYPE);
 
 			switch (*dwpMsgID) {
+			case MSGID_PARTYOPERATION:
+				PartyOperationResultHandler(pData);
+				break;
+			
 			case MSGID_SERVERSTOCKMSG:
 				ServerStockMsgHandler(pData);
 				break;
@@ -13213,20 +14958,7 @@ void CGame::MsgProcess()
 					break;
 				}
 				
-				//wsprintf(G_cTxt, "%d %d %d %d %d %d %d", (int)m_bIsGameStarted, (int)m_bIsItemAvailable, m_bIsNpcAvailable, (int)m_bIsGateSockAvailable, (int)m_bIsLogSockAvailable, (int)m_bIsMagicAvailable, (int)m_bIsSkillAvailable);
-				//PutLogList(G_cTxt);
-
-				/*
-				if ((m_bIsGameStarted == FALSE) && (m_bIsItemAvailable == TRUE) && 
-					(m_bIsNpcAvailable == TRUE) && (m_bIsGateSockAvailable == TRUE) &&
-					(m_bIsLogSockAvailable == TRUE) && (m_bIsMagicAvailable == TRUE) &&
-					(m_bIsSkillAvailable == TRUE) && (m_bIsPortionAvailable == TRUE) &&
-					(m_bIsQuestAvailable == TRUE) ) {
-					// 게임을 시작할 준비가 되었다. 메시지를 보낸다.
-					SendMessage(m_hWnd, WM_USER_STARTGAMESIGNAL, NULL, NULL); 
-					m_bIsGameStarted = TRUE;
-				}
-				*/
+			
 				break;
 			}
 			break;
@@ -13257,6 +14989,16 @@ void CGame::MsgProcess()
 			
 			case MSGID_BWM_INIT:
 				_BWM_Init(iClientH, pData);
+				break;
+
+			// v2.15 2002-5-6
+			case MSGID_MANAGER_INIT:
+				_Manager_Init(iClientH, pData);
+				break;
+
+			// v2.15 2002-5-6
+			case MSGID_MANAGER_SHUTDOWN:
+				_Manager_Shutdown(iClientH, pData);
 				break;
 			
 			case MSGID_REQUEST_SETITEMPOS:
@@ -13327,6 +15069,17 @@ void CGame::MsgProcess()
 				// 레벨업 셋팅이다.
 				LevelUpSettingsHandler(iClientH, pData, dwMsgSize);
 				break;
+
+			// 2002-12-6  Teleport 기능 추가
+			case MSGID_REQUEST_TELEPORT_LIST:
+				RequestTeleportListHandler(iClientH, pData, dwMsgSize);
+				break;
+
+			// 2002-12-6  Teleport 기능 추가
+			case MSGID_REQUEST_CHARGED_TELEPORT:
+				RequestChargedTeleportHandler(iClientH, pData, dwMsgSize);
+				break;
+
 			default:
 				PutLogList("Unknown message received! Delete Client");
 				DeleteClient(iClientH, TRUE, TRUE); // v1.4
@@ -13421,23 +15174,20 @@ void CGame::MsgProcess()
 				if (m_bIsPortionAvailable == FALSE) {
 					// 만약 Portion 정의 화일에서 에러가 있었다면 게임서버 등록에 상관없이 동작 불가능.
 					PutLogList(" ");
-					PutLogList("(!!!) STOPPED! PORTION configuration error.");
+					PutLogList("(!!!) STOPPED! POTION configuration error.");
 				}
 
-				//wsprintf(G_cTxt, "%d %d %d %d %d %d %d", (int)m_bIsGameStarted, (int)m_bIsItemAvailable, m_bIsNpcAvailable, (int)m_bIsGateSockAvailable, (int)m_bIsLogSockAvailable, (int)m_bIsMagicAvailable, (int)m_bIsSkillAvailable);
-				//PutLogList(G_cTxt);
-
-				/*
-				if ((m_bIsGameStarted == FALSE) && (m_bIsItemAvailable == TRUE) && 
-					(m_bIsNpcAvailable == TRUE) && (m_bIsGateSockAvailable == TRUE) &&
-					(m_bIsLogSockAvailable == TRUE) && (m_bIsMagicAvailable == TRUE) &&
-					(m_bIsSkillAvailable == TRUE) && (m_bIsPortionAvailable == TRUE) &&
-					(m_bIsQuestAvailable == TRUE) ) {
-					// 게임을 시작할 준비가 되었다. 메시지를 보낸다.
-					SendMessage(m_hWnd, WM_USER_STARTGAMESIGNAL, NULL, NULL); 
-					m_bIsGameStarted = TRUE;
+#ifdef DEF_DEFENCEHACKING
+				// 2002-12-8 World server 보안 설정을 위해 
+				if (m_bIsWLServerAvailable == FALSE) {
+					// 만약 WLSERVER 화일에서 에러가 있었다면 게임서버 등록에 상관없이 동작 불가능.
+					PutLogList(" ");
+					PutLogList("(!!!) STOPPED! WLSERVER configuration error.");
 				}
-				*/
+
+#endif 
+
+		
 				break;
 
 			case MSGID_RESPONSE_PLAYERDATA:
@@ -13479,21 +15229,18 @@ void CGame::MsgProcess()
 				break;
 
 			case MSGID_PORTIONCONFIGURATIONCONTENTS:
-				PutLogList("(!) PORTION configuration contents received. Now decoding...");
+				PutLogList("(!) POTION configuration contents received. Now decoding...");
 				m_bIsPortionAvailable = _bDecodePortionConfigFileContents((char *)(pData + DEF_INDEX2_MSGTYPE + 2), dwMsgSize);
 				break;
 
-			// Crusade
-			//case MSGID_ARESDENOCCUPYFLAGSAVEFILECONTENTS:
-				//PutLogList("(!) Aresden OccupyFlag save file contents received. Now decoding...");
-				//_bDecodeOccupyFlagSaveFileContents((char *)(pData + DEF_INDEX2_MSGTYPE + 2), dwMsgSize, 1);
-				//break;
+#ifdef DEF_DEFENCEHACKING
+			// 2002-12-8 World server 보안 설정을 위해 
+			case MSGID_WLSERVERFILECONTENTS:
+				PutLogList("(!) WLSERVER configuration contents received. Now decoding...");
+				m_bIsWLServerAvailable = _bDecodeWLServerConfigFileContents((char *)(pData + DEF_INDEX2_MSGTYPE + 2), dwMsgSize);
+				break;
 
-			// Crusade
-			//case MSGID_ELVINEOCCUPYFLAGSAVEFILECONTENTS:
-				//PutLogList("(!) Elvine OccupyFlag save file contents received. Now decoding...");
-				//_bDecodeOccupyFlagSaveFileContents((char *)(pData + DEF_INDEX2_MSGTYPE + 2), dwMsgSize, 2);
-				//break;
+#endif 
 
 			case MSGID_DUPITEMIDFILECONTENTS:
 				PutLogList("(!) DupItemID file contents received. Now decoding...");
@@ -13504,11 +15251,24 @@ void CGame::MsgProcess()
 				PutLogList("(!) Noticement file contents received. Now decoding...");
 				_bDecodeNoticementFileContents((char *)(pData + DEF_INDEX2_MSGTYPE + 2), dwMsgSize);
 				break;
+			// v2.15  2002-5-21
+			case MSGID_WORLDCONFIGCONTENTS:
+				PutLogList("(!) WorldConfig file contents received. Now decoding...");
+				_bDecodeWorldConfigFileContents((char *)(pData + DEF_INDEX2_MSGTYPE + 2), dwMsgSize);
+				break;
+			// v2.17 2002-8-7 // 2002-09-06 #1
+			case MSGID_NPCITEMCONFIGCONTENTS:
+				PutLogList("(!) NpcItemConfig file contents received. Now decoding...");
+				_bDecodeNpcItemConfigFileContents((char *)(pData + DEF_INDEX2_MSGTYPE + 2), dwMsgSize);
+				break;
+			// 2002-12-6  Teleport 기능 추가
+			case MSGID_TELEPORTLISTCONTENTS:
+				PutLogList("(!) TeleportListConfig file contents received. Now decoding...");
+				_bDecodeTeleportListConfigFileContents((char *)(pData + DEF_INDEX2_MSGTYPE + 2), dwMsgSize);
 			}
 			break;
 		}
 	}
-
 }
 
 
@@ -13617,6 +15377,25 @@ void CGame::ClientCommonHandler(int iClientH, char * pData)
 	
 	
 	switch (wCommand) {
+	// 2002-11-14 사냥꾼 모드 추가
+	case DEF_COMMONTYPE_REQUEST_HUNTMODE:
+		RequestHuntmode(iClientH);
+		break;
+
+	// v2.171 2002-6-14
+	case DEF_COMMONTYPE_REQGUILDNAME:
+		RequestGuildNameHandler(iClientH, iV1, iV2);
+		break;
+
+	case DEF_COMMONTYPE_UPGRADEITEM:
+		RequestItemUpgradeHandler(iClientH, iV1);
+		break;
+	
+	case DEF_COMMONTYPE_REQUEST_ACCEPTJOINPARTY:
+		// iV1의 값이 가입 신청 허가 여부이다.
+		RequestAcceptJoinPartyHandler(iClientH, iV1);
+		break;
+
 	case DEF_COMMONTYPE_SETGUILDTELEPORTLOC:
 		RequestSetGuildTeleportLocHandler(iClientH, iV1, iV2, m_pClientList[iClientH]->m_iGuildGUID, pString);
 		break;
@@ -13654,12 +15433,12 @@ void CGame::ClientCommonHandler(int iClientH, char * pData)
 		break;
 	
 	case DEF_COMMONTYPE_REQUEST_JOINPARTY:
-		JoinPartyHandler(iClientH, pString);
+		JoinPartyHandler(iClientH, iV1, pString);
 		break;
 	
-	case DEF_COMMONTYPE_REQUEST_CREATENEWPARTY:
-		CreateNewPartyHandler(iClientH);
-		break;
+	//case DEF_COMMONTYPE_REQUEST_CREATENEWPARTY:
+	//	CreateNewPartyHandler(iClientH);
+	//	break;
 	
 	case DEF_COMMONTYPE_GETMAGICABILITY:
 		GetMagicAbilityHandler(iClientH);
@@ -13701,7 +15480,7 @@ void CGame::ClientCommonHandler(int iClientH, char * pData)
 		NpcTalkHandler(iClientH, iV1);
 		break;
 	
-	case DEF_COMMONTYPE_REQ_CREATEPORTION:
+	case DEF_COMMONTYPE_REQ_CREATEPOTION:
 		ReqCreatePortionHandler(iClientH, pData);
 		break;
 	
@@ -13738,7 +15517,8 @@ void CGame::ClientCommonHandler(int iClientH, char * pData)
 		break;
 
 	case DEF_COMMONTYPE_ITEMDROP:
-		DropItemHandler(iClientH, iV1, iV2, pString);
+		// v2.17 2002-7-31 케릭터 사망시 떨어트린 모든 아이템을 로그에 남기기 위해 
+		DropItemHandler(iClientH, iV1, iV2, pString, TRUE);
 		break;
 	
 	case DEF_COMMONTYPE_EQUIPITEM:
@@ -13793,6 +15573,7 @@ void CGame::ClientCommonHandler(int iClientH, char * pData)
 		break;
 
 	case DEF_COMMONTYPE_TOGGLECOMBATMODE:
+		// v2.17 2002-7-24  탭키를 이용한 속도 못하게 수정
 		ToggleCombatModeHandler(iClientH);
 		break;
 
@@ -13812,13 +15593,15 @@ void CGame::ClientCommonHandler(int iClientH, char * pData)
 	}
 }
 
-void CGame::DropItemHandler(int iClientH, short sItemIndex, int iAmount, char * pItemName)
+// v2.17 2002-7-31 케릭터 사망시 떨어트린 모든 아이템을 로그에 남기기 위해 
+void CGame::DropItemHandler(int iClientH, short sItemIndex, int iAmount, char * pItemName, BOOL bByPlayer)
 {
  class CItem * pItem;
 	
 	// 
 	// Amount가 -1이면 소모품일경우 전부를, 일반 아이템은 그냥 떨어뜨린다는 의미 
 	if (m_pClientList[iClientH] == NULL) return;
+	if (m_pClientList[iClientH]->m_bIsOnWaitingProcess == TRUE) return;  //DEBUG
 	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE) return;
 	if ((sItemIndex < 0) || (sItemIndex >= DEF_MAXITEMS)) return;
 	if (m_pClientList[iClientH]->m_pItemList[sItemIndex] == NULL) return;
@@ -13872,7 +15655,11 @@ void CGame::DropItemHandler(int iClientH, short sItemIndex, int iAmount, char * 
 		                                                         m_pClientList[iClientH]->m_sY, pItem);
 
 		// v1.411 희귀 아이템이 떨어진 것인지 체크  
-		_bItemLog(DEF_ITEMLOG_DROP, iClientH, NULL, pItem);
+		// v2.17 2002-7-31 플레이어가 죽어서 떨어진건 모든 로그가 남는다. 
+		if ( bByPlayer == TRUE )
+			_bItemLog(DEF_ITEMLOG_DROP, iClientH, (int) -1, pItem);
+		else 
+			_bItemLog(DEF_ITEMLOG_DROP, iClientH, (int) -1, pItem, TRUE);
 
 		// 다른 클라이언트에게 아이템이 떨어진 것을 알린다. 
 		SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_ITEMDROP, m_pClientList[iClientH]->m_cMapIndex,
@@ -13885,7 +15672,12 @@ void CGame::DropItemHandler(int iClientH, short sItemIndex, int iAmount, char * 
 		// 일반 아이템이나 소비성 아이템을 모두 버렸다.
 
 		// 먼저 장착되어 있다면 해제시킨다.
+
 		ReleaseItemHandler(iClientH, sItemIndex, TRUE);
+
+		// v2.17 아이템이 장착되어 있으면 해제한다.
+		if ( m_pClientList[iClientH]->m_bIsItemEquipped[sItemIndex] == TRUE)
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMRELEASED, m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_cEquipPos, sItemIndex, NULL, NULL);
 
 		// v1.432
 		if ((m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectType == DEF_ITEMEFFECTTYPE_ALTERITEMDROP) && 
@@ -13901,7 +15693,11 @@ void CGame::DropItemHandler(int iClientH, short sItemIndex, int iAmount, char * 
  																	     m_pClientList[iClientH]->m_pItemList[sItemIndex]);
 
 			// v1.41 희귀 아이템을 떨어뜨린 것이라면 로그를 남긴다. 
-			_bItemLog(DEF_ITEMLOG_DROP, iClientH, NULL, m_pClientList[iClientH]->m_pItemList[sItemIndex]);
+			// v2.17 2002-7-31 플레이어가 죽어서 떨어진건 모든 로그가 남는다. 
+			if ( bByPlayer == TRUE )
+				_bItemLog(DEF_ITEMLOG_DROP, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[sItemIndex]);
+			else 
+				_bItemLog(DEF_ITEMLOG_DROP, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[sItemIndex], TRUE);
 		
 			// 다른 클라이언트에게 아이템이 떨어진 것을 알린다. 
 			SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_ITEMDROP, m_pClientList[iClientH]->m_cMapIndex,
@@ -13928,7 +15724,7 @@ void CGame::DropItemHandler(int iClientH, short sItemIndex, int iAmount, char * 
 
 int CGame::iClientMotion_GetItem_Handler(int iClientH, short sX, short sY, char cDir)
 {
- DWORD * dwp, dwTime;
+ DWORD * dwp;
  WORD  * wp;
  char  * cp;
  short * sp, sRemainItemSprite, sRemainItemSpriteFrame;
@@ -13974,7 +15770,7 @@ int CGame::iClientMotion_GetItem_Handler(int iClientH, short sX, short sY, char 
 			// 아이템을 획득했다.
 
 			// v1.41 희귀 아이템이라면 로그를 남긴다. 
-			_bItemLog(DEF_ITEMLOG_GET, iClientH, NULL, pItem);
+			_bItemLog(DEF_ITEMLOG_GET, iClientH, (int) -1, pItem);
 
 			dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
 			*dwp = MSGID_NOTIFY;
@@ -14179,9 +15975,7 @@ BOOL CGame::bEquipItemHandler(int iClientH, short sItemIndex, BOOL bNotify)
 
 	//만약 장착하고자 하는 아이템의 수명이 0인 경우는 장착할 수 없다.
  	if (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_wCurLifeSpan == 0) return FALSE;
-
-	// 레벨 제한에 걸려도 장착할 수 없다. 
-	//if (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sLevelLimit > m_pClientList[iClientH]->m_iLevel) return FALSE;
+	
 	// v1.4334 제작 아이템이 아닌 경우  레벨 제한에 걸려도 장착할 수 없다. 
 	if (((m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_dwAttribute & 0x00000001) == NULL)  &&
 	    (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sLevelLimit > m_pClientList[iClientH]->m_iLevel)) return FALSE;
@@ -14205,14 +15999,13 @@ BOOL CGame::bEquipItemHandler(int iClientH, short sItemIndex, BOOL bNotify)
 	}
 
 	// 무게 제한에 걸려도 사용할 수 없다.
-	//if (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_wWeight > m_pClientList[iClientH]->m_iStr*100) return FALSE;
 	// v1.432
 	if (iGetItemWeight(m_pClientList[iClientH]->m_pItemList[sItemIndex], 1) > m_pClientList[iClientH]->m_iStr*100) return FALSE;
    
 	cEquipPos = m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_cEquipPos;
 
 	// 옷아이템의 경우는 특성치의 제한에 걸리면 장착 불가능. 
-	if ((cEquipPos == DEF_EQUIPPOS_BODY) || (cEquipPos == DEF_EQUIPPOS_LEGGINGS) || (cEquipPos == DEF_EQUIPPOS_ARMS)) {
+	if ((cEquipPos == DEF_EQUIPPOS_BODY) || (cEquipPos == DEF_EQUIPPOS_LEGGINGS) || (cEquipPos == DEF_EQUIPPOS_ARMS) || (cEquipPos == DEF_EQUIPPOS_HEAD)) {
 		switch (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectValue4) {
 		case 10: // Str 제한 
 			if (m_pClientList[iClientH]->m_iStr < m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectValue5) {
@@ -14313,7 +16106,47 @@ BOOL CGame::bEquipItemHandler(int iClientH, short sItemIndex, BOOL bNotify)
 		if ( m_pClientList[iClientH]->m_sItemEquipmentStatus[ cEquipPos ] != -1) 
 			ReleaseItemHandler(iClientH, m_pClientList[iClientH]->m_sItemEquipmentStatus[ cEquipPos ], FALSE);
 	}
+	
+	if(cEquipPos == DEF_EQUIPPOS_FULLBODY)	{
+		//v2.19 2002-12-7 산타복 관련 
+		if ( m_pClientList[iClientH]->m_sItemEquipmentStatus[ cEquipPos ] != -1) 
+			ReleaseItemHandler(iClientH, m_pClientList[iClientH]->m_sItemEquipmentStatus[ cEquipPos ], FALSE);
+		else {
+			// 헤드, 바디,암,신발,에 아이템이 있다면 모두 장착 해제 
+			if ( m_pClientList[iClientH]->m_sItemEquipmentStatus[ DEF_EQUIPPOS_HEAD ] != -1) 
+				ReleaseItemHandler(iClientH, m_pClientList[iClientH]->m_sItemEquipmentStatus[ DEF_EQUIPPOS_HEAD ], FALSE);
+			if ( m_pClientList[iClientH]->m_sItemEquipmentStatus[ DEF_EQUIPPOS_BODY ] != -1) 
+				ReleaseItemHandler(iClientH, m_pClientList[iClientH]->m_sItemEquipmentStatus[ DEF_EQUIPPOS_BODY ], TRUE);
+			if ( m_pClientList[iClientH]->m_sItemEquipmentStatus[ DEF_EQUIPPOS_ARMS ] != -1) 
+				ReleaseItemHandler(iClientH, m_pClientList[iClientH]->m_sItemEquipmentStatus[ DEF_EQUIPPOS_ARMS ], FALSE);
+			if ( m_pClientList[iClientH]->m_sItemEquipmentStatus[ DEF_EQUIPPOS_LEGGINGS ] != -1) 
+				ReleaseItemHandler(iClientH, m_pClientList[iClientH]->m_sItemEquipmentStatus[ DEF_EQUIPPOS_LEGGINGS ], FALSE);
+			if ( m_pClientList[iClientH]->m_sItemEquipmentStatus[ DEF_EQUIPPOS_PANTS ] != -1) 
+				ReleaseItemHandler(iClientH, m_pClientList[iClientH]->m_sItemEquipmentStatus[ DEF_EQUIPPOS_PANTS ], FALSE);
+			if ( m_pClientList[iClientH]->m_sItemEquipmentStatus[ DEF_EQUIPPOS_BACK ] != -1) 
+				ReleaseItemHandler(iClientH, m_pClientList[iClientH]->m_sItemEquipmentStatus[ DEF_EQUIPPOS_BACK ], FALSE);
+			
+		}
+	}
+	else
+	{
+		// 일체형 아이템이 장착되어 있다면 해제시킨다.
+		if ((cEquipPos == DEF_EQUIPPOS_HEAD) 
+			|| (cEquipPos == DEF_EQUIPPOS_BODY)
+			|| (cEquipPos == DEF_EQUIPPOS_ARMS)
+			|| (cEquipPos == DEF_EQUIPPOS_LEGGINGS)
+			|| (cEquipPos == DEF_EQUIPPOS_PANTS)
+			|| (cEquipPos == DEF_EQUIPPOS_BACK)) {
+			// 일체형 아이템 부분에 일체형 아이템을 해제 
+			if ( m_pClientList[iClientH]->m_sItemEquipmentStatus[ DEF_EQUIPPOS_FULLBODY ] != -1) 
+				ReleaseItemHandler(iClientH, m_pClientList[iClientH]->m_sItemEquipmentStatus[ DEF_EQUIPPOS_FULLBODY ], FALSE);
+		}
+		
+		// 장착위치에 아이템이 이미 있으면 삭제.
+		if ( m_pClientList[iClientH]->m_sItemEquipmentStatus[ cEquipPos ] != -1) 
+			ReleaseItemHandler(iClientH, m_pClientList[iClientH]->m_sItemEquipmentStatus[ cEquipPos ], FALSE);
 
+	}
 	m_pClientList[iClientH]->m_sItemEquipmentStatus[cEquipPos] = sItemIndex;
 	m_pClientList[iClientH]->m_bIsItemEquipped[sItemIndex] = TRUE;
 	
@@ -14337,10 +16170,31 @@ BOOL CGame::bEquipItemHandler(int iClientH, short sItemIndex, BOOL bNotify)
 		sTemp = sTemp & 0xFFF0;
 		sSpeed = (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_cSpeed);
 		// Str에 따라 무기 속도를 줄인다. 
+
+		// v2.15 활버그 수정을 위해 루틴추가 
+		m_pClientList[iClientH]->m_sUsingWeaponSkill = m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sRelatedSkill ;
+
+		
+#ifdef DEF_WEAPONSPEEDLIMIT
+		// v2.16 2002-5-27 
+		sSpeed -= (m_pClientList[iClientH]->m_iStr / 13);
+		switch (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sRelatedSkill) {
+		//case 6:  if (sSpeed < 1) sSpeed = 1; break; // 활
+		//case 7:  if (sSpeed < 0) sSpeed = 0; break; // 짧은칼
+		//case 8:  if (sSpeed < 2) sSpeed = 2; break; // 긴칼
+		//case 9:  if (sSpeed < 1) sSpeed = 1; break; // 펜싱
+		//case 10: if (sSpeed < 3) sSpeed = 1; break; // 도끼 
+		case 14: if (sSpeed < 1) sSpeed = 1; break; // 해머 
+		default: if (sSpeed < 0) sSpeed = 0; break; // 기타 
+		}
+#else
 		sSpeed -= (m_pClientList[iClientH]->m_iStr / 13);
 		if (sSpeed < 0) sSpeed = 0;
+#endif
 		sTemp = sTemp | sSpeed;
 		m_pClientList[iClientH]->m_sStatus = sTemp;
+		// v2.15 연타 카운트 클리어
+		m_pClientList[iClientH]->m_iComboAttackCount = 0;
 		break;
 
 	case DEF_EQUIPPOS_LHAND:
@@ -14372,11 +16226,33 @@ BOOL CGame::bEquipItemHandler(int iClientH, short sItemIndex, BOOL bNotify)
 		sTemp = m_pClientList[iClientH]->m_sStatus;
 		sTemp = sTemp & 0xFFF0;
 		sSpeed = (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_cSpeed);
+
+
+		// v2.15 활버그 수정을 위해 루틴추가 
+		m_pClientList[iClientH]->m_sUsingWeaponSkill = m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sRelatedSkill ;
 		// Str에 따라 무기 속도를 줄인다. 
+
+#ifdef DEF_WEAPONSPEEDLIMIT
+		// v2.16 2002-5-27 
+		sSpeed -= (m_pClientList[iClientH]->m_iStr / 13);
+		switch (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sRelatedSkill) {
+		//case 6:  if (sSpeed < 1) sSpeed = 1; break; // 활
+		//case 7:  if (sSpeed < 0) sSpeed = 0; break; // 짧은칼
+		//case 8:  if (sSpeed < 2) sSpeed = 2; break; // 긴칼
+		//case 9:  if (sSpeed < 1) sSpeed = 1; break; // 펜싱
+		//case 10: if (sSpeed < 3) sSpeed = 1; break; // 도끼 
+		case 14: if (sSpeed < 1) sSpeed = 1; break; // 해머 
+		default: if (sSpeed < 0) sSpeed = 0; break; // 기타 
+		}
+#else
 		sSpeed -= (m_pClientList[iClientH]->m_iStr / 13);
 		if (sSpeed < 0) sSpeed = 0;
+#endif
+
 		sTemp = sTemp | sSpeed;
 		m_pClientList[iClientH]->m_sStatus = sTemp;
+		// v2.15 연타 카운트 클리어
+		m_pClientList[iClientH]->m_iComboAttackCount = 0;
 		break;
 
 	case DEF_EQUIPPOS_BODY:
@@ -14442,7 +16318,7 @@ BOOL CGame::bEquipItemHandler(int iClientH, short sItemIndex, BOOL bNotify)
 
 	case DEF_EQUIPPOS_LEGGINGS:
 		sTemp = m_pClientList[iClientH]->m_sAppr4;
-		sTemp = sTemp & 0x0FFF;	// 부츠 특성치 비트를 클리어.
+		sTemp = sTemp & 0x0FFF;	// 부츠 특성치 비트를 클리어.    111111111111
 		sTemp = sTemp | ((m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_cApprValue) << 12); // Appr 값을 세팅. 
 		m_pClientList[iClientH]->m_sAppr4 = sTemp;
 
@@ -14463,35 +16339,56 @@ BOOL CGame::bEquipItemHandler(int iClientH, short sItemIndex, BOOL bNotify)
 		iTemp = iTemp | ((m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_cItemColor));
 		m_pClientList[iClientH]->m_iApprColor = iTemp;
 		break;
+
+	case DEF_EQUIPPOS_FULLBODY: //v2.19 2002-12-7 산타복 관련 	
+		sTemp = m_pClientList[iClientH]->m_sAppr3;
+		sTemp = sTemp & 0x0FFF;	// 겉옷 특성치 비트를 클리어.
+		sTemp = sTemp | ((m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_cApprValue) << 12); // Appr 값을 세팅. 
+		m_pClientList[iClientH]->m_sAppr3 = sTemp;
+
+		iTemp = m_pClientList[iClientH]->m_iApprColor; // v1.4 컬러값 세팅 
+		iTemp = iTemp & 0xFFF0FFFF; // 색 비트를 클리어.
+		m_pClientList[iClientH]->m_iApprColor = iTemp;
+		break;
 	}
 
 	//v1.432 특수 능력이 부여된 아이템이라면 플래그 설정 
 	if (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectType == DEF_ITEMEFFECTTYPE_ATTACK_SPECABLTY) {
 		// 공격 특수 능력 비트 클리어
-		m_pClientList[iClientH]->m_sAppr4 = m_pClientList[iClientH]->m_sAppr4 & 0xFFF3;
+		m_pClientList[iClientH]->m_sAppr4 = m_pClientList[iClientH]->m_sAppr4 & 0xFFF3;     // 1111111111110011   
 		switch (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sSpecialEffect) {
 		case 0: break;
 		case 1: // 공격시 50% HP 감소
-			m_pClientList[iClientH]->m_sAppr4 = m_pClientList[iClientH]->m_sAppr4 | 0x0004;	
+			m_pClientList[iClientH]->m_sAppr4 = m_pClientList[iClientH]->m_sAppr4 | 0x0004;	// 0100
 			break;
 
 		case 2: // 냉동 효과 
-			m_pClientList[iClientH]->m_sAppr4 = m_pClientList[iClientH]->m_sAppr4 | 0x000C;	
+			m_pClientList[iClientH]->m_sAppr4 = m_pClientList[iClientH]->m_sAppr4 | 0x000C;	// 1100
 			break;
 
 		case 3: // 마비 효과 
-			m_pClientList[iClientH]->m_sAppr4 = m_pClientList[iClientH]->m_sAppr4 | 0x0008;	
+			m_pClientList[iClientH]->m_sAppr4 = m_pClientList[iClientH]->m_sAppr4 | 0x0008;	// 1000
 			break;
 		}
 	}
 
 	if (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectType == DEF_ITEMEFFECTTYPE_DEFENSE_SPECABLTY) {
 		// 방어구 특수 능력 비트 클리어
-		m_pClientList[iClientH]->m_sAppr4 = m_pClientList[iClientH]->m_sAppr4 & 0xFFFC;
+		m_pClientList[iClientH]->m_sAppr4 = m_pClientList[iClientH]->m_sAppr4 & 0xFFFC; // 1111111111111100
 		switch (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sSpecialEffect) {
 		case 0: break;
-		default: // 녹색 
-			m_pClientList[iClientH]->m_sAppr4 = m_pClientList[iClientH]->m_sAppr4 | 0x0002;	
+		case 50: // v2.15 2002-5-15 고광현수정
+		case 51:
+		case 52: // 녹색
+			m_pClientList[iClientH]->m_sAppr4 = m_pClientList[iClientH]->m_sAppr4 | 0x0002;	// 10
+			break;
+
+		default: // GM임을 나타낼 수 있는 효과.
+#ifndef DEF_KOREA
+			// 진호씨에게 물어볼것 
+			if (m_pClientList[iClientH]->m_iAdminUserLevel < 1 ) break ;
+#endif
+			m_pClientList[iClientH]->m_sAppr4 = m_pClientList[iClientH]->m_sAppr4 | 0x0001;	 // 01
 			break;
 		}
 	}
@@ -14505,7 +16402,7 @@ BOOL CGame::bEquipItemHandler(int iClientH, short sItemIndex, BOOL bNotify)
 	return TRUE;
 }
 
-
+// 2002-12-11 중국 관련 해킹 방지 루틴 추가
 void CGame::SendEventToNearClient_TypeB(DWORD dwMsgID, WORD wMsgType, char cMapIndex, short sX, short sY, short sV1, short sV2, short sV3, short sV4)
 {
  int i, iRet, iShortCutIndex;
@@ -14514,6 +16411,9 @@ void CGame::SendEventToNearClient_TypeB(DWORD dwMsgID, WORD wMsgType, char cMapI
  WORD * wp;
  short * sp;
  BOOL bFlag;
+ char  cKey ;
+
+	cKey = (char)(rand() % 255) +1; // v1.4
 
 	ZeroMemory(cData, sizeof(cData));
 	
@@ -14566,7 +16466,7 @@ void CGame::SendEventToNearClient_TypeB(DWORD dwMsgID, WORD wMsgType, char cMapI
 				 (m_pClientList[i]->m_sY >= sY - 8 ) &&
 				 (m_pClientList[i]->m_sY <= sY + 8 ) ) {
 
-				iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 18);
+				iRet = m_pClientList[i]->m_pXSock->iSendMsg(cData, 18,cKey);
 			}
 		}
 	}
@@ -14575,7 +16475,7 @@ void CGame::SendEventToNearClient_TypeB(DWORD dwMsgID, WORD wMsgType, char cMapI
 int CGame::iClientMotion_Stop_Handler(int iClientH, short sX, short sY, char cDir)
 {
  char cData[100];
- DWORD * dwp, dwTime;
+ DWORD * dwp;
  WORD  * wp;
  int     iRet;
  short   sOwnerH;
@@ -14651,6 +16551,7 @@ void CGame::ResponseCreateNewGuildHandler(char * pData, DWORD dwMsgSize)
  DWORD * dwp;
  char  * cp, cCharName[11], cData[100], cTxt[120];
  int iRet;
+ double dwGoldCount = 0;
 	
 	// 로그 서버로부터 길드 생성 요청에 대한 응답데이터가 도착했다. 
 	ZeroMemory(cCharName, sizeof(cCharName));
@@ -14661,7 +16562,12 @@ void CGame::ResponseCreateNewGuildHandler(char * pData, DWORD dwMsgSize)
 	// 이름이 일치하는 클라이언트를 찾는다.
 	for (i = 1; i < DEF_MAXCLIENTS; i++) 
 	if ((m_pClientList[i] != NULL) && (memcmp(m_pClientList[i]->m_cCharName, cCharName, 10) == 0) &&
-		(m_pClientList[i]->m_iLevel >= 20) && (m_pClientList[i]->m_iCharisma >= 20)) {
+#ifdef DEF_CHINESEGUILDLIMIT
+		(m_pClientList[i]->m_iLevel >= 100) && (m_pClientList[i]->m_iCharisma >= 20)) 
+#else
+		(m_pClientList[i]->m_iLevel >= 20) && (m_pClientList[i]->m_iCharisma >= 20))
+#endif 		
+		{
 		
 		wp = (WORD *)(pData + DEF_INDEX2_MSGTYPE);
 		switch (*wp) {
@@ -14672,6 +16578,17 @@ void CGame::ResponseCreateNewGuildHandler(char * pData, DWORD dwMsgSize)
 			m_pClientList[i]->m_iGuildRank = 0;	// 길드 랭크는 0. 길드마스터임 
 			wsprintf(cTxt, "(!) New guild(%s) creation success! : character(%s)", m_pClientList[i]->m_cGuildName, m_pClientList[i]->m_cCharName);
 			PutLogList(cTxt);
+
+#ifdef DEF_CHINESEGUILDLIMIT
+			// v2.19 2002-11-28 [중국] 길드 구성 조건을 레벨 100 과 100만 골드
+			dwGoldCount = dwGetItemCount(i, "Gold"); // 2002-11-29 장진호 추가
+			SetItemCount(i, "Gold", dwGoldCount - 1000000);
+			iCalcTotalWeight(i);
+#endif 
+
+#ifdef DEF_TAIWANLOG 
+			_bItemLog(DEF_ITEMLOG_CREATEGUILD,i, (char *)NULL, NULL) ;
+#endif
 			break;
 
 		case DEF_LOGRESMSGTYPE_REJECT:
@@ -14734,15 +16651,34 @@ void CGame::RequestCreateNewGuildHandler(int iClientH, char * pData, DWORD dwMsg
 	memcpy(cGuildName, cp, 20);
 	cp += 20;
 
+#ifdef DEF_CHINESEGUILDLIMIT
+	double dwGoldCount = 0 ;
+	// v2.19 2002-11-28 [중국] 길드 구성 조건을 레벨 100 과 100만 골드
+	dwGoldCount = dwGetItemCount(iClientH, "Gold");
+
+#endif 		
+
 	if (m_pClientList[iClientH]->m_iGuildRank != -1) {
 		// 이 캐릭터는 이미 길드에 가입하여 있으므로 길드를 만들 수 없다.
 		wsprintf(cTxt, "(!)Cannot create guild! Already guild member.: CharName(%s)", m_pClientList[iClientH]->m_cCharName);
 		PutLogList(cTxt);
 	}
 	else {
+#ifdef DEF_CHINESEGUILDLIMIT
+		// 2002-11-15 사냥꾼 모드 추가 (길드신청시 사냥꾼 모드에서는 안된다.)
+		if ( (m_pClientList[iClientH]->m_iLevel < 100) || (m_pClientList[iClientH]->m_iCharisma < 20) ||
+			 ( m_pClientList[iClientH]->m_cSide == DEF_NETURAL )	||	// 중립
+			 ( m_pClientList[iClientH]->m_bIsHunter == TRUE  ) ||	// 사냥꾼 모드
+			 ( dwGoldCount < 1000000  ) ||	
+			 ( m_pClientList[iClientH]->m_iIsOnTown == DEF_PK ) ) {		// 마을에 없을 경우
+#else
+		// 2002-11-15 사냥꾼 모드 추가 (길드신청시 사냥꾼 모드에서는 안된다.)
 		if ( (m_pClientList[iClientH]->m_iLevel < 20) || (m_pClientList[iClientH]->m_iCharisma < 20) ||
-			 (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) ||
-			 (memcmp(m_pClientList[iClientH]->m_cLocation, m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, 10) != 0) ) { // v1.4
+			 ( m_pClientList[iClientH]->m_cSide == DEF_NETURAL )	||	// 중립
+			 ( m_pClientList[iClientH]->m_bIsHunter == TRUE  ) ||	// 사냥꾼 모드
+			 ( m_pClientList[iClientH]->m_iIsOnTown == DEF_PK ) ) {		// 마을에 없을 경우
+#endif
+
 			// 자격요건이 맞지 않는다. 특성치가 낮거나 마을의 위치가 다르거나 시민이 아닌 경우  
 			ZeroMemory(cData, sizeof(cData));
 
@@ -14803,6 +16739,10 @@ void CGame::RequestDisbandGuildHandler(int iClientH, char * pData, DWORD dwMsgSi
 		PutLogList(cTxt);
 	}
 	else {
+
+#ifdef DEF_TAIWANLOG 
+		_bItemLog(DEF_ITEMLOG_GUILDDISMISS,iClientH, cGuildName, NULL) ;
+#endif		
 		// 길드 해산 메시지를 로그서버로 전송한다.
 		bSendMsgToLS(MSGID_REQUEST_DISBANDGUILD, iClientH);
 	}
@@ -14836,6 +16776,7 @@ void CGame::ResponseDisbandGuildHandler(char * pData, DWORD dwMsgSize)
 			
 			// 접속중인 길드원들에게 길드가 해산되었음을 알리는 메시지를 전송한다. 
 			SendGuildMsg(i,	DEF_NOTIFY_GUILDDISBANDED, NULL, NULL, NULL);
+			SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_CLEARGUILDNAME, m_pClientList[i]->m_cMapIndex,m_pClientList[i]->m_sX, m_pClientList[i]->m_sY,0, 0, 0);
 			
 			// 길드이름 클리어
 			ZeroMemory(m_pClientList[i]->m_cGuildName, sizeof(m_pClientList[i]->m_cGuildName));
@@ -14884,7 +16825,7 @@ void CGame::RequestPurchaseItemHandler(int iClientH, char * pItemName, int iNum)
  DWORD * dwp, dwGoldCount, dwItemCount;
  WORD  * wp, wTempPrice;
  int   i, iRet, iEraseReq, iGoldWeight;
- int   iCost, iDiscountRatio, iDiscountCost;
+ int   iCost,iCost2, iDiscountRatio, iDiscountCost;
  double dTmp1, dTmp2, dTmp3;
  
 	if (m_pClientList[iClientH] == NULL) return;
@@ -14893,47 +16834,38 @@ void CGame::RequestPurchaseItemHandler(int iClientH, char * pItemName, int iNum)
 	//if ( (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) != 0) &&
 	//	 (memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, m_pClientList[iClientH]->m_cLocation, 10) != 0) ) return;
 
-	if (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) != 0) {
-		if (memcmp(m_pClientList[iClientH]->m_cLocation, "aresden", 7) == 0) {
-			if ((memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "aresden", 7) == 0) ||
-				(memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "arefarm", 7) == 0)) {
+	// v2.181 2002-10-24 서버 속도 향상을 위해 스트링 비교를 줄인다.
 
-			}
-			else return;
-		}
-
-		if (memcmp(m_pClientList[iClientH]->m_cLocation, "elvine", 6) == 0) {
-			if ((memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "elvine", 6) == 0) ||
-				(memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "elvfarm", 7) == 0)) {
-
-			}
-			else return;
-		}
+	// 2002-11-15 사고 팔수 있는 곳인지 체크하는 변수 추가
+	// if (m_pClientList[iClientH]->m_cSide != DEF_NETURAL && m_pClientList[iClientH]->m_bIsOnShop == FALSE ) {
+	if ( m_pClientList[iClientH]->m_bIsOnShop == FALSE ) {
+		return;
 	}
-	
 	
 	// 아이템을 구입한다. 
 	ZeroMemory(cData, sizeof(cData));	
 	ZeroMemory(cItemName, sizeof(cItemName));
-	
-	// 임시코드다. 
-	if (memcmp(pItemName, "화살10개", 8) == 0) {
-		strcpy(cItemName, "화살");
+
+// v2.14 영문 아이템 이름을 위해 
+
+	if (memcmp(pItemName, DEF_ITEMNAME_10ARROWS, 8) == 0) {
+		strcpy(cItemName, DEF_ITEMNAME_ARROW);
 		dwItemCount = 10;
 	}
-	else if (memcmp(pItemName, "화살100개", 9) == 0) {
-		strcpy(cItemName, "화살");
+	else if (memcmp(pItemName, DEF_ITEMNAME_100ARROWS, 9) == 0) {
+		strcpy(cItemName, DEF_ITEMNAME_ARROW);
 		dwItemCount = 100;
 	}
 	else {
 		memcpy(cItemName, pItemName, 20);
 		dwItemCount = 1;
 	}
-	
+		
 	for (i = 1; i <= iNum; i++) {
 
 		pItem = new class CItem;
 		if (_bInitItemAttr(pItem, cItemName) == FALSE) {
+
 			// 구입하고자 하는 아이템이 아이템 리스트상에 없다. 구입이 불가능하다.
 			delete pItem;
 		}
@@ -14941,51 +16873,59 @@ void CGame::RequestPurchaseItemHandler(int iClientH, char * pItemName, int iNum)
 			
 			if (pItem->m_bIsForSale == FALSE) {
 				// 판매되는 아이템이 아니다. 살 수 없다.
+
 				delete pItem;
 				return;
 			}
 
 			pItem->m_dwCount = dwItemCount;
+
+			// v2.14 상점 아이템에도 고유 코드 입력 
+			pItem->m_sTouchEffectType   = DEF_ITET_ID;
+			pItem->m_sTouchEffectValue1 = iDice(1,100000);
+			pItem->m_sTouchEffectValue2 = iDice(1,100000);
 			
-			// 가격을 계산한다.
-			iCost = pItem->m_wPrice * pItem->m_dwCount;
-			
-			/* v1.3 <- 이건 _bAddClientItemList에서 체크하는 기능이므로 두번할 필요가 없다.
-			if ((pItem->m_cItemType == DEF_ITEMTYPE_CONSUME) || (pItem->m_cItemType == DEF_ITEMTYPE_ARROW))  
-				iItemWeight = (pItem->m_wWeight * pItem->m_dwCount);
-			else iItemWeight = pItem->m_wWeight;
-			
-			if ( (iItemWeight + m_pClientList[iClientH]->m_iCurWeightLoad) > _iCalcMaxLoad(iClientH)) {
-				// 중량 초과. 구입할 수 없다. 
-				
-				// 더이상 가질수 없다는 메시지를 보낸다.
-				dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
-				*dwp = MSGID_NOTIFY;
-				wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
-				*wp  = DEF_NOTIFY_CANNOTCARRYMOREITEM;
-				
-				iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, 6);
-				switch (iRet) {
-				case DEF_XSOCKEVENT_QUENEFULL:
-				case DEF_XSOCKEVENT_SOCKETERROR:
-				case DEF_XSOCKEVENT_CRITICALERROR:
-				case DEF_XSOCKEVENT_SOCKETCLOSED:
-					// 메시지를 보낼때 에러가 발생했다면 제거한다.
-					DeleteClient(iClientH, TRUE, TRUE);
-					break;
-				}
-				
-				delete pItem;
-				return;
+#ifdef DEF_LOGTIME
+			pItem->m_sTouchEffectValue3 = timeGetTime();
+#else 
+			// 마지막 숫자는 아이템 생성 월, 일	
+			SYSTEMTIME SysTime;
+			char cTemp[20] ;
+
+			GetLocalTime(&SysTime); //
+			ZeroMemory(cTemp, sizeof(cTemp));
+//			wsprintf(cTemp, "%d%02d%02d",  (short)SysTime.wMonth, (short)SysTime.wDay,(short) SysTime.wHour);
+			wsprintf(cTemp, "%d%02d%",  (short)SysTime.wMonth, (short)SysTime.wDay);
+			pItem->m_sTouchEffectValue3 = atoi(cTemp);
+#endif				
+			//v2.19 2002-11-14 물가 가격 계산 부분 전면전 이긴쪽은 쫌 싸다... -_-.
+#ifdef DEF_V219  
+			if(m_iCrusadeWinnerSide == m_pClientList[iClientH]->m_cSide)
+			{
+				iCost =(int)((float)(pItem->m_wPrice) * 0.9f + 0.5f) ;
+				// 가격을 계산한다.
+				iCost = iCost * pItem->m_dwCount;
+				iCost2 = pItem->m_wPrice * pItem->m_dwCount;
 			}
-			*/
+			else
+			{
+				// 가격을 계산한다.
+				iCost2 = iCost = pItem->m_wPrice * pItem->m_dwCount;
+			}
+#else
+			iCost = pItem->m_wPrice * pItem->m_dwCount;
+#endif
 
 			// 플레이어가 소지한 Gold가 아이템을 사기에 충분한지 검사한다.
 			dwGoldCount = dwGetItemCount(iClientH, "Gold");
+
+			// Charisma에 따른 할인률을 계산한다. 
+			// v2.14 카리스마가 10인경우 아이템을 할인 하지 않음 
+			iDiscountRatio = ((m_pClientList[iClientH]->m_iCharisma -10)/ 4) ;
 			
 			// Charisma에 따른 할인률을 계산한다. 
-			iDiscountRatio = (m_pClientList[iClientH]->m_iCharisma / 4) -1;
-			if (iDiscountRatio == 0) iDiscountRatio = 1;
+		//	iDiscountRatio = (m_pClientList[iClientH]->m_iCharisma / 4) -1;
+		//	if (iDiscountRatio == 0) iDiscountRatio = 1;
 			
 			dTmp1 = (double)(iDiscountRatio);
 			dTmp2 = dTmp1 / 100.0f;
@@ -14993,10 +16933,18 @@ void CGame::RequestPurchaseItemHandler(int iClientH, char * pItemName, int iNum)
 			dTmp3 = dTmp1 * dTmp2;
 			iDiscountCost = (int)dTmp3;
 				
+#ifdef DEF_V219  
+			//물건가격의 절반이상은 절대 안싸진다.(물가+카리스마 적용을 하더라도...)
+			if ((iCost - iDiscountCost) <= (iCost2/2)) {
+				iDiscountCost = iCost - (iCost2/2) + 1; 
+			}
+#else
 			if (iDiscountCost >= (iCost/2)) iDiscountCost = (iCost/2)-1;
+#endif
 
 			if ( dwGoldCount < (DWORD)(iCost - iDiscountCost) ) {
 				// 플레이어가 갖고있는 Gold가 아이템 가격에 비해 적다. 살수 없음.
+
 				delete pItem;
 				
 				dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
@@ -15082,11 +17030,14 @@ void CGame::RequestPurchaseItemHandler(int iClientH, char * pItemName, int iNum)
 				wTempPrice = (iCost - iDiscountCost);
 				cp += 2;
 				
-				if (iEraseReq == 1) delete pItem;
+				if (iEraseReq == 1){
+					delete pItem;
+					pItem = NULL;
+				}
 				
 				// 아이템 정보 전송 
 				iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, 48);
-				
+	
 				// Gold의 수량을 감소시킨다. 반드시 여기서 세팅해야 순서가 바뀌지 않는다.
 				iGoldWeight = SetItemCount(iClientH, "Gold", dwGoldCount - wTempPrice);
 				// 소지품 총 중량 재 계산 
@@ -15102,6 +17053,7 @@ void CGame::RequestPurchaseItemHandler(int iClientH, char * pItemName, int iNum)
 				case DEF_XSOCKEVENT_SOCKETCLOSED:
 					// 메시지를 보낼때 에러가 발생했다면 제거한다.
 					DeleteClient(iClientH, TRUE, TRUE);
+
 					return;
 				}
 			}
@@ -15130,7 +17082,13 @@ void CGame::RequestPurchaseItemHandler(int iClientH, char * pItemName, int iNum)
 				}
 			}
 		}
- 	}
+	} // for ??
+
+	if ( i <= 1) return ;
+
+#ifdef DEF_TAIWANLOG  // 12-22 성후니 추가 
+		_bItemLog(DEF_ITEMLOG_BUY, iClientH, i - 1, pItem);
+#endif
 }
 
 void CGame::GiveItemHandler(int iClientH, short sItemIndex, int iAmount, short dX, short dY, WORD wObjectID, char * pItemName)
@@ -15143,6 +17101,7 @@ void CGame::GiveItemHandler(int iClientH, short sItemIndex, int iAmount, short d
  class CItem * pItem;
   
 	if (m_pClientList[iClientH] == NULL) return;
+	if (m_pClientList[iClientH]->m_bIsOnWaitingProcess == TRUE) return;	//DEBUG
 	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE) return;
 	if (m_pClientList[iClientH]->m_pItemList[sItemIndex] == NULL) return;
 	if ((sItemIndex < 0) || (sItemIndex >= DEF_MAXITEMS)) return;
@@ -15207,7 +17166,7 @@ void CGame::GiveItemHandler(int iClientH, short sItemIndex, int iAmount, short d
 			m_pMapList[ m_pClientList[iClientH]->m_cMapIndex ]->bSetItem(m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY, pItem);
 			
 			// v1.411  
-			_bItemLog(DEF_ITEMLOG_DROP, iClientH, NULL, pItem);
+			_bItemLog(DEF_ITEMLOG_DROP, iClientH, (int) -1, pItem);
 	
 			// 다른 클라이언트에게 아이템이 떨어진 것을 알린다. 
 			SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_ITEMDROP, m_pClientList[iClientH]->m_cMapIndex,
@@ -15234,6 +17193,8 @@ void CGame::GiveItemHandler(int iClientH, short sItemIndex, int iAmount, short d
 					*wp  = DEF_NOTIFY_ITEMOBTAINED;
 				
 					cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
+
+					_bItemLog(DEF_ITEMLOG_GIVE, iClientH, sOwnerH, pItem);
 
 					// 1개 획득했다. Amount가 아니다!
 					*cp = 1;
@@ -15317,7 +17278,7 @@ void CGame::GiveItemHandler(int iClientH, short sItemIndex, int iAmount, short d
 																			     pItem);
 
 					// v1.411  
-					_bItemLog(DEF_ITEMLOG_DROP, iClientH, NULL, pItem);
+					_bItemLog(DEF_ITEMLOG_DROP, iClientH, (int) -1, pItem);
 	
 					// 다른 클라이언트에게 아이템이 떨어진 것을 알린다. 
 					SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_ITEMDROP, m_pClientList[iClientH]->m_cMapIndex,
@@ -15360,7 +17321,7 @@ void CGame::GiveItemHandler(int iClientH, short sItemIndex, int iAmount, short d
 						m_pMapList[ m_pClientList[iClientH]->m_cMapIndex ]->bSetItem(m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY, pItem);
 
 						// v1.411  
-						_bItemLog(DEF_ITEMLOG_DROP, iClientH, NULL, pItem);
+						_bItemLog(DEF_ITEMLOG_DROP, iClientH, (int) -1, pItem);
 	
 						// 다른 클라이언트에게 아이템이 떨어진 것을 알린다. 
 						SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_ITEMDROP, m_pClientList[iClientH]->m_cMapIndex,
@@ -15373,7 +17334,7 @@ void CGame::GiveItemHandler(int iClientH, short sItemIndex, int iAmount, short d
 					m_pMapList[ m_pClientList[iClientH]->m_cMapIndex ]->bSetItem(m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY, pItem);
 
 					// v1.411  
-					_bItemLog(DEF_ITEMLOG_DROP, iClientH, NULL, pItem);
+					_bItemLog(DEF_ITEMLOG_DROP, iClientH, (int) -1, pItem);
 	
 					// 다른 클라이언트에게 아이템이 떨어진 것을 알린다. 
 					SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_ITEMDROP, m_pClientList[iClientH]->m_cMapIndex,
@@ -15423,7 +17384,7 @@ void CGame::GiveItemHandler(int iClientH, short sItemIndex, int iAmount, short d
 			                                                             m_pClientList[iClientH]->m_sY, 
 																	     m_pClientList[iClientH]->m_pItemList[sItemIndex]);
 			// v1.411  
-			_bItemLog(DEF_ITEMLOG_DROP, iClientH, NULL, m_pClientList[iClientH]->m_pItemList[sItemIndex]);
+			_bItemLog(DEF_ITEMLOG_DROP, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[sItemIndex]);
 	
 			// 다른 클라이언트에게 아이템이 떨어진 것을 알린다. 
 			SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_ITEMDROP, m_pClientList[iClientH]->m_cMapIndex,
@@ -15442,25 +17403,33 @@ void CGame::GiveItemHandler(int iClientH, short sItemIndex, int iAmount, short d
 				// 캐릭터에게 아이템을 주었다.	
 				memcpy(cCharName, m_pClientList[sOwnerH]->m_cCharName, 10);
 				pItem = m_pClientList[iClientH]->m_pItemList[sItemIndex];
+				
+				// v2.03 크루세이드 모드인경우도 길드 가입은 가능하다.
 
-				if ((m_bIsCrusadeMode == FALSE) && (strcmp(pItem->m_cName, "길드가입신청서") == 0)) {
+				// v2.17 2002-7-31 아이템을 아이템 고유번호로 생성할 수 있게 한다.
+				if (pItem->m_sIDnum == 88) {
+
 					// 플레이어 iClientH 가 sOwnerH에게 길드가입 신청서를 주었다. 만약 
 					// sOwnerH가 길드마스터라면 아이템을 받는 것이 아니라 확인을 해 주어야 한다.
 				
 					if ((m_pClientList[iClientH]->m_iGuildRank == -1) && 
-						(memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) != 0) &&
-						(memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[sOwnerH]->m_cLocation, 10) == 0) &&
+						(m_pClientList[iClientH]->m_cSide != DEF_NETURAL) &&
+						(m_pClientList[iClientH]->m_cSide == m_pClientList[sOwnerH]->m_cSide) &&
 						(m_pClientList[sOwnerH]->m_iGuildRank == 0) ) {
 						// 길드 마스터이다.	길드 마스터에게는 가입확인 요청 메시지를 전송한다.
 						SendNotifyMsg(iClientH, sOwnerH, DEF_NOTIFY_QUERY_JOINGUILDREQPERMISSION, NULL, NULL, NULL, NULL);
 						// 이제 아이템을 준 본인에게 아이템을 주었으므로 리스트에서 삭제할것을 통보한다.
 						SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_GIVEITEMFIN_ERASEITEM, sItemIndex, 1, NULL, cCharName);
+
+						_bItemLog(DEF_ITEMLOG_DEPLETE, iClientH,(int) -1, pItem);
 					
 						goto REMOVE_ITEM_PROCEDURE;
 					}
 				}
 
-				if ((m_bIsCrusadeMode == FALSE) && (strcmp(pItem->m_cName, "길드탈퇴신청서") == 0)) {
+				// v2.17 2002-7-31 아이템을 아이템 고유번호로 생성할 수 있게 한다.
+				if ((m_bIsCrusadeMode == FALSE) && (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sIDnum == 89)) {
+
 					// 플레이어 iClientH 가 sOwnerH에게 길드탈퇴 신청서를 주었다. 만약 
 					// sOwnerH가 길드마스터이고 iClientH와 길드 이름이 같고 iClientH가 길드원이라면 
 					// 아이템을 받는 것이 아니라 확인을 해 주어야 한다.
@@ -15471,6 +17440,8 @@ void CGame::GiveItemHandler(int iClientH, short sItemIndex, int iAmount, short d
 						SendNotifyMsg(iClientH, sOwnerH, DEF_NOTIFY_QUERY_DISMISSGUILDREQPERMISSION, NULL, NULL, NULL, NULL);
 						// 이제 아이템을 준 본인에게 아이템을 주었으므로 리스트에서 삭제할것을 통보한다.
 						SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_GIVEITEMFIN_ERASEITEM, sItemIndex, 1, NULL, cCharName);
+
+						_bItemLog(DEF_ITEMLOG_DEPLETE, iClientH,(int) -1, pItem);
 					
 						goto REMOVE_ITEM_PROCEDURE;
 					}
@@ -15568,7 +17539,7 @@ void CGame::GiveItemHandler(int iClientH, short sItemIndex, int iAmount, short d
 							                                                     m_pClientList[iClientH]->m_sY, 
 																			     m_pClientList[iClientH]->m_pItemList[sItemIndex]);
 					// v1.41 희귀 아이템을 떨어뜨린 것이라면 로그를 남긴다. 
-					_bItemLog(DEF_ITEMLOG_DROP, iClientH, NULL, m_pClientList[iClientH]->m_pItemList[sItemIndex]);
+					_bItemLog(DEF_ITEMLOG_DROP, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[sItemIndex]);
 					
 					// 다른 클라이언트에게 아이템이 떨어진 것을 알린다. 
 					SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_ITEMDROP, m_pClientList[iClientH]->m_cMapIndex,
@@ -15614,7 +17585,7 @@ void CGame::GiveItemHandler(int iClientH, short sItemIndex, int iAmount, short d
 							                                                         m_pClientList[iClientH]->m_pItemList[sItemIndex]);
 						
 						// v1.41 희귀 아이템을 떨어뜨린 것이라면 로그를 남긴다. 
-						_bItemLog(DEF_ITEMLOG_DROP, iClientH, NULL, m_pClientList[iClientH]->m_pItemList[sItemIndex]);
+						_bItemLog(DEF_ITEMLOG_DROP, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[sItemIndex]);
 						
 						// 다른 클라이언트에게 아이템이 떨어진 것을 알린다. 
 						SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_ITEMDROP, m_pClientList[iClientH]->m_cMapIndex,
@@ -15626,12 +17597,16 @@ void CGame::GiveItemHandler(int iClientH, short sItemIndex, int iAmount, short d
 				}
 				else if (memcmp(m_pNpcList[sOwnerH]->m_cNpcName, "Kennedy", 7) == 0) {
 					// 길드 사무장에게 길드 탈퇴 신청서를 주었다면 길드를 탈퇴한다. 
-					if ((m_bIsCrusadeMode == FALSE) && (memcmp(m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_cName, "길드탈퇴신청서", 14) == 0)) {
-						
+
+					// v2.17 2002-7-31 아이템을 아이템 고유번호로 생성할 수 있게 한다.
+					if ((m_bIsCrusadeMode == FALSE) && (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sIDnum == 89)) {
 						if ((m_pClientList[iClientH]->m_iGuildRank != 0) && (m_pClientList[iClientH]->m_iGuildRank != -1)) {
 							// 탈퇴 신청자에게 탈퇴 성공했음을 알리는 메시지를 보내준다.
 							SendNotifyMsg(iClientH, iClientH, DEF_COMMONTYPE_DISMISSGUILDAPPROVE, NULL, NULL, NULL, NULL);
-						
+
+#ifdef DEF_TAIWANLOG
+							_bItemLog(DEF_ITEMLOG_BANGUILD,iClientH,(char *)NULL,NULL) ;
+#endif
 							// 길드 탈퇴. 
 							ZeroMemory(m_pClientList[iClientH]->m_cGuildName, sizeof(m_pClientList[iClientH]->m_cGuildName));
 							memcpy(m_pClientList[iClientH]->m_cGuildName, "NONE", 4);
@@ -15657,7 +17632,7 @@ void CGame::GiveItemHandler(int iClientH, short sItemIndex, int iAmount, short d
 																			     m_pClientList[iClientH]->m_pItemList[sItemIndex]);
 
 						// v1.41 희귀 아이템을 떨어뜨린 것이라면 로그를 남긴다. 
-						_bItemLog(DEF_ITEMLOG_DROP, iClientH, NULL, m_pClientList[iClientH]->m_pItemList[sItemIndex]);
+						_bItemLog(DEF_ITEMLOG_DROP, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[sItemIndex]);
 					
 						// 다른 클라이언트에게 아이템이 떨어진 것을 알린다. 
 						SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_ITEMDROP, m_pClientList[iClientH]->m_cMapIndex,
@@ -15679,7 +17654,7 @@ void CGame::GiveItemHandler(int iClientH, short sItemIndex, int iAmount, short d
 																			     m_pClientList[iClientH]->m_pItemList[sItemIndex]);
 
 					// v1.41 희귀 아이템을 떨어뜨린 것이라면 로그를 남긴다. 
-					_bItemLog(DEF_ITEMLOG_DROP, iClientH, NULL, m_pClientList[iClientH]->m_pItemList[sItemIndex]);
+					_bItemLog(DEF_ITEMLOG_DROP, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[sItemIndex]);
 					
 					// 다른 클라이언트에게 아이템이 떨어진 것을 알린다. 
 					SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_ITEMDROP, m_pClientList[iClientH]->m_cMapIndex,
@@ -15734,8 +17709,35 @@ void CGame::SendNotifyMsg(int iFromH, int iToH, WORD wMsgType, DWORD sV1, DWORD 
 
 	cp = (char *)(cData	+ DEF_INDEX2_MSGTYPE + 2);
 
+	// 여기까지 Msg 사이즈가 6이다. 다음에 오는 내용의 크기에 +6을 해서 iSendMsg에게 전달한다.
+
 	// !!! sV1, sV2, sV3는 DWORD형임을 명심하라.
 	switch (wMsgType) {
+
+	// 2002-11-14 사냥꾼 모드 추가
+	case DEF_NOTIFY_RESPONSE_HUNTMODE:
+		memcpy(cp, pString, 10);
+		cp += 10;
+
+		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 16);
+		break;
+
+	// v2.171 2002-6-14
+	case DEF_NOTIFY_REQGUILDNAMEANSWER:
+		wp  = (WORD *)cp;
+		*wp = (WORD)sV1;
+		cp += 2;
+
+		wp  = (WORD *)cp;
+		*wp = (WORD)sV2;
+		cp += 2;
+		
+		memcpy(cp, pString, 20);
+		cp += 20;
+
+		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 32);
+		break;
+
 	case DEF_NOTIFY_TCLOC:
 		wp  = (WORD *)cp;
 		*wp = (WORD)sV1;
@@ -15762,6 +17764,57 @@ void CGame::SendNotifyMsg(int iFromH, int iToH, WORD wMsgType, DWORD sV1, DWORD 
 		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 34);
 		break;
 	
+	case DEF_NOTIFY_PARTY:
+		switch (sV1) {
+		case 4:
+		case 6:
+			wp  = (WORD *)cp;
+			*wp = (WORD)sV1;
+			cp += 2;
+			wp  = (WORD *)cp;
+			*wp = (WORD)sV2;
+			cp += 2;
+			wp  = (WORD *)cp;
+			*wp = (WORD)sV3;
+			cp += 2;
+			memcpy(cp, pString, 10);
+			cp += 10;
+			iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 12 + 10);
+			break;
+		
+		case 5:
+			wp  = (WORD *)cp;
+			*wp = (WORD)sV1;
+			cp += 2;
+			wp  = (WORD *)cp;
+			*wp = (WORD)sV2;
+			cp += 2;
+			wp  = (WORD *)cp;
+			*wp = (WORD)sV3;
+			cp += 2;
+			memcpy(cp, pString, sV3*11);
+			cp += sV3*11;
+			iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 12 + sV3*11);
+			break;
+		
+		default:
+			wp  = (WORD *)cp;
+			*wp = (WORD)sV1;
+			cp += 2;
+			wp  = (WORD *)cp;
+			*wp = (WORD)sV2;
+			cp += 2;
+			wp  = (WORD *)cp;
+			*wp = (WORD)sV3;
+			cp += 2;
+			wp  = (WORD *)cp;
+			*wp = (WORD)sV4;
+			cp += 2;
+			iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 14);
+			break;
+		}
+		break;
+
 	case DEF_NOTIFY_GRANDMAGICRESULT:
 		wp  = (WORD *)cp;
 		*wp = (WORD)sV1;
@@ -15782,7 +17835,25 @@ void CGame::SendNotifyMsg(int iFromH, int iToH, WORD wMsgType, DWORD sV1, DWORD 
 		*wp = (WORD)sV4;
 		cp += 2;
 
-		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 24);
+		// v2.15 전면전시 건물의 HP를 보여주기 위해 추가. 
+
+//		sp = (short *)cp;
+//		*sp = (short)sV9;
+//		cp += 2;
+
+		// 건물 숫자가 0 인경우를 대비한 루틴 
+		if (sV9 > 0)  {
+			memcpy(cp,pString2, (sV9+1)*2) ;
+			cp += (sV9+1)*2;
+		}
+		else 
+		{
+			sp = (short *)cp;
+			*sp = (short)0;
+			cp += 2;
+		}
+
+		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 24 + (sV9+1)*2 );
 		break;
 	
 	case DEF_NOTIFY_MAPSTATUSNEXT:
@@ -15911,6 +17982,76 @@ void CGame::SendNotifyMsg(int iFromH, int iToH, WORD wMsgType, DWORD sV1, DWORD 
 	
 		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 44);
 		break;
+
+	case DEF_NOTIFY_GIZONITEMUPGRADELEFT:
+	case DEF_NOTIFY_ITEMATTRIBUTECHANGE:
+		// v2.16 2002-5-21 고광현 수정 
+		sp = (short *)cp;
+		*sp = (short)sV1;
+		cp += 2;
+
+		dwp = (DWORD *)cp;
+		*dwp = (DWORD)sV2;
+		cp += 4;
+
+		dwp = (DWORD *)cp;
+		*dwp = (DWORD)sV3;
+		cp += 4;
+
+		dwp = (DWORD *)cp;
+		*dwp = (DWORD)sV4;
+		cp += 4;
+
+		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 20);
+		break; 
+
+	case DEF_NOTIFY_ITEMUPGRADEFAIL:
+		// v2.17 2002-7-21 
+		sp = (short *)cp;
+		*sp = (short)sV1;
+		cp += 2;		
+
+		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 8);
+
+		break ;
+
+	case DEF_NOTIFY_GIZONITEMCANGE:
+		sp = (short *)cp;
+		*sp = (short)sV1;
+		cp += 2;
+
+		*cp = (char)sV2;
+		cp++;
+
+		sp = (short *)cp;
+		*sp = (short)sV3;
+		cp += 2;
+
+		sp = (short *)cp;
+		*sp = (short)sV4;
+		cp += 2;
+
+		sp = (short *)cp;
+		*sp = (short)sV5;
+		cp += 2;
+
+		*cp = (char)sV6;
+		cp++;
+
+		*cp = (char)sV7;
+		cp++;
+
+		// v1.42
+		dwp  = (DWORD *)cp;
+		*dwp = (DWORD)sV8;
+		cp += 4;
+
+		memcpy(cp, pString, 20);
+		cp += 20;
+		
+
+		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 41);
+		break;
 		
 	case DEF_NOTIFY_ENERGYSPHERECREATED:
 	case DEF_NOTIFY_ITEMCOLORCHANGE:
@@ -15924,7 +18065,13 @@ void CGame::SendNotifyMsg(int iFromH, int iToH, WORD wMsgType, DWORD sV1, DWORD 
 
 		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 10);
 		break;
-	
+
+	case DEF_NOTIFY_NOMOREAGRICULTURE:	   //? 농작물 제한
+	case DEF_NOTIFY_AGRICULTURESKILLLIMIT: //? 스킬 제한	
+	case DEF_NOTIFY_AGRICULTURENOAREA:     //? 농작물을 지을수 있는 공간이 아니다.
+		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 6);
+		break;
+			
 	case DEF_NOTIFY_NOMORECRUSADESTRUCTURE:
 	case DEF_NOTIFY_EXCHANGEITEMCOMPLETE:
 	case DEF_NOTIFY_CANCELEXCHANGEITEM:
@@ -16234,6 +18381,22 @@ void CGame::SendNotifyMsg(int iFromH, int iToH, WORD wMsgType, DWORD sV1, DWORD 
 
 		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 7);
 		break;
+// v2.19 2002-12-3  몹이벤트 위치를 클라이언트에게 보내준다.
+	case DEF_NOTIFY_MONSTEREVENT_POSITION:
+		*cp = (char)sV3;
+		cp++;
+
+		sp = (short*)cp;
+		*sp = (short)sV1;
+		cp += 2;
+
+		sp = (short*)cp;
+		*sp = (short)sV2;
+		cp += 2;
+
+		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 11);
+		break;
+
 		
 	case DEF_NOTIFY_FISHCANCELED:
 	case DEF_NOTIFY_FISHSUCCESS:
@@ -16360,49 +18523,58 @@ void CGame::SendNotifyMsg(int iFromH, int iToH, WORD wMsgType, DWORD sV1, DWORD 
 
 		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 7 + strlen(pString));
 		break;
+	
+	case DEF_NOTIFY_PLAYERONGAME:
+		memcpy(cp, pString, 10);
+		cp += 10;
+		if (pString != NULL) {
+				memcpy(cp, pString2, 14);
+				cp += 14;
+		}
+		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 31);
+		break;
 
 	case DEF_NOTIFY_WHISPERMODEON:
 	case DEF_NOTIFY_WHISPERMODEOFF:
-	
-	case DEF_NOTIFY_PLAYERONGAME:
 	case DEF_NOTIFY_PLAYERNOTONGAME:
 		memcpy(cp, pString, 10);
 		cp += 10;
-
-		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 17);
+		memcpy(cp, "             ", 10);
+		cp += 10;
+		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 27);
 		break;
 	
 	case DEF_NOTIFY_ITEMSOLD:
 	case DEF_NOTIFY_ITEMREPAIRED:
-		wp = (WORD *)cp;
-		*wp = (WORD)sV1;
-		cp += 2;
-		wp = (WORD *)cp;
-		*wp = (WORD)sV2;
-		cp += 2;
+		dwp = (DWORD *)cp;
+		*dwp = (DWORD)sV1;
+		cp += 4;
+		dwp = (DWORD *)cp;
+		*dwp = (DWORD)sV2;
+		cp += 4;
 
-		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 10);
+		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 14);
 		break;
 	
 	case DEF_NOTIFY_REPAIRITEMPRICE:
 	case DEF_NOTIFY_SELLITEMPRICE:
-		wp = (WORD *)cp;
-		*wp = (WORD)sV1;
-		cp += 2;
-		wp = (WORD *)cp;
-		*wp = (WORD)sV2;
-		cp += 2;
-		wp = (WORD *)cp;
-		*wp = (WORD)sV3;
-		cp += 2;
-		wp = (WORD *)cp;
-		*wp = (WORD)sV4;
-		cp += 2;
+		dwp = (DWORD *)cp;
+		*dwp = (DWORD)sV1;
+		cp += 4;
+		dwp = (DWORD *)cp;
+		*dwp = (DWORD)sV2;
+		cp += 4;
+		dwp = (DWORD *)cp;
+		*dwp = (DWORD)sV3;
+		cp += 4;
+		dwp = (DWORD *)cp;
+		*dwp = (DWORD)sV4;
+		cp += 4;
 
 		memcpy(cp, pString, 20);
 		cp += 20;
 		
-		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 34);
+		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 42);
 		break;
 
 	case DEF_NOTIFY_CANNOTREPAIRITEM:
@@ -16444,7 +18616,7 @@ void CGame::SendNotifyMsg(int iFromH, int iToH, WORD wMsgType, DWORD sV1, DWORD 
 	
 	case DEF_NOTIFY_TOTALUSERS:
 		wp  = (WORD *)cp;    
-		*wp = (WORD)(m_iTotalGameServerClients) + (m_iTotalGameServerClients/10); //_iGetTotalClients();
+		*wp = (WORD)(m_iTotalGameServerClients) ; //_iGetTotalClients();
 		cp += 2;
 
 		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 8);
@@ -16479,9 +18651,19 @@ void CGame::SendNotifyMsg(int iFromH, int iToH, WORD wMsgType, DWORD sV1, DWORD 
 		memcpy(cp, m_cLogServerAddr, 15);
 		cp += 15;
 
+// 2002-12-8 World server 보안 설정을 위해 
+#ifdef DEF_DEFENCEHACKING
+		ip = (int *)cp;
+		*ip = m_iWorldLogServerPort;
+		cp += 4;
+
+#else 
 		ip = (int *)cp;
 		*ip = m_iLogServerPort;
 		cp += 4;
+
+#endif 
+
 
 		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 16 +19);
 		break;
@@ -16698,8 +18880,11 @@ void CGame::SendNotifyMsg(int iFromH, int iToH, WORD wMsgType, DWORD sV1, DWORD 
 		dwp  = (DWORD *)cp;
 		*dwp = (DWORD)m_pClientList[iToH]->m_iHP;
 		cp += 4;
+		dwp  = (DWORD *)cp;
+		*dwp = (DWORD)m_pClientList[iToH]->m_iMP; // v2.04 0926 HP의 뒤에 MP를 같이 알려준다. 마나변환의 특성치 때문 
+		cp += 4;
 
-		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 10);
+		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 14);
 		break;
 
 	case DEF_NOTIFY_MP:
@@ -16828,6 +19013,15 @@ void CGame::SendNotifyMsg(int iFromH, int iToH, WORD wMsgType, DWORD sV1, DWORD 
 	case DEF_NOTIFY_CANNOTBANGUILDMAN:
 		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 6);
 		break;
+
+	// v2.17 2002-7-15 강콜 시간을 보여준다.
+	case DEF_NOTIFY_FORCERECALLTIME:
+		sp = (short *)cp ;
+		*sp = (short )sV1;
+		cp += 2;
+
+		iRet = m_pClientList[iToH]->m_pXSock->iSendMsg(cData, 8);
+		break;
 	}
 
 	switch (iRet) {
@@ -16856,7 +19050,7 @@ void CGame::JoinGuildApproveHandler(int iClientH, char * pName)
 	for (i = 1; i < DEF_MAXCLIENTS; i++) 
 	if ((m_pClientList[i] != NULL) && (memcmp(m_pClientList[i]->m_cCharName, pName, 10) == 0)) {
 		// v1.4 소속 마을이 달라도 무시된다.
-		if (memcmp(m_pClientList[i]->m_cLocation, m_pClientList[iClientH]->m_cLocation, 10) != 0) return;
+		if (m_pClientList[i]->m_cSide != m_pClientList[iClientH]->m_cSide ) return;
 		
 		// 길드의 이름을 복사하고 수치를 초기화해 준다.
 		ZeroMemory(m_pClientList[i]->m_cGuildName, sizeof(m_pClientList[i]->m_cGuildName));
@@ -16874,8 +19068,15 @@ void CGame::JoinGuildApproveHandler(int iClientH, char * pName)
 		// 가입 신청자에게 가입이 성공했음을 알리는 메시지를 보내준다.
 		SendNotifyMsg(iClientH, i, DEF_COMMONTYPE_JOINGUILDAPPROVE, NULL, NULL, NULL, NULL);
 
+#ifdef DEF_TAIWANLOG
+		_bItemLog(DEF_ITEMLOG_JOINGUILD,i,(char *)NULL,NULL) ;
+#endif
+
 		// 특성이 바뀌므로 외양을 새로 보낸다. 
 		SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTNULLACTION, NULL, NULL, NULL);
+
+		SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_CLEARGUILDNAME, m_pClientList[i]->m_cMapIndex,m_pClientList[i]->m_sX, m_pClientList[i]->m_sY,0, 0, 0);
+
 		
 		// 다른 길드원들에게 새 길드원이 있음을 알린다.
 		SendGuildMsg(i, DEF_NOTIFY_NEWGUILDSMAN, NULL, NULL, NULL);
@@ -16926,8 +19127,13 @@ void CGame::DismissGuildApproveHandler(int iClientH, char * pName)
 		// 길드 정보 화일에서 탈퇴한 길드원의 이름을 삭제한다.
 		bSendMsgToLS(MSGID_REQUEST_UPDATEGUILDINFO_DELGUILDSMAN, i);
 		
+#ifdef DEF_TAIWANLOG
+		_bItemLog(DEF_ITEMLOG_BANGUILD,i,(char *)NULL,NULL) ;
+#endif
+
 		// 다른 길드원들에게 길드원의 탈퇴를 알린다.
 		SendGuildMsg(i, DEF_NOTIFY_DISMISSGUILDSMAN, NULL, NULL, NULL);
+				
 	
 		// 길드의 이름을 초기화해 준다.
 		ZeroMemory(m_pClientList[i]->m_cGuildName, sizeof(m_pClientList[i]->m_cGuildName));
@@ -16940,6 +19146,7 @@ void CGame::DismissGuildApproveHandler(int iClientH, char * pName)
 		
 		// 특성이 바뀌므로 외양을 새로 보낸다. 
 		SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTNULLACTION, NULL, NULL, NULL);
+		SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_CLEARGUILDNAME, m_pClientList[i]->m_cMapIndex,m_pClientList[i]->m_sX, m_pClientList[i]->m_sY,0, 0, 0);
 		return;
 	}
 
@@ -17054,6 +19261,14 @@ void CGame::ClientKilledHandler(int iClientH, int iAttackerH, char cAttackerType
 	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE) return;
  	if (m_pClientList[iClientH]->m_bIsKilled == TRUE) return;
 
+	// 사투장인 경우 시간을 입력한다.
+	// 2002-7-4 사투장의 갯수를 늘릴 수 있도록 
+	if (memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, "fight", 5) == 0) {
+		m_pClientList[iClientH]->m_dwFightzoneDeadTime = timeGetTime();
+		wsprintf(G_cTxt, "Fightzone Dead Time: %d", m_pClientList[iClientH]->m_dwFightzoneDeadTime);
+		PutLogList(G_cTxt);
+	}
+
 	m_pClientList[iClientH]->m_bIsKilled = TRUE;
 	// HP는 0이다.
 	m_pClientList[iClientH]->m_iHP = 0;
@@ -17077,8 +19292,12 @@ void CGame::ClientKilledHandler(int iClientH, int iAttackerH, char cAttackerType
 		break;
 	case DEF_OWNERTYPE_NPC:
 		if (m_pNpcList[iAttackerH] != NULL)
+#ifdef DEF_LOCALNPCNAME     // v2.14 NPC 이름 중문화를 위한 선언 
+			wsprintf(cAttackerName,"NPCNPCNPC@%d",m_pNpcList[iAttackerH]->m_sType);
+#else 
 			memcpy(cAttackerName, m_pNpcList[iAttackerH]->m_cNpcName, 20);
-		break;
+#endif
+		break ;
 	default:
 		break;
 	}
@@ -17114,27 +19333,28 @@ void CGame::ClientKilledHandler(int iClientH, int iAttackerH, char cAttackerType
 		
 		if (iAttackerH == iClientH) return; // 자폭이다.
 		// 플레이어가 플레이어를 죽였다면 PK인지 전투중 승리인지를 판별하여 경험치를 올린다. 
-		if (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) {
+		if (m_pClientList[iClientH]->m_cSide == DEF_NETURAL) {
 			// 희생자가 여행자이다. 
 			if (m_pClientList[iClientH]->m_iPKCount == 0) {
+
 				// 무고한 여행자였다. 공격자는 PK 불이익을 받는다.
-				ApplyPKpenalty(iAttackerH, m_pClientList[iClientH]->m_iLevel);
+				ApplyPKpenalty(iAttackerH, iClientH);
 			}
 			else {
-				// 범죄를 저지른 여행자였다. 공격자는 PK를 잡은것에 대한 포상을 받는다. 
+						// 범죄를 저지른 여행자였다. 공격자는 PK를 잡은것에 대한 포상을 받는다. 
 				PK_KillRewardHandler(iAttackerH, iClientH);
 			}
 		} 
 		else {
-			// 희생자가 여행자가 아니라 한 마을 소속이다. 
+			// 희생자가 길드원이 아닌 경우 
 			if (m_pClientList[iClientH]->m_iGuildRank == -1) {
 				// 희생자는 시민이다.
 				// 공격자가 여행자, 같은 마을 시민, 같은 마을 길드원 -> PK가 됨. 다른 마을 시민, 길드원 -> 정당한 공격
-				if (memcmp(m_pClientList[iAttackerH]->m_cLocation, "NONE", 4) == 0) {
+				if (m_pClientList[iAttackerH]->m_cSide == DEF_NETURAL) {
 					// 공격자가 여행자이다. 				
 					if (m_pClientList[iClientH]->m_iPKCount == 0) {
 						// 무고한 시민을 여행자가 죽였다. 여행자는 PK가 된다.
-						ApplyPKpenalty(iAttackerH, m_pClientList[iClientH]->m_iLevel);
+						ApplyPKpenalty(iAttackerH, iClientH);
 					}
 					else {
 						// 여행자는 PK를 잡아도 보상을 받지 못한다.
@@ -17143,11 +19363,11 @@ void CGame::ClientKilledHandler(int iClientH, int iAttackerH, char cAttackerType
 				}
 				else {
 					// 공격자가 시민, 혹은 길드원 -> 마을이 같으면 PK, 다른 마을이라면 정당한 공격 
-					if (memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iAttackerH]->m_cLocation, 10) == 0) {
+					if (m_pClientList[iClientH]->m_cSide == m_pClientList[iAttackerH]->m_cSide) {
 						// 같은 마을 시민을 같은마을 시민 혹은 길드원이 공격한 것이다.  
 						if (m_pClientList[iClientH]->m_iPKCount == 0) {
 							// 희생자가 무고한 상태. PK이다.
-							ApplyPKpenalty(iAttackerH, m_pClientList[iClientH]->m_iLevel);
+							ApplyPKpenalty(iAttackerH, iClientH);
 						}
 						else {
 							// 범죄자를 잡았다. 
@@ -17163,11 +19383,11 @@ void CGame::ClientKilledHandler(int iClientH, int iAttackerH, char cAttackerType
 			else {
 				// 희생자는 길드원이다. 
 				// 공격한 자가 여행자, 시민, 전쟁상태가 아닌 길드원-> PK / 전생상태중인 길드원 -> 정당한 전투행위
-				if (memcmp(m_pClientList[iAttackerH]->m_cLocation, "NONE", 4) == 0) {
+				if (m_pClientList[iAttackerH]->m_cSide == DEF_NETURAL) {
 					// 공격자가 여행자이다.
 					if (m_pClientList[iClientH]->m_iPKCount == 0) {
 						// 무고한 길드원을 여행자가 죽였다. 여행자는 PK가 된다.
-						ApplyPKpenalty(iAttackerH, m_pClientList[iClientH]->m_iLevel);
+						ApplyPKpenalty(iAttackerH, iClientH);
 					}
 					else {
 						// 여행자는 PK를 잡아도 보상을 받지 못한다.
@@ -17176,11 +19396,11 @@ void CGame::ClientKilledHandler(int iClientH, int iAttackerH, char cAttackerType
 				}
 				else {
 					// 공격자는 시민 혹은 길드원 -> 마을이 같으면 PK, 다른 마을이라면 정당한 공격 
-					if (memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iAttackerH]->m_cLocation, 10) == 0) {
+					if (m_pClientList[iClientH]->m_cSide == m_pClientList[iAttackerH]->m_cSide) {
 						// 같은 마을 길드원을 같은마을 시민 혹은 길드원이 공격한 것이다.  
 						if (m_pClientList[iClientH]->m_iPKCount == 0) {
 							// 희생자가 무고한 상태. PK이다.
-							ApplyPKpenalty(iAttackerH, m_pClientList[iClientH]->m_iLevel);
+							ApplyPKpenalty(iAttackerH, iClientH);
 						}
 						else {
 							// 범죄자를 잡았다. 
@@ -17198,7 +19418,7 @@ void CGame::ClientKilledHandler(int iClientH, int iAttackerH, char cAttackerType
 		// 희생당한 플레이어의 등급에 맞는 페널티를 취한다. 
 		if (m_pClientList[iClientH]->m_iPKCount == 0) {
 			// Innocent
-			if (memcmp(m_pClientList[iAttackerH]->m_cLocation, "NONE", 4) == 0) {
+			if (m_pClientList[iAttackerH]->m_cSide == DEF_NETURAL) {
 				//여행자에게 공격받아 죽었다. 
 				//PK당했으므로 경험치가 줄지 않는다.
 				//m_pClientList[iClientH]->m_iExp -= iDice(1, 100);
@@ -17206,7 +19426,7 @@ void CGame::ClientKilledHandler(int iClientH, int iAttackerH, char cAttackerType
 				//SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_EXP, NULL, NULL, NULL, NULL);
 			}
 			else {
-				if (memcmp(m_pClientList[iAttackerH]->m_cLocation, m_pClientList[iClientH]->m_cLocation, 10) == 0) {
+				if (m_pClientList[iClientH]->m_cSide == m_pClientList[iAttackerH]->m_cSide) {
 					//같은 마을 시민 혹은 길드원에게 죽었다. 
 					//PK당했으므로 경험지가 줄지 않는다. 
 					//m_pClientList[iClientH]->m_iExp -= iDice(1, 100);
@@ -17221,34 +19441,37 @@ void CGame::ClientKilledHandler(int iClientH, int iAttackerH, char cAttackerType
 		}
 		else if ((m_pClientList[iClientH]->m_iPKCount >= 1) && (m_pClientList[iClientH]->m_iPKCount <= 3)) {
 			// Criminal 
-			ApplyCombatKilledPenalty(iClientH, 3, bIsSAattacked);
+			ApplyCombatKilledPenalty(iClientH, 3, bIsSAattacked,TRUE);
 		}
 		else if ((m_pClientList[iClientH]->m_iPKCount >= 4) && (m_pClientList[iClientH]->m_iPKCount <= 11)) {
 			// Murderer 
-			ApplyCombatKilledPenalty(iClientH, 6, bIsSAattacked);
+			ApplyCombatKilledPenalty(iClientH, 6, bIsSAattacked,TRUE);
 		}
 		else if ((m_pClientList[iClientH]->m_iPKCount >= 12)) {
 			// Slaughterer 
-			ApplyCombatKilledPenalty(iClientH, 12, bIsSAattacked);
+			ApplyCombatKilledPenalty(iClientH, 12, bIsSAattacked,TRUE);
 		}
 	}
 	else if (cAttackerType == DEF_OWNERTYPE_NPC) {
+
+		_bPKLog(DEF_PKLOG_BYNPC,(int) -1,iClientH,cAttackerName) ;
+
 		// 플레이어가 몹에게 죽었다. 희생당한 플레이어의 등급에 맞는 페널티를 취한다.
 		if (m_pClientList[iClientH]->m_iPKCount == 0) {
 			// Innocent
-			ApplyCombatKilledPenalty(iClientH, 1, bIsSAattacked);
+			ApplyCombatKilledPenalty(iClientH, 1, bIsSAattacked,TRUE);  //v2.19 2002-12-14 몬스터에게 죽었을때아이템(소환몹 제외)
 		}
 		else if ((m_pClientList[iClientH]->m_iPKCount >= 1) && (m_pClientList[iClientH]->m_iPKCount <= 3)) {
 			// Criminal 
-			ApplyCombatKilledPenalty(iClientH, 3, bIsSAattacked);
+			ApplyCombatKilledPenalty(iClientH, 3, bIsSAattacked , TRUE);
 		}
 		else if ((m_pClientList[iClientH]->m_iPKCount >= 4) && (m_pClientList[iClientH]->m_iPKCount <= 11)) {
 			// Murderer 
-			ApplyCombatKilledPenalty(iClientH, 6, bIsSAattacked);
+			ApplyCombatKilledPenalty(iClientH, 6, bIsSAattacked , TRUE);
 		}
 		else if ((m_pClientList[iClientH]->m_iPKCount >= 12)) {
 			// Slaughterer 
-			ApplyCombatKilledPenalty(iClientH, 12, bIsSAattacked);
+			ApplyCombatKilledPenalty(iClientH, 12, bIsSAattacked , TRUE);
 		}
 		// 만약 공격한 NPC가 전쟁용 유니트라면 지휘관에게 건설 포인트 부가
 		if (m_pNpcList[iAttackerH]->m_iGuildGUID != NULL) {
@@ -17288,11 +19511,12 @@ void CGame::ClientKilledHandler(int iClientH, int iAttackerH, char cAttackerType
 		}
 	}
 	else if (cAttackerType == DEF_OWNERTYPE_PLAYER_INDIRECT) {
+		_bPKLog(DEF_PKLOG_BYOTHER,(int) -1,iClientH,NULL) ;
 		// 플레이어가 죽었지만 공격자가 간접적이다. 아무런 영향이 없다.
-		//m_pClientList[iClientH]->m_iExp -= iDice(1, 50);
-		//if (m_pClientList[iClientH]->m_iExp < 0) m_pClientList[iClientH]->m_iExp = 0;
+		// m_pClientList[iClientH]->m_iExp -= iDice(1, 50);
+		// if (m_pClientList[iClientH]->m_iExp < 0) m_pClientList[iClientH]->m_iExp = 0;
 
-		//SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_EXP, NULL, NULL, NULL, NULL);
+		// SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_EXP, NULL, NULL, NULL, NULL);
 	}
 }
 
@@ -17413,6 +19637,16 @@ void CGame::ReleaseItemHandler(int iClientH, short sItemIndex, BOOL bNotice)
 
 		iTemp = m_pClientList[iClientH]->m_iApprColor; // v1.4 컬러값 세팅 
 		iTemp = iTemp & 0xFFFFFFF0; // 색 비트를 클리어.
+		m_pClientList[iClientH]->m_iApprColor = iTemp;
+		break;
+	case DEF_EQUIPPOS_FULLBODY: //v2.19 2002-12-7 산타복 관련 	헤드 바디 암 신발 팬츠 망토	
+		sTemp = m_pClientList[iClientH]->m_sAppr3;
+		sTemp = sTemp & 0x0FFF;	// 겉옷 특성치 비트를 클리어.
+//		sTemp = sTemp | ((m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_cApprValue) << 12); // Appr 값을 세팅. 
+		m_pClientList[iClientH]->m_sAppr3 = sTemp;
+
+		iTemp = m_pClientList[iClientH]->m_iApprColor; // v1.4 컬러값 세팅 
+		iTemp = iTemp & 0xFFF0FFFF; // 색 비트를 클리어.
 		m_pClientList[iClientH]->m_iApprColor = iTemp;
 		break;
  	}
@@ -17854,11 +20088,16 @@ BOOL CGame::_bInitNpcAttr(class CNpc * pNpc, char * pNpcName, short sClass, char
 			case 45:
 			case 46:
 			case 47: // 전쟁용 유닛의 경우 무조건 공격만 하는 전략을 구사.
+			case 51:
 				pNpc->m_iAttackStrategy = DEF_ATTACKAI_NORMAL;
 				break;
 
+			case 53: // 비홀더의 경우 무조건 투명 탐지 기능이 있다.
+				cSA = 1;
+				break;
+
 			default: 
-				pNpc->m_iAttackStrategy = iDice(1,10); 
+				pNpc->m_iAttackStrategy = iDice(1,10);
 				break;
 			}
 	
@@ -17868,6 +20107,7 @@ BOOL CGame::_bInitNpcAttr(class CNpc * pNpc, char * pNpcName, short sClass, char
 			pNpc->m_iAttackRange       = m_pNpcConfigList[i]->m_iAttackRange;
 			pNpc->m_cSpecialAbility    = cSA;
 			pNpc->m_iBuildCount		   = m_pNpcConfigList[i]->m_iMinBravery;
+			pNpc->m_cAttribute		   = m_pNpcConfigList[i]->m_cAttribute;
 
 			// v1.411 NPC의 특수 효과 계산. 경험치 가중 
 			switch (pNpc->m_cSpecialAbility) {
@@ -17983,52 +20223,32 @@ int CGame::iDice(int iThrow, int iRange)
 void CGame::OnStartGameSignal()
 {
  int i;
- char * cp;
- HANDLE hFile;
- FILE * pFile;
- DWORD  dwFileSize;
 	
 	// 맵 이벤트 화일을 읽어 각각의 맵에 할당된 NPC들을 세팅한다.
 	for (i = 0; i < DEF_MAXMAPS; i++)
 	if (m_pMapList[i] != NULL) 
 		_bReadMapInfoFiles(i);
 	
-	// Crusade
-	
-	// 점령 깃발 정보 읽는다.
-	hFile = CreateFile("GameData\\OccupyFlag.txt", GENERIC_READ, NULL, NULL, OPEN_EXISTING, NULL, NULL);
-	dwFileSize = GetFileSize(hFile, NULL);
-	if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
-
-	pFile = fopen("GameData\\OccupyFlag.txt", "rt");
-	if (pFile == NULL) {
-		// 점령 깃발 정보를 읽을 수 없다.
-		PutLogList("(!) Cannot open file: GameData\\OccupyFlag.txt");
-	}
-	else {
-		PutLogList("(!) Occupy Flag save file contents decoding...");
-	
-		cp = new char[dwFileSize+2];
-		ZeroMemory(cp, dwFileSize+2);
-		fread(cp, dwFileSize, 1, pFile);
-		_bDecodeOccupyFlagSaveFileContents(cp, dwFileSize);
-		delete cp;
-	}
-
 	// 초기 설치 건물 정보 읽는다.
 	bReadCrusadeStructureConfigFile("Crusade.cfg");
 	// 폭격 포인트 정보를 바탕으로 맵 인덱스를 링크시킨다.
 	_LinkStrikePointMapIndex();
 
 	bReadCrusadeGUIDFile("GameData\\CrusadeGUID.txt");
+
+	bReadCrusadeScheduleConfigFile("WarSchedule.cfg");
 	
 	PutLogList("");
 	PutLogList("(!) Game Server Activated.");
+
+	m_pGold = new class CItem;
+	_bInitItemAttr(m_pGold, "Gold");
+
 }
 
 void CGame::CalculateGuildEffect(int iVictimH, char cVictimType, short sAttackerH)
 {
- register int ix, iy, iExp;
+ int ix, iy, iExp;
  short sOwnerH;
  char cOwnerType;
 
@@ -18054,7 +20274,8 @@ void CGame::CalculateGuildEffect(int iVictimH, char cVictimType, short sAttacker
 				 // 1D3의 값이 2일때 몬스터 경험치의 3분의 1을 얻는다. 
 				if (iDice(1,3) == 2) {
 					iExp = (m_pNpcList[iVictimH]->m_iExp / 3);
-					if (m_pClientList[sAttackerH]->m_iLevel >= m_iPlayerMaxLevel) iExp = 0;
+	//   v2.181 2002-10-24 지존인 경우 경험치 적게 먹는 버그 수정 
+	//				if (m_pClientList[sAttackerH]->m_iLevel >= m_iPlayerMaxLevel) iExp = 0;
 
 					if (iExp > 0) {
 						
@@ -18099,6 +20320,9 @@ void CGame::TimeHitPointsUp(int iClientH)
 
 		iTotal = iTemp + m_pClientList[iClientH]->m_iHPstock;
 
+		// v2.20 2002-12-28 3주년 기념반지 버그 수정 
+		iTotal +=  m_pClientList[iClientH]->m_iHPStatic_stock;
+		
 		if (m_pClientList[iClientH]->m_iAddHP != 0) {
 			dV2 = (double)iTotal;
 			dV3 = (double)m_pClientList[iClientH]->m_iAddHP;
@@ -18168,6 +20392,15 @@ void CGame::TimeStaminarPointsUp(int iClientH)
 			dV3 = (double)m_pClientList[iClientH]->m_iAddSP;
 			dV1 = (dV3 / 100.0f)*dV2;
 			iTotal += (int)dV1;
+		}
+
+		// v2.03 레벨 60 이하는 정기적으로 스테미나가 많이 찬다.
+		if (m_pClientList[iClientH]->m_iLevel <= 20) {
+			iTotal += 15;
+		} else if ( m_pClientList[iClientH]->m_iLevel <= 40) {
+			iTotal += 10;
+		}  else if ( m_pClientList[iClientH]->m_iLevel <= 60) { 
+			iTotal += 5;
 		}
 
 		m_pClientList[iClientH]->m_iSP += iTotal;
@@ -18293,7 +20526,10 @@ void CGame::ToggleCombatModeHandler(int iClientH)
 	if (m_pClientList[iClientH]->m_bSkillUsingStatus[19] == TRUE) return;
 
 	sAppr2 = (short)((m_pClientList[iClientH]->m_sAppr2 & 0xF000) >> 12);
+
+	m_pClientList[iClientH]->m_bIsAttackModeChange = TRUE; // v2.172
 	
+
 	if (sAppr2 == 0) {
 		// 비전투 모드였다. 전투모드로 바꾼다.
 		m_pClientList[iClientH]->m_sAppr2 = (0xF000 | m_pClientList[iClientH]->m_sAppr2);
@@ -18305,6 +20541,7 @@ void CGame::ToggleCombatModeHandler(int iClientH)
 
 	// 캐릭터의 외형이 바뀌었으므로 이벤트를 전달한다.
 	SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTNULLACTION, NULL, NULL, NULL);
+	
 }
 
 void CGame::OnGateSocketEvent(UINT message, WPARAM wParam, LPARAM lParam)
@@ -18347,14 +20584,17 @@ void CGame::OnGateSocketEvent(UINT message, WPARAM wParam, LPARAM lParam)
 		m_bIsGateSockAvailable = FALSE;
 
 		// v1.41 Gate Server로의 재연결 시도 
-		m_pGateSock = new class XSocket(m_hWnd, DEF_SERVERSOCKETBLOCKLIMIT);
-		m_pGateSock->bConnect(m_cGateServerAddr, m_iGateServerPort, WM_ONGATESOCKETEVENT);
-		m_pGateSock->bInitBufferSize(DEF_MSGBUFFERSIZE);
-		// v1.41 연결 시간 체크용 
-		m_iGateSockConnRetryTimes = 1;
+		// v2.17 2002-8-5 메모리 누수 추적중 
+		if (m_bOnExitProcess == FALSE) {
+			m_pGateSock = new class XSocket(m_hWnd, DEF_SERVERSOCKETBLOCKLIMIT);
+			m_pGateSock->bConnect(m_cGateServerAddr, m_iGateServerPort, WM_ONGATESOCKETEVENT);
+			m_pGateSock->bInitBufferSize(DEF_MSGBUFFERSIZE);
+			// v1.41 연결 시간 체크용 
+			m_iGateSockConnRetryTimes = 1;
 
-		wsprintf(G_cTxt, "(!!!) Try to reconnect gate-socket... Addr:%s  Port:%d", m_cGateServerAddr, m_iGateServerPort);
-		PutLogList(G_cTxt);
+			wsprintf(G_cTxt, "(!!!) Try to reconnect gate-socket... Addr:%s  Port:%d", m_cGateServerAddr, m_iGateServerPort);
+			PutLogList(G_cTxt);
+		}
 
 		/*
 		// 게이트 서버와의 연결이 끊겼으므로 복구할 수 없다. 자동으로 서버를 셧다운한다.
@@ -18387,7 +20627,7 @@ void CGame::SendMsgToGateServer(DWORD dwMsg, int iClientH, char * pData)
 {
  DWORD * dwp;
  WORD  * wp;
- int     iRet, i, * ip;
+ int     iRet, i;
  char    cData[1000], cCharName[11], cAccountName[11], cAccountPassword[11], cAddress[16], cGuildName[21], cTxt[120], * cp;
 
 	if (m_pGateSock == NULL) {
@@ -18403,6 +20643,10 @@ void CGame::SendMsgToGateServer(DWORD dwMsg, int iClientH, char * pData)
 	ZeroMemory(cGuildName, sizeof(cGuildName));
 
 	switch (dwMsg) {
+	case MSGID_PARTYOPERATION: // v2.06 12-03 게이트 서버로의 파티 관련 연산 요청
+		iRet = m_pGateSock->iSendMsg(pData, 50);
+		break;
+	
 	case MSGID_SERVERSTOCKMSG:
 		iRet = m_pGateSock->iSendMsg(pData, m_iIndexGSS+1);
 		break;
@@ -18456,9 +20700,15 @@ void CGame::SendMsgToGateServer(DWORD dwMsg, int iClientH, char * pData)
 
 		dwp = (DWORD *)cp;
 		*dwp = (DWORD)GetCurrentProcessId();	 // 프로세스 핸들을 기록한다.
-		dwp += 4;
+		cp += 4;
 
-		iRet = m_pGateSock->iSendMsg(cData, 39 + m_iTotalMaps*11);
+		// v2.17 2002-6-3 고광현 수정
+		// Build Date를 삽입
+		dwp  = (DWORD *)cp;
+		*dwp = (DWORD)DEF_BUILDDATE;
+		cp += 4;
+
+		iRet = m_pGateSock->iSendMsg(cData, 39 + m_iTotalMaps*11 + 4);
 		break;
 
 	case MSGID_GAMESERVERALIVE:
@@ -18492,14 +20742,19 @@ void CGame::SendMsgToGateServer(DWORD dwMsg, int iClientH, char * pData)
 		m_bIsGateSockAvailable = FALSE;
 
 		// v1.41 Gate Server로의 재연결 시도: 서버를 셧다운 하는 것이 아니다. 
-		m_pGateSock = new class XSocket(m_hWnd, DEF_SERVERSOCKETBLOCKLIMIT);
-		m_pGateSock->bConnect(m_cGateServerAddr, m_iGateServerPort, WM_ONGATESOCKETEVENT);
-		m_pGateSock->bInitBufferSize(DEF_MSGBUFFERSIZE);
-		// v1.41 연결 시간 체크용 
-		m_iGateSockConnRetryTimes = 1;	
+		// 2002-8-5 메모리 누수 추적중 
+		// v2.17 2002-8-5 메모리 누수 추적중 
+		if (m_bOnExitProcess == FALSE) {
 
-		wsprintf(G_cTxt, "(!) Try to reconnect gate-socket... Addr:%s  Port:%d", m_cGateServerAddr, m_iGateServerPort);
-		PutLogList(G_cTxt);
+			m_pGateSock = new class XSocket(m_hWnd, DEF_SERVERSOCKETBLOCKLIMIT);
+			m_pGateSock->bConnect(m_cGateServerAddr, m_iGateServerPort, WM_ONGATESOCKETEVENT);
+			m_pGateSock->bInitBufferSize(DEF_MSGBUFFERSIZE);
+			// v1.41 연결 시간 체크용 
+			m_iGateSockConnRetryTimes = 1;	
+
+			wsprintf(G_cTxt, "(!) Try to reconnect gate-socket... Addr:%s  Port:%d", m_cGateServerAddr, m_iGateServerPort);
+			PutLogList(G_cTxt);
+		}
 
 		/*
 		// 게이트 서버와의 연결이 끊겼으므로 복구할 수 없다. 자동으로 서버를 셧다운한다.
@@ -18518,7 +20773,7 @@ void CGame::SendMsgToGateServer(DWORD dwMsg, int iClientH, char * pData)
 int CGame::iClientMotion_Magic_Handler(int iClientH, short sX, short sY, char cDir)
 {
  char cData[100];
- DWORD * dwp, dwTime;
+ DWORD * dwp;
  WORD  * wp;
  int     iRet;
  	
@@ -18587,14 +20842,27 @@ int  _tmp_iMLevelPenalty[] = {0,   5,   5,   8,   8,  10, 14, 28, 32, 36, 40};
 void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL bItemEffect, int iV1)
 {
  short  * sp, sX, sY, sOwnerH, sMagicCircle, rx, ry, sRemainItemSprite, sRemainItemSpriteFrame, sLevelMagic;
- char   * cp, cData[120], cDir, cOwnerType, cName[11], cItemName[21], cNpcWaypoint[11], cName_Master[11], cNpcName[21], cRemainItemColor;
+ char   * cp, cData[120], cDir, cOwnerType, cName[11], cNpcWaypoint[11], cName_Master[11], cNpcName[21], cRemainItemColor;
  double dV1, dV2, dV3, dV4;
  int    i, iErr, iRet, ix, iy, iResult, iDiceRes, iNamingValue, iFollowersNum, iEraseReq, iWhetherBonus;
- int    tX, tY, iManaCost, iMagicAttr;
+ int    tX, tY, iManaCost, iMagicAttr, iItemID;
  class  CItem * pItem;
  DWORD * dwp, dwTime = timeGetTime();
  WORD  * wp, wWeaponType;
-  
+
+#ifdef DEF_GUILDWARMODE // 길드전 모드일때는 특정 마법은 사용할 수 없다.
+	switch (sType) {
+	case 31:
+	case 40:
+	case 41:
+	case 46:
+	case 54:
+	case 55:
+	case 73:
+		return;
+	}
+#endif
+
 	if (m_pClientList[iClientH] == NULL) return;
 	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE) return;
 
@@ -18607,15 +20875,18 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 	
 	if ((sType < 0) || (sType >= 100))     return;
 	if (m_pMagicConfigList[sType] == NULL) return;
+	// v2.12 배우지 않은 마법이라면 사용할 수 없다.
+	if ((bItemEffect == FALSE) && (m_pClientList[iClientH]->m_cMagicMastery[sType] != 1)) return;
 
 	// 마법 사용위치가 공격 불가능 맵이라면 캐스팅 불가능 
 	if (m_pMapList[ m_pClientList[iClientH]->m_cMapIndex ]->m_bIsAttackEnabled == FALSE) return;
 	
-	// 오른손의 경우 지팡이라면 상관없이 마법을 사용할 수 있다.	
+	// 오른손의 경우 지팡이라면 상관없이 마법을 사용할 수 있다.
 	if (m_pClientList[iClientH]->m_sItemEquipmentStatus[ DEF_EQUIPPOS_RHAND ] != -1) {
 		wWeaponType = ((m_pClientList[iClientH]->m_sAppr2 & 0x0FF0) >> 4);		
-		if ((wWeaponType >= 30) && (wWeaponType < 39)) {
+		if ((wWeaponType >= 35) && (wWeaponType < 39)) {
 			// 지팡류는 들고 있어도 마법을 사용할 수 있다.
+			// v2.16 2002-5-27 해머류로 추가로 내용 변경 
 		}
 		else return;
 	}
@@ -18627,6 +20898,7 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 	// v1.42 비정상적으로 연속된 마법 메시지는 무시한다.
 	if ((dwTime - m_pClientList[iClientH]->m_dwRecentAttackTime) < 100) return; 
 	m_pClientList[iClientH]->m_dwRecentAttackTime = dwTime;
+	m_pClientList[iClientH]->m_dwLastActionTime = dwTime;
 
 	sX = m_pClientList[iClientH]->m_sX;
 	sY = m_pClientList[iClientH]->m_sY;
@@ -18681,12 +20953,12 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 	}
 
 	// 특수 아이템에 의한 마법 성공률 조정
+	// v2.15 마법 성공률 관련 조정 
 	if (m_pClientList[iClientH]->m_iSpecialWeaponEffectType == 10) {
 		dV1 = (double)iResult;
 		dV2 = (double)(m_pClientList[iClientH]->m_iSpecialWeaponEffectValue * 3);
-		dV3 = dV1*(dV2/100.0f);
-		dV2 = dV1 + dV3;
-		iResult = (int)dV2;
+		dV3 = dV1 + dV2;
+		iResult = (int)dV3;
 	}
 		
 	// 수치 조정.
@@ -18759,6 +21031,10 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 			iResult += 5*abs(sMagicCircle - sLevelMagic);
 		}
 	}
+
+	// v2.05 m_iAddAR 추가됨
+	iResult += m_pClientList[iClientH]->m_iAddAR;
+
 	// 수치 조정.
 	if (iResult <= 0) iResult = 1;
 	// 만약 9써클 이상이면 마법 방어로 막을 수 없다.
@@ -18772,6 +21048,43 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 	
 	// v1.41 마법 속성
 	iMagicAttr = m_pMagicConfigList[sType]->m_iAttribute;
+
+	// v2.17 2002-8-6 투명 모드였다면 마법 Casting시에 해제된다. (인비마법 핵을 방지하기 위해)
+	if ( (m_pClientList[iClientH]->m_sStatus & 0x10) != 0 )	{
+		SetInvisibilityFlag(iClientH, DEF_OWNERTYPE_PLAYER, FALSE);
+		
+		bRemoveFromDelayEventList(iClientH, DEF_OWNERTYPE_PLAYER, DEF_MAGICTYPE_INVISIBILITY);
+		m_pClientList[ iClientH ]->m_cMagicEffectStatus[ DEF_MAGICTYPE_INVISIBILITY ] = NULL;
+	}
+
+	// 2002-11-14 사냥꾼 모드 추가 ( 사냥꾼은 다른 마을 사람과 몬스터에게 일반/보호 마법을 걸 수 없다. 전면전시 제외 )
+	m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, dX, dY);
+	
+	if ((m_bIsCrusadeMode == FALSE) && (cOwnerType == DEF_OWNERTYPE_PLAYER) )
+	{
+		// 사냥꾼에게는 편이 다르면 
+		if (((m_pClientList[iClientH]->m_bIsHunter == TRUE) ||
+			(m_pClientList[sOwnerH]->m_bIsHunter == TRUE)) && (m_pClientList[iClientH]->m_cSide != m_pClientList[sOwnerH]->m_cSide))
+		 goto MAGIC_NOEFFECT;
+
+		if ((m_pClientList[iClientH]->m_bIsHunter == TRUE) && (m_pClientList[sOwnerH]->m_bIsHunter == FALSE))
+		{
+			// v2.19 2002-11-25 일부 보조 마법은 민간인 모드는 다른 모드에게 할 수 없게 (SP다운,인비,디덱,소환,물방,마방,버서크,독)
+			switch (m_pMagicConfigList[sType]->m_sType) {
+			case DEF_MAGICTYPE_SPDOWN_AREA:
+			case DEF_MAGICTYPE_SUMMON:
+			case DEF_MAGICTYPE_PROTECT:
+			case DEF_MAGICTYPE_HOLDOBJECT:
+			case DEF_MAGICTYPE_INVISIBILITY: 
+			case DEF_MAGICTYPE_BERSERK:
+			case DEF_MAGICTYPE_POISON:
+			case DEF_MAGICTYPE_HPUP_SPOT:
+				 goto MAGIC_NOEFFECT;
+			}
+		}
+	}
+
+
 
 	if (m_pMagicConfigList[sType]->m_dwDelayTime == 0) {
 		// 즉시 효과를 보는 마법 
@@ -18828,6 +21141,25 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 			}
 			break;
 
+		case DEF_MAGICTYPE_DAMAGE_SPOT_SPDOWN:
+			m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, dX, dY);
+			if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+				Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue4, m_pMagicConfigList[sType]->m_sValue5, m_pMagicConfigList[sType]->m_sValue6 + iWhetherBonus, TRUE, iMagicAttr);
+				Effect_SpDown_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9);
+			}
+			
+			m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, dX, dY);
+			if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
+			 	 (m_pClientList[sOwnerH]->m_iHP > 0) ) {
+				// 죽은 척하고 있는 플레이어다.
+				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+					Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue4, m_pMagicConfigList[sType]->m_sValue5, m_pMagicConfigList[sType]->m_sValue6 + iWhetherBonus, TRUE, iMagicAttr);
+					Effect_SpDown_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9);
+				}
+			}
+			break;
+		
+
 		case DEF_MAGICTYPE_DAMAGE_LINEAR:
 			// 일직선 상에 있는 목표를 모두 공격한다.
 			sX = m_pClientList[iClientH]->m_sX;
@@ -18840,7 +21172,7 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 				// tx, ty
 				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, tX, tY);
 				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)
-					Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+					Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, sX, sY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
 			
 				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, tX, tY);
 				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
@@ -18853,7 +21185,7 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 				// tx-1, ty
 				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, tX-1, tY);
 				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)
-					Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+					Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, sX, sY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
 			
 				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, tX-1, tY);
 				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
@@ -18866,7 +21198,7 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 				// tx+1, ty
 				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, tX+1, tY);
 				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)
-					Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+					Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, sX, sY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
 			
 				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, tX+1, tY);
 				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
@@ -18879,7 +21211,7 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 				// tx, ty-1
 				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, tX, tY-1);
 				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)
-					Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+					Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, sX, sY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
 			
 				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, tX, tY-1);
 				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
@@ -18892,7 +21224,7 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 				// tx, ty+1
 				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, tX, tY+1);
 				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)
-					Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+					Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, sX, sY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
 			
 				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, tX, tY+1);
 				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
@@ -18911,14 +21243,14 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 				// 자신도 피폭될 수 있으니 주의.
 				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, ix, iy);
 				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)
-					Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+					Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, dX, dY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
 
 				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, ix, iy);
 				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
 			 	     (m_pClientList[sOwnerH]->m_iHP > 0) ) {
 					// 죽은 척하고 있는 플레이어다.
 					if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)
-						Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+						Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, dX, dY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
 				}
 			}
 
@@ -18935,7 +21267,578 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 					Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue4, m_pMagicConfigList[sType]->m_sValue5, m_pMagicConfigList[sType]->m_sValue6 + iWhetherBonus, TRUE, iMagicAttr); // v1.41 FALSE
 			}
 			break;
-		
+
+					// v2.16 2002-5-23 고광현 
+		case DEF_MAGICTYPE_ICE_LINEAR:
+			// 일직선 상에 있는 목표를 모두 얼리며 공격한다.
+			sX = m_pClientList[iClientH]->m_sX;
+			sY = m_pClientList[iClientH]->m_sY;
+
+			for (i = 2; i < 10; i++) {
+				iErr = 0;
+				m_Misc.GetPoint2(sX, sY, dX, dY, &tX, &tY, &iErr, i);
+			
+				// tx, ty
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, tX, tY);
+				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+					Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, sX, sY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+					// 얼어서 동작이 늦어지는 효과
+					switch (cOwnerType) {
+					case DEF_OWNERTYPE_PLAYER:
+						if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+						if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+							if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+									                sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+								// 대상이 플레이어인 경우 알려준다.
+								SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+							}
+						}
+						break;
+
+					case DEF_OWNERTYPE_NPC:
+						if (m_pNpcList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						if ((m_pNpcList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+							if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+								                    sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+							}
+						}
+						break;
+					}
+					//
+				}
+			
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, tX, tY);
+				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
+			 		 (m_pClientList[sOwnerH]->m_iHP > 0) ) {
+					// 죽은 척하고 있는 플레이어다.
+					if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+						Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+						// 얼어서 동작이 늦어지는 효과
+						switch (cOwnerType) {
+						case DEF_OWNERTYPE_PLAYER:
+							if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+							// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+							if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+								if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+									m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+									SetIceFlag(sOwnerH, cOwnerType, TRUE);
+									// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+									bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+										sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+									// 대상이 플레이어인 경우 알려준다.
+									SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+								}
+							}
+							break;
+							
+						case DEF_OWNERTYPE_NPC:
+							if (m_pNpcList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+							if ((m_pNpcList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+								if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+									m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+									SetIceFlag(sOwnerH, cOwnerType, TRUE);
+									// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+									bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+										sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+								}
+							}
+							break;
+						}
+						//
+					}
+				}
+
+				// tx-1, ty
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, tX-1, tY);
+				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+					Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, sX, sY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+					// 얼어서 동작이 늦어지는 효과
+					switch (cOwnerType) {
+					case DEF_OWNERTYPE_PLAYER:
+						if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+						if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+							if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+									sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+								// 대상이 플레이어인 경우 알려준다.
+								SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+							}
+						}
+						break;
+						
+					case DEF_OWNERTYPE_NPC:
+						if (m_pNpcList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						if ((m_pNpcList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+							if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+									sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+							}
+						}
+						break;
+					}
+					//
+				}
+			
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, tX-1, tY);
+				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
+			 		 (m_pClientList[sOwnerH]->m_iHP > 0) ) {
+					// 죽은 척하고 있는 플레이어다.
+					if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+						Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+						// 얼어서 동작이 늦어지는 효과
+						switch (cOwnerType) {
+						case DEF_OWNERTYPE_PLAYER:
+							if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+							// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+							if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+								if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+									m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+									SetIceFlag(sOwnerH, cOwnerType, TRUE);
+									// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+									bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+										sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+									// 대상이 플레이어인 경우 알려준다.
+									SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+								}
+							}
+							break;
+							
+						case DEF_OWNERTYPE_NPC:
+							if (m_pNpcList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+							if ((m_pNpcList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+								if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+									m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+									SetIceFlag(sOwnerH, cOwnerType, TRUE);
+									// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+									bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+										sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+								}
+							}
+							break;
+						}
+						//
+					}
+				}
+
+				// tx+1, ty
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, tX+1, tY);
+				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+					Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, sX, sY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+					// 얼어서 동작이 늦어지는 효과
+					switch (cOwnerType) {
+					case DEF_OWNERTYPE_PLAYER:
+						if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+						if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+							if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+									sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+								// 대상이 플레이어인 경우 알려준다.
+								SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+							}
+						}
+						break;
+						
+					case DEF_OWNERTYPE_NPC:
+						if (m_pNpcList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						if ((m_pNpcList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+							if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+									sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+							}
+						}
+						break;
+					}
+					//
+				}
+			
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, tX+1, tY);
+				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
+			 		 (m_pClientList[sOwnerH]->m_iHP > 0) ) {
+					// 죽은 척하고 있는 플레이어다.
+					if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+						Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+						// 얼어서 동작이 늦어지는 효과
+						switch (cOwnerType) {
+						case DEF_OWNERTYPE_PLAYER:
+							if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+							// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+							if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+								if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+									m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+									SetIceFlag(sOwnerH, cOwnerType, TRUE);
+									// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+									bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+										sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+									// 대상이 플레이어인 경우 알려준다.
+									SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+								}
+							}
+							break;
+							
+						case DEF_OWNERTYPE_NPC:
+							if (m_pNpcList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+							if ((m_pNpcList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+								if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+									m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+									SetIceFlag(sOwnerH, cOwnerType, TRUE);
+									// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+									bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+										sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+								}
+							}
+							break;
+						}
+						//
+					}
+				}
+
+				// tx, ty-1
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, tX, tY-1);
+				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+					Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, sX, sY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+					// 얼어서 동작이 늦어지는 효과
+					switch (cOwnerType) {
+					case DEF_OWNERTYPE_PLAYER:
+						if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+						if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+							if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+									sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+								// 대상이 플레이어인 경우 알려준다.
+								SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+							}
+						}
+						break;
+						
+					case DEF_OWNERTYPE_NPC:
+						if (m_pNpcList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						if ((m_pNpcList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+							if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+									sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+							}
+						}
+						break;
+					}
+					//
+				}
+			
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, tX, tY-1);
+				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
+			 		 (m_pClientList[sOwnerH]->m_iHP > 0) ) {
+					// 죽은 척하고 있는 플레이어다.
+					if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+						Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+						// 얼어서 동작이 늦어지는 효과
+						switch (cOwnerType) {
+						case DEF_OWNERTYPE_PLAYER:
+							if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+							// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+							if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+								if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+									m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+									SetIceFlag(sOwnerH, cOwnerType, TRUE);
+									// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+									bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+										sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+									// 대상이 플레이어인 경우 알려준다.
+									SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+								}
+							}
+							break;
+							
+						case DEF_OWNERTYPE_NPC:
+							if (m_pNpcList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+							if ((m_pNpcList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+								if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+									m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+									SetIceFlag(sOwnerH, cOwnerType, TRUE);
+									// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+									bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+										sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+								}
+							}
+							break;
+						}
+						//
+					}
+				}
+
+				// tx, ty+1
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, tX, tY+1);
+				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+					Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, sX, sY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+					// 얼어서 동작이 늦어지는 효과
+					switch (cOwnerType) {
+					case DEF_OWNERTYPE_PLAYER:
+						if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+						if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+							if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+									sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+								// 대상이 플레이어인 경우 알려준다.
+								SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+							}
+						}
+						break;
+						
+					case DEF_OWNERTYPE_NPC:
+						if (m_pNpcList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						if ((m_pNpcList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+							if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+									sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+							}
+						}
+						break;
+					}
+					//
+				}
+			
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, tX, tY+1);
+				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
+			 		 (m_pClientList[sOwnerH]->m_iHP > 0) ) {
+					// 죽은 척하고 있는 플레이어다.
+					if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+						Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+						// 얼어서 동작이 늦어지는 효과
+						switch (cOwnerType) {
+						case DEF_OWNERTYPE_PLAYER:
+							if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+							// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+							if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+								if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+									m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+									SetIceFlag(sOwnerH, cOwnerType, TRUE);
+									// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+									bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+										sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+									// 대상이 플레이어인 경우 알려준다.
+									SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+								}
+							}
+							break;
+							
+						case DEF_OWNERTYPE_NPC:
+							if (m_pNpcList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+							if ((m_pNpcList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+								if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+									m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+									SetIceFlag(sOwnerH, cOwnerType, TRUE);
+									// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+									bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+										sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+								}
+							}
+							break;
+						}
+						//
+					}
+				}
+
+				if ( (abs(tX - dX) <= 1) && (abs(tY - dY) <= 1)) break;
+			}
+
+			// 주변 공격 효과 
+			for (iy = dY - m_pMagicConfigList[sType]->m_sValue3; iy <= dY + m_pMagicConfigList[sType]->m_sValue3; iy++)
+			for (ix = dX - m_pMagicConfigList[sType]->m_sValue2; ix <= dX + m_pMagicConfigList[sType]->m_sValue2; ix++) {
+				// 자신도 피폭될 수 있으니 주의.
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, ix, iy);
+				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+					Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, dX, dY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+					// 얼어서 동작이 늦어지는 효과
+					switch (cOwnerType) {
+					case DEF_OWNERTYPE_PLAYER:
+						if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+						if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+							if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+									sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+								// 대상이 플레이어인 경우 알려준다.
+								SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+							}
+						}
+						break;
+						
+					case DEF_OWNERTYPE_NPC:
+						if (m_pNpcList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						if ((m_pNpcList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+							if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+									sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+							}
+						}
+						break;
+					}
+					//
+				}
+
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, ix, iy);
+				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
+			 	     (m_pClientList[sOwnerH]->m_iHP > 0) ) {
+					// 죽은 척하고 있는 플레이어다.
+					if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+						Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, dX, dY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+						// 얼어서 동작이 늦어지는 효과
+						switch (cOwnerType) {
+						case DEF_OWNERTYPE_PLAYER:
+							if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+							// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+							if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+								if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+									m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+									SetIceFlag(sOwnerH, cOwnerType, TRUE);
+									// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+									bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+										sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+									// 대상이 플레이어인 경우 알려준다.
+									SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+								}
+							}
+							break;
+							
+						case DEF_OWNERTYPE_NPC:
+							if (m_pNpcList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+							if ((m_pNpcList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+								if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+									m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+									SetIceFlag(sOwnerH, cOwnerType, TRUE);
+									// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+									bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+										sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+								}
+							}
+							break;
+						}
+						//
+					}
+				}
+			}
+
+			// dX, dY
+			m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, dX, dY);
+			if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+				Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue4, m_pMagicConfigList[sType]->m_sValue5, m_pMagicConfigList[sType]->m_sValue6 + iWhetherBonus, TRUE, iMagicAttr); // v1.41 FALSE
+				// 얼어서 동작이 늦어지는 효과
+				switch (cOwnerType) {
+				case DEF_OWNERTYPE_PLAYER:
+					if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+					// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+					if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+						if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+							m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+							SetIceFlag(sOwnerH, cOwnerType, TRUE);
+							// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+							bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+								sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+							// 대상이 플레이어인 경우 알려준다.
+							SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+						}
+					}
+					break;
+					
+				case DEF_OWNERTYPE_NPC:
+					if (m_pNpcList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+					if ((m_pNpcList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+						if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+							m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+							SetIceFlag(sOwnerH, cOwnerType, TRUE);
+							// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+							bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+								sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+						}
+					}
+					break;
+				}
+				//
+			}
+			
+			m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, dX, dY);
+			if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
+				 (m_pClientList[sOwnerH]->m_iHP > 0) ) {
+				// 죽은 척하고 있는 플레이어다.
+				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+					Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue4, m_pMagicConfigList[sType]->m_sValue5, m_pMagicConfigList[sType]->m_sValue6 + iWhetherBonus, TRUE, iMagicAttr); // v1.41 FALSE
+					// 얼어서 동작이 늦어지는 효과
+					switch (cOwnerType) {
+					case DEF_OWNERTYPE_PLAYER:
+						if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+						if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+							if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+									sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+								// 대상이 플레이어인 경우 알려준다.
+								SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+							}
+						}
+						break;
+						
+					case DEF_OWNERTYPE_NPC:
+						if (m_pNpcList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						if ((m_pNpcList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+							if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+									sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+							}
+						}
+						break;
+					}
+					//
+				}
+			}
+			break;
+			
 		case DEF_MAGICTYPE_HPUP_SPOT:
 			// 이 마법은 명중률과는 상관이 없다.
 			m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, dX, dY);
@@ -19024,6 +21927,30 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 			}
 			break;
 
+		case DEF_MAGICTYPE_DAMAGE_AREA_NOSPOT_SPDOWN:
+			// 직격은 처리하지 않는다.
+			// 주변 공격 효과 
+			for (iy = dY - m_pMagicConfigList[sType]->m_sValue3; iy <= dY + m_pMagicConfigList[sType]->m_sValue3; iy++)
+			for (ix = dX - m_pMagicConfigList[sType]->m_sValue2; ix <= dX + m_pMagicConfigList[sType]->m_sValue2; ix++) {
+				// 자신도 피폭될 수 있으니 주의.
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, ix, iy);
+				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+					Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, dX, dY, m_pMagicConfigList[sType]->m_sValue4, m_pMagicConfigList[sType]->m_sValue5, m_pMagicConfigList[sType]->m_sValue6 + iWhetherBonus, FALSE, iMagicAttr);
+					Effect_SpDown_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9);
+				}
+
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, ix, iy);
+				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
+			 	     (m_pClientList[sOwnerH]->m_iHP > 0) ) {
+					// 죽은 척하고 있는 플레이어다.
+					if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+						Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, dX, dY, m_pMagicConfigList[sType]->m_sValue4, m_pMagicConfigList[sType]->m_sValue5, m_pMagicConfigList[sType]->m_sValue6 + iWhetherBonus, FALSE, iMagicAttr);
+						Effect_SpDown_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9);
+					}
+				}
+			}
+			break;
+
 		case DEF_MAGICTYPE_SPDOWN_AREA:
 			// Sp가 줄어든다.
 			m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, dX, dY);
@@ -19055,14 +21982,14 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 			break;
 
 		case DEF_MAGICTYPE_TELEPORT:
-			// 텔레포트 마법. sValue 4에 따라서 텔레포트 목적지가 결정된다. 
+			// 텔레포트 마법. sValue 4에 따라서 텔레포트 목적지가 결정된다.
 			m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, dX, dY);
 
 			switch (m_pMagicConfigList[sType]->m_sValue4) {
 			case 1:
-				// 자신이 소속된 마을로 텔레포트. Recall이다. 
+				// 자신이 소속된 마을로 텔레포트. Recall이다.
 				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (sOwnerH == iClientH) ) {
-					// 자신외에는 Recall할 수 없다. 
+					// 자신외에는 Recall할 수 없다.
 					RequestTeleportHandler(iClientH, "1   ");
 	 			}
 			   	break;
@@ -19077,11 +22004,12 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 
 			m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, dX, dY);
 			// 지정된 Owner가 Master가 된다. 
-			if ((sOwnerH != NULL) && (cOwnerType == DEF_OWNERTYPE_PLAYER)) {
+			// v2.19 2002-11-17 소환은 같은 편에게만 된다.
+			if ((sOwnerH != NULL) && (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[iClientH]->m_cSide == m_pClientList[sOwnerH]->m_cSide)) {
 				// Master로 지정된 대상을 따라다니고 있는 객체 수를 계산한다. 
 				iFollowersNum = iGetFollowerNumber(sOwnerH, cOwnerType);
 
-				// 소환마법을 Casting한 자의 Magery/20 만큼의 몬스터를 소환할 수 있다. 
+				// 소환마법을 Casting한 자의 Magery/20 만큼의 몬스터를 소환할 수 있다.
 				if (iFollowersNum >= (m_pClientList[iClientH]->m_cSkillMastery[4]/20)) break;
 				
 				iNamingValue = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->iGetEmptyNamingValue();
@@ -19133,7 +22061,7 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 					if (bCreateNewNpc(cNpcName, cName, m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, 0, 0, DEF_MOVETYPE_RANDOM, &dX, &dY, cNpcWaypoint, NULL, NULL, m_pClientList[iClientH]->m_cSide, FALSE, TRUE) == FALSE) {
 						// 실패했으므로 예약된 NameValue를 해제시킨다.
 						m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->SetNamingValueEmpty(iNamingValue);
-					} 
+					}
 					else {
 						ZeroMemory(cName_Master, sizeof(cName_Master));
 						switch (cOwnerType) {
@@ -19145,6 +22073,9 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 							break;
 						}
 						bSetNpcFollowMode(cName, cName_Master, cOwnerType);
+#ifdef DEF_TAIWANLOG
+						_bItemLog(DEF_ITEMLOG_SUMMONMONSTER,iClientH,cNpcName,NULL) ;
+#endif
 				   	}
 				}
 			}
@@ -19158,24 +22089,30 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 				goto MAGIC_NOEFFECT;
 
 			pItem = new class CItem;
-			ZeroMemory(cItemName, sizeof(cItemName));
 
 			switch (m_pMagicConfigList[sType]->m_sValue4) {
 			case 1:
 				// Food를 생성해야 한다. 
+				// v2.17 2002-7-31 아이템을 아이템 고유번호로 생성할 수 있게 한다.
 				if (iDice(1,2) == 1)
-					 wsprintf(cItemName, "고기");
-				else wsprintf(cItemName, "바께뜨");
+					 iItemID = 99 ;
+				else iItemID = 98 ;
 				break;
 			}
 		   		
-			_bInitItemAttr(pItem, cItemName);
-		   		
+			_bInitItemAttr(pItem, iItemID);
+		   	
+// v2.15 마법으로 생긴 아이템에 고유번호 저장 
+			pItem->m_sTouchEffectType   = DEF_ITET_ID;
+			pItem->m_sTouchEffectValue1 = iDice(1,100000);
+			pItem->m_sTouchEffectValue2 = iDice(1,100000);
+			pItem->m_sTouchEffectValue3 = timeGetTime();
+
 			// 아이템을 서있는 위치에 버린다. 
 			m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->bSetItem(dX, dY, pItem);
 
 			// v1.41 희귀 아이템을 떨어뜨린 것이라면 로그를 남긴다. 
-			_bItemLog(DEF_ITEMLOG_DROP, iClientH, NULL, pItem);
+			_bItemLog(DEF_ITEMLOG_DROP, iClientH, (int) -1, pItem);
 					
 			// 다른 클라이언트에게 아이템이 떨어진 것을 알린다. 
 			SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_ITEMDROP, m_pClientList[iClientH]->m_cMapIndex,
@@ -19192,7 +22129,8 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 				if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
 				if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_PROTECT ] != 0) goto MAGIC_NOEFFECT;
 				// v1.4334 중립은 플레이어에게 마방을 못하게 수정
-				if (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) goto MAGIC_NOEFFECT ;
+				if (m_pClientList[iClientH]->m_cSide == DEF_NETURAL) goto MAGIC_NOEFFECT;
+
 
 			   	m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_PROTECT ] = (char)m_pMagicConfigList[sType]->m_sValue4;
 				break;
@@ -19223,10 +22161,22 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 				switch (cOwnerType) {
 				case DEF_OWNERTYPE_PLAYER:
 					if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+
 					if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_HOLDOBJECT ] != 0) goto MAGIC_NOEFFECT;
 					if (m_pClientList[sOwnerH]->m_iAddPR >= 500) goto MAGIC_NOEFFECT;
 					// v1.4334 중립은 플레이어에게 패럴을 못하게 수정
-					if (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) goto MAGIC_NOEFFECT ;
+					if (m_pClientList[iClientH]->m_cSide == DEF_NETURAL) goto MAGIC_NOEFFECT;
+					// 2002-09-10 #2 안전지대(No-Attack-Area) 패럴 마법 안되게 함
+					if (  cOwnerType == DEF_OWNERTYPE_PLAYER )  {
+						
+						if (m_pMapList[m_pClientList[sOwnerH]->m_cMapIndex]->iGetAttribute(sX, sY, 0x00000006) != 0) goto MAGIC_NOEFFECT;
+						if (m_pMapList[m_pClientList[sOwnerH]->m_cMapIndex]->iGetAttribute(dX, dY, 0x00000006) != 0) goto MAGIC_NOEFFECT;
+					}
+
+					// 2002-09-10 #3 전면전시와 미들랜드에서를 제외하고 같은 편에게는 패럴 안됨
+					if( strcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, "middleland") != 0 &&
+						m_bIsCrusadeMode == FALSE && m_pClientList[iClientH]->m_cSide == m_pClientList[sOwnerH]->m_cSide )
+						goto MAGIC_NOEFFECT;
 
 					m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_HOLDOBJECT ] = (char)m_pMagicConfigList[sType]->m_sValue4;
 					break;
@@ -19260,7 +22210,7 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 					if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
 					if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_INVISIBILITY ] != 0) goto MAGIC_NOEFFECT;
 					// v1.4334 중립은 플레이어에게 인비를 못하게 수정
-					if (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) goto MAGIC_NOEFFECT ;
+					if (m_pClientList[iClientH]->m_cSide == DEF_NETURAL) goto MAGIC_NOEFFECT;
 
 					m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_INVISIBILITY ] = (char)m_pMagicConfigList[sType]->m_sValue4;
 					SetInvisibilityFlag(sOwnerH, cOwnerType, TRUE);
@@ -19291,9 +22241,9 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 				break;
 
 			case 2:
-				// v1.4334 중립은 플레이어에게 중독을 못하게 수정
-				if (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) goto MAGIC_NOEFFECT;
-
+				// v1.4334 중립은 플레이어에게 인비 해제 못하게 
+				if (m_pClientList[iClientH]->m_cSide == DEF_NETURAL) goto MAGIC_NOEFFECT;
+				
 				// dX, dY 반경 8 주변의 Invisibility 상태인 Object가 있으면 해제 시킨다.
 				for (ix = dX - 8; ix <= dX + 8; ix++)
 				for (iy = dY - 8; iy <= dY + 8; iy++) {
@@ -19302,6 +22252,9 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 						switch (cOwnerType) {
 						case DEF_OWNERTYPE_PLAYER:
 							if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+							// v2.19 2002-11-17 사낭꾼은 인비 해제 않되게 
+							if (m_pClientList[sOwnerH]->m_bIsHunter == TRUE) goto MAGIC_NOEFFECT;
+
 							if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_INVISIBILITY ] != NULL) {
 								m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_INVISIBILITY ] = NULL;
 								SetInvisibilityFlag(sOwnerH, cOwnerType, FALSE);
@@ -19326,12 +22279,37 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 
 		case DEF_MAGICTYPE_CREATE_DYNAMIC:
 			// Dynamic Object를 생성하고 효력이 지속되는 타입.
+
+			// v2.1 마을 내에서는 필드 마법 금지(전면전시 제외)
+			if (m_bIsCrusadeMode == FALSE) {
+				if (strcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, "aresden") == 0) return;
+				if (strcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, "elvine") == 0) return;
+				// v2.14
+				if (strcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, "arefarm") == 0) return;
+				if (strcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, "elvfarm") == 0) return;
+			}
+
 			switch (m_pMagicConfigList[sType]->m_sValue10) {
 			case DEF_DYNAMICOBJECT_PCLOUD_BEGIN: // 독구름
 
 			case DEF_DYNAMICOBJECT_FIRE:   // Fire 이다.
 			case DEF_DYNAMICOBJECT_SPIKE:  // Spike
 				
+#ifdef DEF_TAIWANLOG 
+				short sTemp_X, sTemp_Y ;
+				// v2.15 마법을 사용한 위치를 표시하기 위한 변수
+				sTemp_X = m_pClientList[iClientH]->m_sX ;
+				sTemp_Y = m_pClientList[iClientH]->m_sY ;
+
+				m_pClientList[iClientH]->m_sX = dX;
+				m_pClientList[iClientH]->m_sY = dY;
+
+				_bItemLog(DEF_ITEMLOG_SPELLFIELD,iClientH,m_pMagicConfigList[sType]->m_cName,NULL) ;
+
+				m_pClientList[iClientH]->m_sX = sTemp_X;
+				m_pClientList[iClientH]->m_sY = sTemp_Y;
+#endif
+
 				switch (m_pMagicConfigList[sType]->m_sValue11) {
 				case 1: 
 					// wall - type
@@ -19387,6 +22365,22 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 				break;
 
 			case DEF_DYNAMICOBJECT_ICESTORM:
+#ifdef DEF_TAIWANLOG 
+				// v2.15 마법을 사용한 위치를 표시하기 위한 변수
+				
+				sTemp_X = m_pClientList[iClientH]->m_sX ;
+				sTemp_Y = m_pClientList[iClientH]->m_sY ;
+
+				m_pClientList[iClientH]->m_sX = dX;
+				m_pClientList[iClientH]->m_sY = dY;
+
+				_bItemLog(DEF_ITEMLOG_SPELLFIELD,iClientH,m_pMagicConfigList[sType]->m_cName,NULL) ;
+
+				m_pClientList[iClientH]->m_sX = sTemp_X;
+				m_pClientList[iClientH]->m_sY = sTemp_Y;
+
+#endif
+
 				// Ice-Storm Dynamic Object 
 				iAddDynamicObjectList(iClientH, DEF_OWNERTYPE_PLAYER_INDIRECT, m_pMagicConfigList[sType]->m_sValue10, m_pClientList[iClientH]->m_cMapIndex, 
 											  dX, dY, m_pMagicConfigList[sType]->m_dwLastTime*1000,
@@ -19400,8 +22394,9 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 
 		case DEF_MAGICTYPE_POSSESSION:
 			// 원거리에 떨어져 있는 물건을 집어오는 마법이다. 
-			m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, dX, dY);
-			if (sOwnerH != NULL) break; // v1.41 포제션 마법은 사람이 서 있는 위에는 효력이 없다. 
+
+			// v2.19 2002-11-17 포제션 마법은 주위에 사람이 있으면 효력이 없다. 
+			if (_iCalcPlayerNum(m_pClientList[iClientH]->m_cMapIndex, dX, dY, 1) != 0) break ;
 			
 			pItem = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->pGetItem(dX, dY, &sRemainItemSprite, &sRemainItemSpriteFrame, &cRemainItemColor);
 			if (pItem != NULL) {
@@ -19410,7 +22405,7 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 					// 아이템을 획득했다.
 
 					// v1.411 로그 남긴다.
-					_bItemLog(DEF_ITEMLOG_GET, iClientH, NULL, pItem);
+					_bItemLog(DEF_ITEMLOG_GET, iClientH, (int) -1, pItem);
 
 					dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
 					*dwp = MSGID_NOTIFY;
@@ -19533,7 +22528,8 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 					m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, ix, iy);
 					if (cOwnerType == DEF_OWNERTYPE_PLAYER) {
 						// 해당 위치에 캐릭터가 있다.
-						if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						if (m_pClientList[sOwnerH] == NULL) goto PMH_SKIP_CONFUSE; // v2.172
+						if (m_pClientList[sOwnerH]->m_cSide == m_pClientList[iClientH]->m_cSide) goto PMH_SKIP_CONFUSE; // v2.172 편이 같으면 혼란 마법 무효 
 						if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
 							// 상대방이 마법 저항에 실패했다.
 							if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_CONFUSE ] != 0) break; //이미 다른 Confuse효과가 있다면 무시된다.
@@ -19547,17 +22543,24 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 							SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_CONFUSE, m_pMagicConfigList[sType]->m_sValue4, NULL, NULL);
 						}
 					}
+
+PMH_SKIP_CONFUSE:; // v2.172
 				}	
 				break;
 
 			case 3: // Ilusion, Mass-Ilusion
-			for (iy = dY - m_pMagicConfigList[sType]->m_sValue3; iy <= dY + m_pMagicConfigList[sType]->m_sValue3; iy++)
+				// 만약 마법 시전자가 투명 상태라면 효과 없음
+				if (m_pClientList[iClientH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_INVISIBILITY ] != 0) goto MAGIC_NOEFFECT;
+				for (iy = dY - m_pMagicConfigList[sType]->m_sValue3; iy <= dY + m_pMagicConfigList[sType]->m_sValue3; iy++)
 				for (ix = dX - m_pMagicConfigList[sType]->m_sValue2; ix <= dX + m_pMagicConfigList[sType]->m_sValue2; ix++) {
 					// 자신도 피폭될 수 있으니 주의.
 					m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, ix, iy);
 					if (cOwnerType == DEF_OWNERTYPE_PLAYER) {
 						// 해당 위치에 캐릭터가 있다.
 						if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						// 같은 편은 일루전에 걸리지 않는다.
+						if (m_pClientList[sOwnerH]->m_cSide == m_pClientList[iClientH]->m_cSide) goto MAGIC_NOEFFECT; // v2.172 편이 같으면 혼란 마법 무효 
+						
 						if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
 							// 상대방이 마법 저항에 실패했다.
 							if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_CONFUSE ] != 0) break; //이미 다른 Confuse효과가 있다면 무시된다.
@@ -19579,14 +22582,19 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 		case DEF_MAGICTYPE_POISON:
 			// 중독 마법. 먼저 마법 저항을 굴리고 다음으로 독성저항을 한번 더 굴린다. 
 			m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, dX, dY);
+			// v1.4334 중립은 플레이어에게 중독을 못하게 수정
+			if (m_pClientList[iClientH]->m_cSide == DEF_NETURAL) goto MAGIC_NOEFFECT;
+
 			
 			if (m_pMagicConfigList[sType]->m_sValue4 == 1) {
 				// 중독을 거는 마법 
 				switch (cOwnerType) {
 				case DEF_OWNERTYPE_PLAYER:
 					if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
-					// v1.4334 중립은 플레이어에게 중독을 못하게 수정
-					if (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) goto MAGIC_NOEFFECT ;
+					// v2.19 2002-11-17 사낭꾼은 중독 않되게 수정 
+					if (m_pClientList[sOwnerH]->m_bIsHunter == TRUE) goto MAGIC_NOEFFECT;
+					// v2.19 2002-11-17 중립은 중독 않되게 수정 
+					if (m_pClientList[sOwnerH]->m_cSide == DEF_NETURAL) goto MAGIC_NOEFFECT;
 
 					// 범죄행위라면 
 					bAnalyzeCriminalAction(iClientH, dX, dY);
@@ -19600,6 +22608,9 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 							m_pClientList[sOwnerH]->m_dwPoisonTime = dwTime;
 							// 중독되었음을 알린다. 
 							SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_POISON, m_pMagicConfigList[sType]->m_sValue5, NULL, NULL);
+#ifdef DEF_TAIWANLOG
+							_bItemLog(DEF_ITEMLOG_POISONED,sOwnerH,(char *) NULL,NULL) ;
+#endif
 						}
 					}
 					break;
@@ -19656,6 +22667,9 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 					if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_BERSERK ] != 0) goto MAGIC_NOEFFECT;
 					// 정적 NPC들은 광분 안됨				
 					if (m_pNpcList[sOwnerH]->m_cActionLimit != 0) goto MAGIC_NOEFFECT;
+					// 2002-09-11 #3 적 몬스터는 광분되지 않음
+					if ( m_pClientList[iClientH]->m_cSide != m_pNpcList[sOwnerH]->m_cSide ) goto MAGIC_NOEFFECT;
+
 					m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_BERSERK ] = (char)m_pMagicConfigList[sType]->m_sValue4;
 					SetBerserkFlag(sOwnerH, cOwnerType, TRUE);
 					break;
@@ -19671,6 +22685,32 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 			}
 			break;
 
+		// v2.16 2002-5-23 고광현 수정
+		case DEF_MAGICTYPE_DAMAGE_AREA_ARMOR_BREAK:
+			// 주변 공격 효과 
+			for (iy = dY - m_pMagicConfigList[sType]->m_sValue3; iy <= dY + m_pMagicConfigList[sType]->m_sValue3; iy++)
+			for (ix = dX - m_pMagicConfigList[sType]->m_sValue2; ix <= dX + m_pMagicConfigList[sType]->m_sValue2; ix++) {
+				// 자신도 피폭될 수 있으니 주의.
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, ix, iy);
+				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+					Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, dX, dY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+					// 방어구의 수명을 줄인다.
+					ArmorLifeDecrement(iClientH,sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue10);
+				}
+
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, ix, iy);
+				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
+			 	     (m_pClientList[sOwnerH]->m_iHP > 0) ) {
+					// 죽은 척하고 있는 플레이어다.
+					if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
+						Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, dX, dY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, FALSE, iMagicAttr);
+						// 방어구의 수명을 줄인다.
+						ArmorLifeDecrement(iClientH,sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue10);
+					}
+				}
+			}
+			break;
+
 		case DEF_MAGICTYPE_ICE:
 
 			for (iy = dY - m_pMagicConfigList[sType]->m_sValue3; iy <= dY + m_pMagicConfigList[sType]->m_sValue3; iy++)
@@ -19679,11 +22719,17 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, ix, iy);
 				if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
 					// 대미지와 함께
-					Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue4, m_pMagicConfigList[sType]->m_sValue5, m_pMagicConfigList[sType]->m_sValue6 + iWhetherBonus, TRUE, iMagicAttr);
+					//Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue4, m_pMagicConfigList[sType]->m_sValue5, m_pMagicConfigList[sType]->m_sValue6 + iWhetherBonus, TRUE, iMagicAttr);
+					Effect_Damage_Spot_DamageMove(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, dX, dY, m_pMagicConfigList[sType]->m_sValue4, m_pMagicConfigList[sType]->m_sValue5, m_pMagicConfigList[sType]->m_sValue6 + iWhetherBonus, TRUE, iMagicAttr);
 					// 얼어서 동작이 늦어지는 효과
 					switch (cOwnerType) {
 					case DEF_OWNERTYPE_PLAYER:
 						if (m_pClientList[sOwnerH] == NULL) goto MAGIC_NOEFFECT;
+						// v2.19 2002-11-17 사낭꾼은 얼지 않게 수정 
+						if (m_pClientList[sOwnerH]->m_bIsHunter == TRUE) goto MAGIC_NOEFFECT;
+						// v2.19 2002-11-17 중립은 얼지 않게 수정 
+						if (m_pClientList[sOwnerH]->m_cSide == DEF_NETURAL) goto MAGIC_NOEFFECT;
+
 						// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
 						if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
 							if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
@@ -19720,6 +22766,7 @@ void CGame::PlayerMagicHandler(int iClientH, int dX, int dY, short sType, BOOL b
 					// 죽은 척하고 있는 플레이어다.
 					if (bCheckResistingMagicSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) {
 						
+						//Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue4, m_pMagicConfigList[sType]->m_sValue5, m_pMagicConfigList[sType]->m_sValue6 + iWhetherBonus, TRUE, iMagicAttr);
 						Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue4, m_pMagicConfigList[sType]->m_sValue5, m_pMagicConfigList[sType]->m_sValue6 + iWhetherBonus, TRUE, iMagicAttr);
 						// 얼어서 동작이 늦어지는 효과. 죽지 않았으면 적용 
 						if ((m_pClientList[sOwnerH]->m_iHP > 0) && (bCheckResistingIceSuccess(m_pClientList[iClientH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
@@ -20102,6 +23149,83 @@ void CGame::NpcMagicHandler(int iNpcH, short dX, short dY, short sType)
 			}
 			break;
 
+		// 2002-12-20 NpcMagicHander에 DEF_MAGICTYPE_ICE 추가 (Ice-Golem 용)
+		case DEF_MAGICTYPE_ICE:
+
+			for (iy = dY - m_pMagicConfigList[sType]->m_sValue3; iy <= dY + m_pMagicConfigList[sType]->m_sValue3; iy++)
+			for (ix = dX - m_pMagicConfigList[sType]->m_sValue2; ix <= dX + m_pMagicConfigList[sType]->m_sValue2; ix++) {
+
+				m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, ix, iy);
+				if ((bCheckResistingMagicSuccess(m_pNpcList[iNpcH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) 
+					&& (bCheckResistingIceSuccess(m_pNpcList[iNpcH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE) ) {
+					// 대미지와 함께
+					//Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue4, m_pMagicConfigList[sType]->m_sValue5, m_pMagicConfigList[sType]->m_sValue6 + iWhetherBonus, TRUE, iMagicAttr);
+					
+					
+					// 얼어서 동작이 늦어지는 효과
+					switch (cOwnerType) {
+					case DEF_OWNERTYPE_PLAYER:
+						if (m_pClientList[sOwnerH] == NULL) continue; // goto NMH_NOEFFECT;
+						// v2.19 2002-11-17 사낭꾼은 얼지 않게 수정 
+						if (m_pClientList[sOwnerH]->m_bIsHunter == TRUE) continue; // goto NMH_NOEFFECT;
+						// v2.19 2002-11-17 중립은 얼지 않게 수정 
+						if (m_pClientList[sOwnerH]->m_cSide == DEF_NETURAL) continue; // goto NMH_NOEFFECT;
+
+						// 타겟이 살아있고 얼음 저항에 실패했다면 얼어붙는다.
+						if (m_pClientList[sOwnerH]->m_iHP > 0) {
+							Effect_Damage_Spot_DamageMove(iNpcH, DEF_OWNERTYPE_NPC, sOwnerH, cOwnerType, dX, dY, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, TRUE, iMagicAttr);
+							if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+									                sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+								// 대상이 플레이어인 경우 알려준다.
+								SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+							}
+						}
+						break;
+
+					case DEF_OWNERTYPE_NPC:
+						if (m_pNpcList[sOwnerH] == NULL) continue; // goto NMH_NOEFFECT;
+
+					/*	if (m_pNpcList[sOwnerH]->m_iHP > 0) {
+							if (m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pNpcList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+								                    sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+							}
+						} */
+						break;
+					}
+				} // if
+
+				m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->GetDeadOwner(&sOwnerH, &cOwnerType, ix, iy);
+				if ( (cOwnerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sOwnerH] != NULL) &&
+			 		 (m_pClientList[sOwnerH]->m_iHP > 0) ) {
+					// 죽은 척하고 있는 플레이어다.
+					if ((bCheckResistingMagicSuccess(m_pNpcList[iNpcH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)&& (bCheckResistingIceSuccess(m_pNpcList[iNpcH]->m_cDir, sOwnerH, cOwnerType, iResult) == FALSE)) {
+						
+						//Effect_Damage_Spot(iClientH, DEF_OWNERTYPE_PLAYER, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue4, m_pMagicConfigList[sType]->m_sValue5, m_pMagicConfigList[sType]->m_sValue6 + iWhetherBonus, TRUE, iMagicAttr);
+						Effect_Damage_Spot(iNpcH, DEF_OWNERTYPE_NPC, sOwnerH, cOwnerType, m_pMagicConfigList[sType]->m_sValue7, m_pMagicConfigList[sType]->m_sValue8, m_pMagicConfigList[sType]->m_sValue9 + iWhetherBonus, TRUE, iMagicAttr);
+						// 얼어서 동작이 늦어지는 효과. 죽지 않았으면 적용 
+						if (m_pClientList[sOwnerH]->m_iHP > 0)  {
+							if (m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 0) {
+								m_pClientList[sOwnerH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] = 1;
+								SetIceFlag(sOwnerH, cOwnerType, TRUE);
+								// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+								bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (m_pMagicConfigList[sType]->m_sValue10*1000), 
+								                sOwnerH, cOwnerType, NULL, NULL, NULL, 1, NULL, NULL);
+
+								SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_ICE, 1, NULL, NULL);
+							}
+						}
+					}
+				} // if
+			} // for
+			break;
 		}
 	}
 	else {
@@ -20128,9 +23252,9 @@ void CGame::RequestTeleportHandler(int iClientH, char * pData, char * cMapName, 
  char  * pBuffer, cTempMapName[21];
  DWORD * dwp;
  WORD  * wp;
- char  * cp, cDestMapName[11], cDir, cMapIndex;
+ char  * cp, cDestMapName[11], cDir, cMapIndex , cPrice = 0;
  short * sp, sX, sY;
- int   * ip, i, iRet, iSize, iDestX, iDestY, iExH, iMapSide;
+ int   * ip, i, iRet, iSize, iDestX, iDestY, iExH, iMapSide,iTmpMapSide;
  BOOL    bRet, bIsLockedMapNotify;
  SYSTEMTIME SysTime;
 
@@ -20138,6 +23262,23 @@ void CGame::RequestTeleportHandler(int iClientH, char * pData, char * cMapName, 
 	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE) return;
 	if (m_pClientList[iClientH]->m_bIsKilled == TRUE) return;
 	if (m_pClientList[iClientH]->m_bIsOnWaitingProcess == TRUE) return;
+
+	// v2.16 2002-6-2 상대방 마을에서는 리콜이 되지 않는다.
+	// v2.181 2002-10-24 서버 속도 향상을 위해 스트링 비교를 줄인다.
+
+	// 엘바인이면 
+	if ((m_pClientList[iClientH]->m_cSide == DEF_ELVINE ) 
+		&& (memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "aresden", 7) == 0)
+		&& ((pData[0] == '1')  || (pData[0] == '3'))
+		&& (m_pClientList[iClientH]->m_iAdminUserLevel == 0) ) return ;
+
+	// v2.16 2002-6-2 상대방 마을에서는 리콜이 되지 않는다.
+	
+	// 아레스덴이면 
+	if ((m_pClientList[iClientH]->m_cSide == DEF_ARESDEN ) 
+		&& (memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "elvine", 6) == 0)
+		&& ((pData[0] == '1')  || (pData[0] == '3'))
+		&& (m_pClientList[iClientH]->m_iAdminUserLevel == 0) ) return ;
 	
 	bIsLockedMapNotify = FALSE;
 
@@ -20150,8 +23291,9 @@ void CGame::RequestTeleportHandler(int iClientH, char * pData, char * cMapName, 
 
 	// 중립이 리콜 마법을 사용하면 투명하게 되는 버그 수정 
 	// 중립이면 리콜 마법을 사용하지 못하게 된다. 
-	if ((memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) && (pData[0] == '1'))
-		return;
+	// v2.14 중립 리콜않되는 버그 수정 
+//	if ((memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) && (pData[0] == '1'))
+//		return;
 
 	// 현재 이 플레이어를 목표로 삼고 있는 몹들의 공격행동을 멈추게 한다. 
 	RemoveFromTarget(iClientH, DEF_OWNERTYPE_PLAYER);
@@ -20176,11 +23318,17 @@ void CGame::RequestTeleportHandler(int iClientH, char * pData, char * cMapName, 
 	ZeroMemory(cDestMapName, sizeof(cDestMapName));
 	bRet = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->bSearchTeleportDest(sX, sY, cDestMapName, &iDestX, &iDestY, &cDir);
 
+	
+
 	// Crusade
 	if ((strcmp(m_pClientList[iClientH]->m_cLockedMapName, "NONE") != 0) && (m_pClientList[iClientH]->m_iLockedMapTime > 0)) {
 		// 특정 맵에 갖힌 상태이다. 텔레포트 타일의 위치를 갖힌 맵으로 변형한다.
 		// 만약 갈 맵이 건물 내부라면  
+
 		iMapSide = iGetMapLocationSide(cDestMapName);
+
+		if (iMapSide >= 3) iMapSide -= 2 ;
+
 		if ((iMapSide != 0) && (m_pClientList[iClientH]->m_cSide == iMapSide)) {
 			// 들어가고자 하는 맵이 같은 편의 건물 내부라면 들어갈 수 있다.
 		}
@@ -20195,6 +23343,7 @@ void CGame::RequestTeleportHandler(int iClientH, char * pData, char * cMapName, 
 
 	if ((bRet == TRUE) && (cMapName == NULL)) {
 		// 플레이어가 텔레포트 타일 위에 서 있다. 텔레포트 할 맵이 현재 서버에 존재하는지 검색한다. 물론 목적지가 지정되지 않은 텔레포트여야한다.
+
 	 	for (i = 0; i < DEF_MAXMAPS; i++)
 		if (m_pMapList[i] != NULL) {
 			if (memcmp(m_pMapList[i]->m_cName, cDestMapName, 10) == 0) {
@@ -20229,56 +23378,32 @@ void CGame::RequestTeleportHandler(int iClientH, char * pData, char * cMapName, 
 		case '0':
 			// Forced Recall. 
 			// 레벨 제한이 있는 맵에 들어갔을때 일어난다. 
-			ZeroMemory(cTempMapName, sizeof(cTempMapName));
-			if (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) {
-				strcpy(cTempMapName, "default");
-			}
-			else strcpy(cTempMapName, m_pClientList[iClientH]->m_cLocation);
 			
-			// Crusade
-			if ((strcmp(m_pClientList[iClientH]->m_cLockedMapName, "NONE") != 0) && (m_pClientList[iClientH]->m_iLockedMapTime > 0)) {
-				// 특정 맵에 갖힌 상태이다. 텔레포트 타일의 위치를 갖힌 맵으로 변형한다.
-				bIsLockedMapNotify = TRUE;
-				ZeroMemory(cTempMapName, sizeof(cTempMapName));
-				strcpy(cTempMapName, m_pClientList[iClientH]->m_cLockedMapName);
-			}
-
-			for (i = 0; i < DEF_MAXMAPS; i++)
-			if (m_pMapList[i] != NULL) {
-				if (memcmp(m_pMapList[i]->m_cName, cTempMapName, 10) == 0) {
-					// 현재 서버에 텔레포트할 맵이 존재한다.
-					GetMapInitialPoint(i, &m_pClientList[iClientH]->m_sX, &m_pClientList[iClientH]->m_sY, m_pClientList[iClientH]->m_cLocation);
-										
-					m_pClientList[iClientH]->m_cMapIndex = i; // 맵 인덱스를 바꾼다.
-					ZeroMemory(m_pClientList[iClientH]->m_cMapName, sizeof(m_pClientList[iClientH]->m_cMapName));
-					memcpy(m_pClientList[iClientH]->m_cMapName, cTempMapName, 10);  // 맵 이름을 바꾼다.
-					goto RTH_NEXTSTEP;
-				}
-			}
-
-			// 현재 서버에 텔레포트 할 맵이 없다. 클라이언트는 현재 접속을 종료하고 다른 서버로 접속을 시도해야 한다.
-			m_pClientList[iClientH]->m_sX   = -1;	  // 텔레포트 좌표를 입력한다.
-			m_pClientList[iClientH]->m_sY   = -1;	  // -1은 InitialPoint를 말한다.
-			
-			ZeroMemory(m_pClientList[iClientH]->m_cMapName, sizeof(m_pClientList[iClientH]->m_cMapName));
-			memcpy(m_pClientList[iClientH]->m_cMapName, cTempMapName, 10);  // 맵 이름을 바꾼다.
-			// 플레이어의 데이터를 저장하고 응답을 받은 후 재접속을 알려야 한다.
-			bSendMsgToLS(MSGID_REQUEST_SAVEPLAYERDATA_REPLY, iClientH, FALSE); // ! 카운팅 하지 않는다.
-			
-			m_pClientList[iClientH]->m_bIsOnServerChange = TRUE;
-			m_pClientList[iClientH]->m_bIsOnWaitingProcess = TRUE;
-			return;
-		
 		case '1':
 			// Recall.플레이어가 소속된 마을의 진입 포인트로 간다.
 			// 만약 부활존이라면 리콜되지 않는다.
 			//if (memcmp(m_pMapList[ m_pClientList[iClientH]->m_cMapIndex ]->m_cName, "resurr", 6) == 0) return;
-
+						
 			ZeroMemory(cTempMapName, sizeof(cTempMapName));
-			if (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) {
+			if ( m_pClientList[iClientH]->m_cSide == DEF_NETURAL ) {
 				strcpy(cTempMapName, "default");
 			}
-			else strcpy(cTempMapName, m_pClientList[iClientH]->m_cLocation);
+			else {
+
+				// v2.14 레벨 80 이하는 리콜시 농경지로 간다.
+				if (m_pClientList[iClientH]->m_iLevel > 80)
+				{
+					if( m_pClientList[iClientH]->m_cSide == DEF_ARESDEN )
+						strcpy(cTempMapName, "aresden");
+					else
+						strcpy(cTempMapName, "elvine");
+				}
+				else {
+					if ( m_pClientList[iClientH]->m_cSide == DEF_ARESDEN ) 
+						 strcpy(cTempMapName, "arefarm");
+					else strcpy(cTempMapName, "elvfarm");
+				}
+			}
 			
 			// Crusade
 			if ((strcmp(m_pClientList[iClientH]->m_cLockedMapName, "NONE") != 0) && (m_pClientList[iClientH]->m_iLockedMapTime > 0)) {
@@ -20317,9 +23442,50 @@ void CGame::RequestTeleportHandler(int iClientH, char * pData, char * cMapName, 
 		
 		case '2':
 			// 목적지가 지정된 텔레포트.
-
 			// Crusade
-			if ((strcmp(m_pClientList[iClientH]->m_cLockedMapName, "NONE") != 0) && (m_pClientList[iClientH]->m_iLockedMapTime > 0)) {
+			if ((strcmp(m_pClientList[iClientH]->m_cLockedMapName, "NONE") != 0) && (m_pClientList[iClientH]->m_iLockedMapTime > 0) && (memcmp(cMapName, "resurr", 6) != 0)) {
+				// 특정 맵에 갖힌 상태이다. 텔레포트 타일의 위치를 갖힌 맵으로 변형한다.
+				dX = -1;
+				dY = -1;
+				bIsLockedMapNotify = TRUE;
+				ZeroMemory(cTempMapName, sizeof(cTempMapName));
+				strcpy(cTempMapName, m_pClientList[iClientH]->m_cLockedMapName);
+			}
+			else {
+				ZeroMemory(cTempMapName, sizeof(cTempMapName));
+				strcpy(cTempMapName, cMapName);
+			}
+			
+			cMapIndex = iGetMapIndex(cTempMapName);
+			if (cMapIndex == -1) {
+				// 현재 서버에 목적지가 없다. 
+				// 현재 서버에 텔레포트 할 맵이 없다. 클라이언트는 현재 접속을 종료하고 다른 서버로 접속을 시도해야 한다.
+				m_pClientList[iClientH]->m_sX   = dX; //-1;	  // 텔레포트 좌표를 입력한다.
+				m_pClientList[iClientH]->m_sY   = dY; //-1;	  // -1은 InitialPoint를 말한다.
+			
+				ZeroMemory(m_pClientList[iClientH]->m_cMapName, sizeof(m_pClientList[iClientH]->m_cMapName));
+				memcpy(m_pClientList[iClientH]->m_cMapName, cTempMapName, 10);  // 맵 이름을 바꾼다.
+				// 플레이어의 데이터를 저장하고 응답을 받은 후 재접속을 알려야 한다.
+								
+				bSendMsgToLS(MSGID_REQUEST_SAVEPLAYERDATA_REPLY, iClientH, FALSE); // ! 카운팅 하지 않는다.
+				// !!!
+				m_pClientList[iClientH]->m_bIsOnServerChange   = TRUE;
+				m_pClientList[iClientH]->m_bIsOnWaitingProcess = TRUE;
+				return;
+			}
+
+			m_pClientList[iClientH]->m_sX   = dX;
+			m_pClientList[iClientH]->m_sY   = dY;
+			m_pClientList[iClientH]->m_cMapIndex = cMapIndex;
+			
+			ZeroMemory(m_pClientList[iClientH]->m_cMapName, sizeof(m_pClientList[iClientH]->m_cMapName));
+			memcpy(m_pClientList[iClientH]->m_cMapName, m_pMapList[cMapIndex]->m_cName, 10);  
+			break;
+		
+		case '3':
+			// 목적지가 지정된 텔레포트.
+			// v2.16 입장권 종류 
+			if ((strcmp(m_pClientList[iClientH]->m_cLockedMapName, "NONE") != 0) && (m_pClientList[iClientH]->m_iLockedMapTime > 0) && (memcmp(cMapName, "resurr", 6) != 0)) {
 				// 특정 맵에 갖힌 상태이다. 텔레포트 타일의 위치를 갖힌 맵으로 변형한다.
 				dX = -1;
 				dY = -1;
@@ -20361,6 +23527,24 @@ void CGame::RequestTeleportHandler(int iClientH, char * pData, char * cMapName, 
 	}
 
 RTH_NEXTSTEP:;
+
+	// 2002-11-29 같은 서버의 맵 이동이 있을 경우에도 중독을 제거해 준다. (대만 요청)
+	// 다른 서버 이동시에는 중독 정보가 전달 되지 않는다. 따라서 자동적으로 중독이 풀린다.
+	m_pClientList[iClientH]->m_bIsPoisoned = FALSE;
+
+	iSetSide(iClientH);
+
+
+
+	//v2.19 2002-11-14 전면전 승리한쪽으 가격을 10프로 싸게 해준다.
+	if( TRUE == m_pClientList[iClientH]->m_bIsOnShop ) 
+	{
+		cPrice = 0;
+
+		if(m_iCrusadeWinnerSide == m_pClientList[iClientH]->m_cSide)
+			cPrice = -10;
+	}
+
 
 	// Crusade
 	if (bIsLockedMapNotify == TRUE) SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_LOCKEDMAP, m_pClientList[iClientH]->m_iLockedMapTime, NULL, NULL, m_pClientList[iClientH]->m_cLockedMapName);
@@ -20468,11 +23652,23 @@ RTH_NEXTSTEP:;
 	ip = (int *)cp;
 	*ip = m_pClientList[iClientH]->m_iHP;
 	cp += 4;
+
+	// 2002-11-14 물가 정보 추가
+#ifdef DEF_V219
+	*cp = cPrice;
+	cp += 1;
+#else 
+	*cp = 0;
+	cp += 1;
+#endif
 		  
 	// 맵의 정보를 추가한다. 
 	iSize = iComposeInitMapData(m_pClientList[iClientH]->m_sX - 10, m_pClientList[iClientH]->m_sY - 7, iClientH, cp );
+	cp += iSize;
+
+	
 	// 메시지 전송 
-	iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(pBuffer, 46 + iSize +4 +4 +1 +4 +4); // v1.41
+	iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(pBuffer, 46 + iSize +4 +4 + 1 +4 +4 + 1); // v2.183 // v1.41
 	switch (iRet) {
 	case DEF_XSOCKEVENT_QUENEFULL:
 	case DEF_XSOCKEVENT_SOCKETERROR:
@@ -20489,100 +23685,109 @@ RTH_NEXTSTEP:;
 	// 다른 클라이언트들에게 플레이어가 새로운 위치에 나타났음을 알린다. 
 	SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_LOG, DEF_MSGTYPE_CONFIRM, NULL, NULL, NULL);
 	
-	int iTL_;
+
+	// 2002-11-15 클라이언트의 Side, OnTown, OnShop 정보를 설정한다.
+	iSetSide(iClientH);
+
+
+
+	m_pClientList[iClientH]->m_bIsWarLocation = FALSE;	
+	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 0;
+
 
 	// 플레이어가 다른 맵에 들어갔다. 만약 적국이라면 시간을 설정한다.
-	if ( (memcmp(m_pClientList[iClientH]->m_cLocation, "aresden", 7) == 0) && 
-		 (memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "elvine", 6) == 0) ) {
+	// v2.13 운영자는 강콜되지 않는다. 
+	if (( DEF_ARESDEN == m_pClientList[iClientH]->m_cSide) && 
+		 (memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "elvine", 6) == 0)
+		 && (m_pClientList[iClientH]->m_iAdminUserLevel < 1) ) {
 		
 		m_pClientList[iClientH]->m_dwWarBeginTime = timeGetTime();
 		m_pClientList[iClientH]->m_bIsWarLocation = TRUE;
 
-		// v1.42
-		if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall == 0) {
-			// 남아있을 수 있는 잔존 시간을 설정해 준다. 
-			// 시간을 구한다음 iWarPeriod를 구한다.
-			GetLocalTime(&SysTime);
-			switch (SysTime.wDayOfWeek) {
-			case 1:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;   //월요일 30초
-			case 2:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;   //화요일 30초
-			case 3:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;   //수요일 30초
-			case 4:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;   //목요일 1분
-			case 5:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*10 +100;  break; //금요일 10분
-			case 6:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*30 +300;  break; //토요일 30분 
-			case 0:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*60; break; //일요일 60분
-			}
-		}
-		else {
-			// 잔존시간이 있다. 요일별 잔존시간보다 크면 1로 초기화 
-			GetLocalTime(&SysTime);
-			switch (SysTime.wDayOfWeek) {
-			case 1:	iTL_ = 40; break;   //월요일 30초
-			case 2:	iTL_ = 40; break;   //화요일 30초
-			case 3:	iTL_ = 40; break;   //수요일 30초
-			case 4:	iTL_ = 40; break;   //목요일 30초
-			case 5:	iTL_ = 20*10 +100; break; //금요일 10분
-			case 6:	iTL_ = 20*30 +300; break; //토요일 30분 
-			case 0:	iTL_ = 20*60; break; //일요일 60분
-			}
-			
-			if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall > iTL_) 
-				m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 1;		
-		}
+		// v2.17 2002-7-15 강콜 시간을 조절 할 수 있게 수정한다.
+		SetForceRecallTime(iClientH) ;
 	}
-	else
-	if ( (memcmp(m_pClientList[iClientH]->m_cLocation, "elvine", 6) == 0) && 
-		 (memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "aresden", 7) == 0) ) {
+	// v2.13 운영자는 강콜되지 않는다. 
+	else if (( DEF_ELVINE == m_pClientList[iClientH]->m_cSide) && 
+		 (memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "aresden", 7) == 0)
+		 && (m_pClientList[iClientH]->m_iAdminUserLevel == 0)) {
 		
 		m_pClientList[iClientH]->m_dwWarBeginTime = timeGetTime();
 		m_pClientList[iClientH]->m_bIsWarLocation = TRUE;
 
-		// v1.42
-		if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall == 0) {
-			// 남아있을 수 있는 잔존 시간을 설정해 준다. 
-			// 시간을 구한다음 iWarPeriod를 구한다.
-			GetLocalTime(&SysTime);
-			switch (SysTime.wDayOfWeek) {
-			case 1:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;   //월요일 30초
-			case 2:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;   //화요일 30초
-			case 3:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;   //수요일 30초
-			case 4:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 40; break;   //목요일 1분
-			case 5:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*10 +100;  break; //금요일 10분
-			case 6:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*30 +300;  break; //토요일 30분 
-			case 0:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*60; break; //일요일 60분
-			}
-		}
-		else {
-			// 잔존시간이 있다. 요일별 잔존시간보다 크면 1로 초기화 
-			GetLocalTime(&SysTime);
-			switch (SysTime.wDayOfWeek) {
-			case 1:	iTL_ = 40; break;   //월요일 30초
-			case 2:	iTL_ = 40; break;   //화요일 30초
-			case 3:	iTL_ = 40; break;   //수요일 30초
-			case 4:	iTL_ = 40; break;   //목요일 30초
-			case 5:	iTL_ = 20*10 +100; break; //금요일 10분
-			case 6:	iTL_ = 20*30 +300; break; //토요일 30분 
-			case 0:	iTL_ = 20*60; break; //일요일 60분
-			}
-			
-			if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall > iTL_) 
-				m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 1;
+		// v2.17 2002-7-15 강콜 시간을 조절 할 수 있게 수정한다.
+		SetForceRecallTime(iClientH) ;
+	// v2.15 전면전시 중립이 마을로 들어가면 바로 강콜 
+	} else if (( DEF_NETURAL == m_pClientList[iClientH]->m_cSide) && 
+		(m_bIsCrusadeMode == TRUE) && ((strcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, "elvine") == 0) 
+		|| (strcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, "aresden") == 0))
+		&& (m_pClientList[iClientH]->m_iAdminUserLevel == 0)) {
+		m_pClientList[iClientH]->m_dwWarBeginTime = timeGetTime();
+		m_pClientList[iClientH]->m_bIsWarLocation = TRUE;
+		m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 1 ; 
+	}
+
+		// v2.181 2002-10-24
+	// 적 농경지나 건물에 들어가면 강콜 된다. 
+	iMapSide = iGetMapLocationSide(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName);
+
+	if (iMapSide >= 3) iTmpMapSide = iMapSide - 2 ;
+		else iTmpMapSide = iMapSide ;
+
+	m_pClientList[iClientH]->m_bIsInBuilding = FALSE ;
+
+	// 적마을이면 
+	if  ((m_pClientList[iClientH]->m_cSide != iTmpMapSide) && (iMapSide != 0) ) {
+
+		// 건물 안이면 
+		if ( (iMapSide <= 2) && (m_pClientList[iClientH]->m_iAdminUserLevel == 0)
+			&& (m_pClientList[iClientH]->m_cSide != DEF_NETURAL) )
+		{
+			m_pClientList[iClientH]->m_dwWarBeginTime = timeGetTime();
+			m_pClientList[iClientH]->m_bIsWarLocation = TRUE;
+			m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 1 ; 
+			m_pClientList[iClientH]->m_bIsInBuilding = TRUE ;
 		}
 	}
 	// 같은 서버에 사투장이 떠있는 경우 
 	// v1.4311-3 변경 사투장에 입장하면 강콜타임을 시작한다.
-	else if ( m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_bIsFightZone == TRUE ) {
+	// v2.13 운영자는 강콜되지 않는다.
+	// v2.17 길드전 모드에서는 사투장에서 강콜되지 않는다.
+#ifndef DEF_GUILDWARMODE
+	else if ((m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_bIsFightZone == TRUE) &&
+		     (m_iFightzoneNoForceRecall == 0) && (m_pClientList[iClientH]->m_iAdminUserLevel == 0)) {  
+
 		m_pClientList[iClientH]->m_dwWarBeginTime = timeGetTime();
 		m_pClientList[iClientH]->m_bIsWarLocation = TRUE;
 		// 남아있을 수 있는 잔존 시간을 설정해 준다. 
 		// 시간을 구한다음 iWarPeriod를 구한다.
 		GetLocalTime(&SysTime);
 		m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 2*20*60 - ((SysTime.wHour%2)*20*60 + SysTime.wMinute*20) - 2*20;  
-
-	} else {
-		m_pClientList[iClientH]->m_bIsWarLocation = FALSE;	
-		m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 0;
 	}
+#endif 
+	else if (((memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "arejail", 7) == 0) || 
+		   (memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "elvjail", 7) == 0))
+		      && (m_pClientList[iClientH]->m_iAdminUserLevel == 0)) { 
+		m_pClientList[iClientH]->m_bIsWarLocation = TRUE;
+		m_pClientList[iClientH]->m_dwWarBeginTime = timeGetTime();
+
+		// v2.17 2002-7-15 
+		if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall == 0) {
+			m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*5 ; 
+		 // 강콜시간이 5분 보다 길면 
+		} else if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall > 20*5) {
+			m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*5 ;  // 5분
+		}
+	}
+
+
+	// v2.17 2002-7-15 강콜 시간을 사용자에게 보여준다.
+	if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall > 0) {
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_FORCERECALLTIME,  m_pClientList[iClientH]->m_iTimeLeft_ForceRecall , NULL, NULL, NULL);
+		wsprintf(G_cTxt,"(!) Game Server Force Recall Time  %d (%d)min", m_pClientList[iClientH]->m_iTimeLeft_ForceRecall, m_pClientList[iClientH]->m_iTimeLeft_ForceRecall/20) ;
+		PutLogList(G_cTxt) ;
+	}
+
 
 	// 추가로 보내줘야 할 정보를 보낸다. v1.1
 	SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_SAFEATTACKMODE, NULL, NULL, NULL, NULL);
@@ -20634,14 +23839,321 @@ RTH_NEXTSTEP:;
 	}
 
 	// v1.42
-	if (memcmp(m_pClientList[iClientH]->m_cMapName, "fightzone", 9) == 0) {
+	// 2002-7-4 사투장의 갯수를 늘릴 수 있도록 
+	if (memcmp(m_pClientList[iClientH]->m_cMapName, "fight", 5) == 0) {
 		wsprintf(G_cTxt, "Char(%s)-Enter(%s) Observer(%d)", m_pClientList[iClientH]->m_cCharName, m_pClientList[iClientH]->m_cMapName, m_pClientList[iClientH]->m_bIsObserverMode);
 		PutLogEventFileList(G_cTxt);
 	}
 
 	// Crusade
 	SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CONSTRUCTIONPOINT, m_pClientList[iClientH]->m_iConstructionPoint, m_pClientList[iClientH]->m_iWarContribution, -1, NULL);
+
+	// v2.15
+	SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_GIZONITEMUPGRADELEFT, m_pClientList[iClientH]->m_iGizonItemUpgradeLeft, NULL, NULL, NULL);
+
+	// 2002-11-29 같은 서버의 맵 이동이 있을 경우에도 중독을 제거해 준다. (대만 요청)
+	// 중독이 풀렸음을 알린다. 
+	SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_MAGICEFFECTOFF, DEF_MAGICTYPE_POISON, NULL, NULL, NULL);
 }
+
+
+// 2002-12-6  Teleport 기능 추가 (RequestTeleportListHandler)
+void CGame::RequestTeleportListHandler(int iClientH, char * pData, DWORD dwMsgSize)
+{
+	if (m_pClientList[iClientH] == NULL) return;
+	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE) return;
+	if (m_pClientList[iClientH]->m_bIsKilled == TRUE) return;
+	if (m_pClientList[iClientH]->m_bIsOnWaitingProcess == TRUE) return;
+
+	char	*cp, cData[512];
+	int		iRet;
+	DWORD	*dwp;
+	WORD	*wp;
+	int		iMapSide = -1;
+	int		*listCount;
+	char	cNpcName[21];
+	int		*ip;
+
+	if( memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "aresden", 7) == 0)
+		iMapSide = DEF_ARESDEN;
+	else if( memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "elvine", 6) == 0)
+		iMapSide = DEF_ELVINE;
+
+	// 클라이언트가 보내온 NPC 이름
+	cp = (char *)(pData + DEF_INDEX2_MSGTYPE + 2);
+	ZeroMemory(cNpcName, sizeof(cNpcName));
+	strncpy(cNpcName, cp, 20);
+	cp += 20;
+
+	ZeroMemory(cData, sizeof(cData));
+	dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
+	*dwp = MSGID_RESPONSE_TELEPORT_LIST;
+	wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
+	*wp  = DEF_MSGTYPE_CONFIRM;
+
+	cp = cData + 6;
+
+	listCount = (int*) cp; *listCount = 0;
+	cp += 4; // sizeof(int)
+
+	int		index;
+	for(index = 0; index < DEF_MAXTELEPORTLIST; index++)
+	{
+		if( m_pTeleportConfigList[index] == NULL ) continue;
+
+		// 사용자의 현재 맵이 Source Map과 다른 경우는 보내지 않는다.
+		if( strncmp( m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName,
+					 m_pTeleportConfigList[index]->m_cSourceMap, 10) != 0 )
+			continue;
+
+		// 보내오는 NPC 이름이 같은지 비교한다.
+		if( strncmp( m_pTeleportConfigList[index]->m_cNpcname, cNpcName, 20) != 0 )
+			continue;
+
+		// 레벨 검사
+		if( m_pTeleportConfigList[index]->m_iMinLvl > m_pClientList[iClientH]->m_iLevel ||
+			m_pTeleportConfigList[index]->m_iMaxLvl < m_pClientList[iClientH]->m_iLevel)
+			continue;
+
+		// 사냥꾼 검사
+		if( m_pTeleportConfigList[index]->m_bHunter == FALSE &&
+			m_pClientList[iClientH]->m_bIsHunter == TRUE)
+			continue;
+
+		// 중립 검사
+		if( m_pTeleportConfigList[index]->m_bNetural == FALSE &&
+			m_pClientList[iClientH]->m_cSide == DEF_NETURAL)
+			continue;
+
+		// 범죄자 검사
+		if( m_pTeleportConfigList[index]->m_bCriminal == FALSE &&
+			m_pClientList[iClientH]->m_iPKCount > 0 )
+			continue;
+
+		// Side 검사 (Check Point!!!!)
+		if( m_pClientList[iClientH]->m_cSide == DEF_NETURAL &&
+			( m_pTeleportConfigList[index]->m_iSide == DEF_BOTHSIDE ||
+			  m_pTeleportConfigList[index]->m_iSide == iMapSide ) )
+		{
+			// index[4], mapname[10], X[4], Y[4], Cost[4]
+			ip = (int*) cp;
+			*ip = index;
+			cp += 4;
+
+			memcpy(cp, m_pTeleportConfigList[index]->m_cTargetMap, 10);
+			cp += 10;
+
+			ip = (int*) cp;
+			*ip = m_pTeleportConfigList[index]->m_iX;
+			cp += 4;
+
+			ip = (int*) cp;
+			*ip = m_pTeleportConfigList[index]->m_iY;
+			cp += 4;
+
+			ip = (int*) cp;
+			*ip = m_pTeleportConfigList[index]->m_iCost;
+			cp += 4;
+		}
+		else if( ( m_pTeleportConfigList[index]->m_iSide == DEF_BOTHSIDE ) ||
+			( m_pTeleportConfigList[index]->m_iSide == m_pClientList[iClientH]->m_cSide ) )
+		{
+			// index[4], mapname[10], X[4], Y[4], Cost[4]
+			ip = (int*) cp;
+			*ip = index;
+			cp += 4;
+
+			memcpy(cp, m_pTeleportConfigList[index]->m_cTargetMap, 10);
+			cp += 10;
+
+			ip = (int*) cp;
+			*ip = m_pTeleportConfigList[index]->m_iX;
+			cp += 4;
+
+			ip = (int*) cp;
+			*ip = m_pTeleportConfigList[index]->m_iY;
+			cp += 4;
+
+			ip = (int*) cp;
+			*ip = m_pTeleportConfigList[index]->m_iCost;
+			cp += 4;
+		}
+		else continue;
+
+		(*listCount) ++;
+	} // for
+
+	// 내용이 하나도 없으면..
+	if ( (*listCount) == 0 )
+		*wp  = DEF_MSGTYPE_REJECT;
+
+	// Teleport List 보낸다.
+	iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, 10 + (*listCount) * 26 );
+
+	switch (iRet) {
+	case DEF_XSOCKEVENT_QUENEFULL:
+	case DEF_XSOCKEVENT_SOCKETERROR:
+	case DEF_XSOCKEVENT_CRITICALERROR:
+	case DEF_XSOCKEVENT_SOCKETCLOSED:
+		// 메시지를 보낼때 에러가 발생했다면 제거한다.
+		DeleteClient(iClientH, TRUE, TRUE);
+		return;
+	}
+} // RequestTeleportListHandler
+
+// 2002-12-6  Teleport 기능 추가 (RequestChargedTeleportHandler)
+void CGame::RequestChargedTeleportHandler(int iClientH, char *pData, DWORD dwMsgSize)
+{
+	if (m_pClientList[iClientH] == NULL) return;
+	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE) return;
+	if (m_pClientList[iClientH]->m_bIsKilled == TRUE) return;
+	if (m_pClientList[iClientH]->m_bIsOnWaitingProcess == TRUE) return;
+
+	char	*cp, cData[64];
+	int		iRet;
+	DWORD	*dwp;
+	WORD	*wp;
+	int		iMapSide = -1;
+	int		index;
+	WORD	wConfirm = DEF_MSGTYPE_CONFIRM;
+	short	sError = 0;
+	
+
+	if( memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "aresden", 7) == 0)
+		iMapSide = DEF_ARESDEN;
+	else if( memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, "elvine", 6) == 0)
+		iMapSide = DEF_ELVINE;
+
+	// 클라이언트가 보내온 CHARGED_TELEPORT index
+	cp = (char *)(pData + DEF_INDEX2_MSGTYPE + 2);
+	index = (int) (*cp);
+	cp += 4;
+
+	if( index < 0 || index >= DEF_MAXTELEPORTLIST)
+		return;
+
+	if( m_pTeleportConfigList[index] == NULL )
+		return;
+
+	// 사용자의 현재 맵이 Source Map과 다른 경우는 보내지 않는다.
+	if( strncmp( m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName,
+				 m_pTeleportConfigList[index]->m_cSourceMap, 10) != 0 )
+		return;
+
+	// 레벨 검사
+	if( m_pTeleportConfigList[index]->m_iMinLvl > m_pClientList[iClientH]->m_iLevel ||
+		m_pTeleportConfigList[index]->m_iMaxLvl < m_pClientList[iClientH]->m_iLevel)
+	{
+		wConfirm = DEF_MSGTYPE_REJECT;
+		sError = 1;	// 사용할 수 있는 레벨이 아니다.
+	}
+
+	// 사냥꾼 검사
+	if( wConfirm == DEF_MSGTYPE_CONFIRM &&
+		m_pTeleportConfigList[index]->m_bHunter == FALSE &&
+		m_pClientList[iClientH]->m_bIsHunter == TRUE)
+	{
+		wConfirm = DEF_MSGTYPE_REJECT;
+		sError = 2;	// 사냥꾼은 사용할 수 없다.
+	}
+
+	// 중립 검사
+	if( wConfirm == DEF_MSGTYPE_CONFIRM &&
+		m_pTeleportConfigList[index]->m_bNetural == FALSE &&
+		m_pClientList[iClientH]->m_cSide == DEF_NETURAL)
+	{
+		wConfirm = DEF_MSGTYPE_REJECT;
+		sError = 3;	// 중립은 불가능하다.
+	}
+
+	// 범죄자 검사
+	if( wConfirm == DEF_MSGTYPE_CONFIRM &&
+		m_pTeleportConfigList[index]->m_bCriminal == FALSE &&
+		m_pClientList[iClientH]->m_iPKCount > 0 )
+	{
+		wConfirm = DEF_MSGTYPE_REJECT;
+		sError = 4;	// 범죄자는 불가능하다.
+	}
+
+	// Side 검사 (Check Point!!!!)
+	if( wConfirm == DEF_MSGTYPE_CONFIRM &&
+		m_pClientList[iClientH]->m_cSide == DEF_NETURAL &&
+		( m_pTeleportConfigList[index]->m_iSide != DEF_BOTHSIDE && m_pTeleportConfigList[index]->m_iSide != iMapSide ) )
+	{
+		wConfirm = DEF_MSGTYPE_REJECT;
+		sError = 5;	// 사용할 수 있는 마을이 잘못 되었다.
+	}
+	else if (
+		wConfirm == DEF_MSGTYPE_CONFIRM &&
+		m_pTeleportConfigList[index]->m_iSide != DEF_BOTHSIDE &&
+		m_pTeleportConfigList[index]->m_iSide != m_pClientList[iClientH]->m_cSide )
+	{
+		wConfirm = DEF_MSGTYPE_REJECT;
+		sError = 5;	// 사용할 수 있는 마을이 잘못 되었다.
+	}
+
+	// Cost 검사 및 가방에서 해당 돈을 뺀다.
+	if( wConfirm == DEF_MSGTYPE_CONFIRM )
+	{
+		// 가방에 돈이 있는지 검사
+		DWORD dwGoldCount = dwGetItemCount(iClientH, "Gold");
+
+		if( dwGoldCount >= m_pTeleportConfigList[index]->m_iCost )
+		{
+			// Gold의 수량을 감소시킨다.
+			int iGoldWeight = SetItemCount(iClientH, "Gold", dwGoldCount - m_pTeleportConfigList[index]->m_iCost);
+
+			// 소지품 총 중량 재 계산 
+			iCalcTotalWeight(iClientH);
+
+			// v1.4 마을의 자금에 더한다.
+			m_stCityStatus[m_pClientList[iClientH]->m_cSide].iFunds += m_pTeleportConfigList[index]->m_iCost;
+
+		} else {
+			wConfirm = DEF_MSGTYPE_REJECT;
+			sError = 6;	// 돈이 모자란다.
+		}
+	}
+
+	// Invalid Charged-teleport
+	if ( wConfirm == DEF_MSGTYPE_REJECT )
+	{
+		ZeroMemory(cData, sizeof(cData));
+		dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
+		*dwp = MSGID_RESPONSE_CHARGED_TELEPORT;
+		wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
+		*wp  = wConfirm;
+
+		cp = cData + DEF_INDEX2_MSGTYPE + 2;
+
+		short	*sp;
+		sp	= (short*) cp;
+		*sp	= sError;
+		cp += 2;
+
+		// Teleport List 보낸다.
+		iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, 6 + 2 );
+
+		switch (iRet) {
+		case DEF_XSOCKEVENT_QUENEFULL:
+		case DEF_XSOCKEVENT_SOCKETERROR:
+		case DEF_XSOCKEVENT_CRITICALERROR:
+		case DEF_XSOCKEVENT_SOCKETCLOSED:
+			// 메시지를 보낼때 에러가 발생했다면 제거한다.
+			DeleteClient(iClientH, TRUE, TRUE);
+			return;
+		}
+		return;
+	}
+
+	// teleport 시킨다.
+	RequestTeleportHandler(iClientH, "2   ",
+					m_pTeleportConfigList[index]->m_cTargetMap,
+					m_pTeleportConfigList[index]->m_iX,
+					m_pTeleportConfigList[index]->m_iY);
+
+} // RequestChargedTeleportHandler
+
 
 void CGame::ReleaseFollowMode(short sOwnerH, char cOwnerType)
 {
@@ -21139,12 +24651,257 @@ BOOL CGame::_bDecodeSkillConfigFileContents(char * pData, DWORD dwMsgSize)
 }
 
 
+// 2002-12-6  Teleport 기능 추가
+BOOL CGame::_bDecodeTeleportListConfigFileContents(char * pData, DWORD dwMsgSize)
+{
+ char * pContents, * token, cTxt[120];
+ char seps[] = "= \t\n";
+ char cReadModeA = 0;
+ char cReadModeB = 0;
+ int  iTeleportConfigListIndex = 0;
+ class CStrTok * pStrTok;
+
+	pContents = new char[dwMsgSize+1];
+	ZeroMemory(pContents, dwMsgSize+1);
+	memcpy(pContents, pData, dwMsgSize);
+
+	pStrTok = new class CStrTok(pContents, seps);
+	token = pStrTok->pGet();
+
+	while( token != NULL ) {
+		if (cReadModeA != 0) {
+			switch (cReadModeA) {
+			case 1:
+				switch (cReadModeB) {
+				case 1: // Teleport 번호
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! TELEPORT-LIST configuration file error - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					
+					iTeleportConfigListIndex = atoi(token);
+
+					if (m_pTeleportConfigList[iTeleportConfigListIndex] != NULL) {
+						// 이미 할당된 번호가 있다. 에러이다.
+						PutLogList("(!!!) CRITICAL ERROR! TELEPORT-LIST configuration file error - Duplicate magic number.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					m_pTeleportConfigList[iTeleportConfigListIndex] = new class CTeleport;
+					cReadModeB = 2;
+					break;
+
+				case 2: // NPC 이름
+					memcpy(m_pTeleportConfigList[iTeleportConfigListIndex]->m_cNpcname, token, strlen(token));
+					cReadModeB = 3;
+					break;
+
+				case 3: // SOURCE MAP
+					memcpy(m_pTeleportConfigList[iTeleportConfigListIndex]->m_cSourceMap, token, strlen(token));
+					cReadModeB = 4;
+					break;
+
+				case 4: // TARGET MAP
+					memcpy(m_pTeleportConfigList[iTeleportConfigListIndex]->m_cTargetMap, token, strlen(token));
+					cReadModeB = 5;
+					break;
+				
+				case 5: // TARGET MAP X
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! TELEPORT-LIST configuration file error - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					m_pTeleportConfigList[iTeleportConfigListIndex]->m_iX = atoi(token);
+					cReadModeB = 6;
+					break;
+
+				case 6: // TARGET MAP Y
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! TELEPORT-LIST configuration file error - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					m_pTeleportConfigList[iTeleportConfigListIndex]->m_iY = atoi(token);
+					cReadModeB = 7;
+					break;
+
+				case 7: // COST
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! TELEPORT-LIST configuration file error - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					m_pTeleportConfigList[iTeleportConfigListIndex]->m_iCost = atoi(token);
+					cReadModeB = 8;
+					break;
+
+				case 8: // Minimum Level
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! TELEPORT-LIST configuration file error - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					m_pTeleportConfigList[iTeleportConfigListIndex]->m_iMinLvl = atoi(token);
+					cReadModeB = 9;
+					break;
+
+				case 9: // Maximum Level
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! TELEPORT-LIST configuration file error - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					m_pTeleportConfigList[iTeleportConfigListIndex]->m_iMaxLvl = atoi(token);
+					cReadModeB = 10;
+					break;
+
+				case 10: // Side (aresden, elvein)
+					if( memcmp(token, "aresden", 7) == 0 )
+					{
+						m_pTeleportConfigList[iTeleportConfigListIndex]->m_iSide = DEF_ARESDEN;
+					}
+					else if( memcmp(token, "elvine", 6) == 0 )
+					{
+						m_pTeleportConfigList[iTeleportConfigListIndex]->m_iSide = DEF_ELVINE;
+					}
+					else if( memcmp(token, "both", 4) == 0 )
+					{
+						m_pTeleportConfigList[iTeleportConfigListIndex]->m_iSide = DEF_BOTHSIDE;
+					}
+					else
+					{
+						PutLogList("(!!!) CRITICAL ERROR! TELEPORT-LIST configuration file error - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					cReadModeB = 11;
+					break;
+
+				case 11: // HuntMode (0,1)
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! TELEPORT-LIST configuration file error - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+
+					if( memcmp(token,"0",1) == 0 )
+						m_pTeleportConfigList[iTeleportConfigListIndex]->m_bHunter = FALSE;
+					else if( memcmp(token,"1",1) == 0 )
+						m_pTeleportConfigList[iTeleportConfigListIndex]->m_bHunter = TRUE;
+					else
+					{
+						PutLogList("(!!!) CRITICAL ERROR! TELEPORT-LIST configuration file error - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					cReadModeB = 12;
+					break;
+
+				case 12: // Netural (0,1)
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! TELEPORT-LIST configuration file error - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+
+					if( memcmp(token,"0",1) == 0 )
+						m_pTeleportConfigList[iTeleportConfigListIndex]->m_bNetural = FALSE;
+					else if( memcmp(token,"1",1) == 0 )
+						m_pTeleportConfigList[iTeleportConfigListIndex]->m_bNetural = TRUE;
+					else
+					{
+						PutLogList("(!!!) CRITICAL ERROR! TELEPORT-LIST configuration file error - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					cReadModeB = 13;
+					break;
+
+				case 13: // Criminal (0,1)
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! TELEPORT-LIST configuration file error - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+
+					if( memcmp(token,"0",1) == 0 )
+						m_pTeleportConfigList[iTeleportConfigListIndex]->m_bCriminal = FALSE;
+					else if( memcmp(token,"1",1) == 0 )
+						m_pTeleportConfigList[iTeleportConfigListIndex]->m_bCriminal = TRUE;
+					else
+					{
+						PutLogList("(!!!) CRITICAL ERROR! TELEPORT-LIST configuration file error - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					cReadModeA = 0;
+					cReadModeB = 0;
+					break;
+				}
+				break;
+			default:
+				break;
+			}
+		}
+		else
+		{
+			if (memcmp(token, "teleport", 8) == 0) {
+				cReadModeA = 1;
+				cReadModeB = 1;
+			}
+			else if (memcmp(token, "[END]", 5) == 0)
+			{
+				cReadModeA = 0;
+				cReadModeB = 0;
+				break; // Stop While Loop
+			}
+		}
+
+		token = pStrTok->pGet();
+
+	} // while
+
+	delete pStrTok;
+	delete pContents;
+
+	if ((cReadModeA != 0) || (cReadModeB != 0)) {
+		PutLogList("(!!!) CRITICAL ERROR! TELEPORT-LIST configuration file contents error!");
+		return FALSE;
+	}
+
+	wsprintf(cTxt, "(!) TELEPORT-LIST(Total:%d) configuration - success!", iTeleportConfigListIndex);
+	PutLogList(cTxt);
+
+	return TRUE;
+} // _bDecodeTeleportListConfigFileContents
+
+
+
+
+// 12-22 성후니 수정  마법배우기에 실패한 이유를 클라이언트에 보내준다.
 void CGame::RequestStudyMagicHandler(int iClientH, char * pName, BOOL bIsPurchase)
 {
  char  * cp, cMagicName[31], cData[100];
  DWORD * dwp, dwGoldCount;
  WORD  * wp;
  int   * ip, iReqInt, iCost, iRet;
+ BOOL bMagic = TRUE ;
 
 	if (m_pClientList[iClientH] == NULL) return;
 	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE) return;
@@ -21162,14 +24919,17 @@ void CGame::RequestStudyMagicHandler(int iClientH, char * pName, BOOL bIsPurchas
 	}
 	else {
 		if (bIsPurchase == TRUE) {
-			if (m_pMagicConfigList[iRet]->m_iGoldCost < 0) return; // 일반적으로 배울수 없는 마법이라면(가격이 음수) 배울 수 없다.
+			if (m_pMagicConfigList[iRet]->m_iGoldCost < 0) bMagic = FALSE ; // 일반적으로 배울수 없는 마법이라면(가격이 음수) 배울 수 없다.
 			dwGoldCount = dwGetItemCount(iClientH, "Gold");
-			if ((DWORD)iCost > dwGoldCount) return; // 돈이 부족해도 배울 수 없다.
+			if ((DWORD)iCost > dwGoldCount)  bMagic = FALSE ; // 돈이 부족해도 배울 수 없다.
+			// v2.20 2002-12-23 마법을 배울수 있는곳인지 체크 한다.
+			if (m_pClientList[iClientH]->m_bIsOnTower == FALSE) bMagic = FALSE ;
 		}
 	
 		// 이미 배운 마법을 다시 배우겠다고 요청하면 무시 
 		if (m_pClientList[iClientH]->m_cMagicMastery[iRet] != 0) return;
-		if (iReqInt <= m_pClientList[iClientH]->m_iInt) {
+
+		if ((iReqInt <= m_pClientList[iClientH]->m_iInt) && (bMagic == TRUE) ) {
 			
 			// 돈을 사용했음을 알린다.
 			if (bIsPurchase == TRUE) SetItemCount(iClientH, "Gold", dwGoldCount - iCost);
@@ -21197,6 +24957,10 @@ void CGame::RequestStudyMagicHandler(int iClientH, char * pName, BOOL bIsPurchas
 
 			// 정보 전송 
 			iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, 37);
+
+#ifdef DEF_TAIWANLOG 
+			_bItemLog(DEF_ITEMLOG_MAGICLEARN,iClientH, cMagicName, NULL);
+#endif
 			switch (iRet) {
 			case DEF_XSOCKEVENT_QUENEFULL:
 			case DEF_XSOCKEVENT_SOCKETERROR:
@@ -21249,6 +25013,352 @@ void CGame::RequestStudyMagicHandler(int iClientH, char * pName, BOOL bIsPurchas
 		}
 	}
 }
+
+
+// v2.15 2002-5-21
+BOOL CGame::_bDecodeWLServerConfigFileContents(char * pData, DWORD dwMsgSize)
+{
+ char * pContents, * token, cTxt[120];
+ char seps[] = "= \t\n";
+ char cReadMode = 0;
+ int  iSkillConfigListIndex = 0;
+ class CStrTok * pStrTok;
+
+	pContents = new char[dwMsgSize+1];
+	ZeroMemory(pContents, dwMsgSize+1);
+	memcpy(pContents, pData, dwMsgSize);
+
+	pStrTok = new class CStrTok(pContents, seps);
+	token = pStrTok->pGet();
+
+	while( token != NULL ) {
+		if (cReadMode != 0) {
+			switch (cReadMode) {
+			case 1:
+					m_iWorldLogServerPort = atoi(token);
+					cReadMode = 0;
+					break;
+			wsprintf(cTxt, "(!) world-server-port (%d)!",m_iWorldLogServerPort);
+			PutLogList(cTxt);
+
+			default: 
+				break;
+			}
+		}
+		else {
+			if (memcmp(token, "world-server-port", 17) == 0) cReadMode = 1;
+		}
+		token = pStrTok->pGet();
+	}	
+	
+	delete pStrTok;
+	delete pContents;
+
+	if ((cReadMode != 0)) {
+		PutLogList("(!!!) CRITICAL ERROR! WLServer.cfg configuration file contents error!");
+		return FALSE;
+	}
+
+	wsprintf(cTxt, "(!) World configuration - success!");
+	PutLogList(cTxt);
+
+	return TRUE;
+}
+
+// 2002-12-8 World server 보안 설정을 위해 
+
+BOOL CGame::_bDecodeWorldConfigFileContents(char * pData, DWORD dwMsgSize)
+{
+ char * pContents, * token, cTxt[120];
+ char seps[] = "= \t\n";
+ char cReadModeA = 0;
+ char cReadModeB = 0;
+ int  iSkillConfigListIndex = 0;
+ class CStrTok * pStrTok;
+
+	pContents = new char[dwMsgSize+1];
+	ZeroMemory(pContents, dwMsgSize+1);
+	memcpy(pContents, pData, dwMsgSize);
+
+	pStrTok = new class CStrTok(pContents, seps);
+	token = pStrTok->pGet();
+	while( token != NULL ) {
+		if (cReadModeA != 0) {
+			switch (cReadModeA) {
+			case 1:
+					m_iWorldMaxUser = atoi(token);
+					cReadModeA = 0;
+					cReadModeB = 0;
+					break;
+			case 2 :
+					m_iPlayerMaxLevel = atoi(token);
+					cReadModeA = 0;
+					cReadModeB = 0;
+					break;
+			case 3: // v2.17 2002-7-15 월드 서버에서 강콜시간을 수정할 수 있게 한다.
+					m_sForceRecallTime = atoi(token);
+					cReadModeA = 0;
+					cReadModeB = 0;
+
+			wsprintf(cTxt, "(!) Force Recall Time (%d)min !",m_sForceRecallTime);
+			PutLogList(cTxt);
+
+			default: 
+				break;
+			}
+		}
+		else {
+			if (memcmp(token, "world-server-max-user", 21) == 0) {
+				cReadModeA = 1;
+				cReadModeB = 1;
+			}
+			if (memcmp(token, "world-server-max-level", 22) == 0) {
+				cReadModeA = 2;
+				cReadModeB = 1;
+			}
+			if (memcmp(token, "world-server-forcerecall-time", 29) == 0) {
+				cReadModeA = 3;
+				cReadModeB = 1;
+			}
+
+		}
+		token = pStrTok->pGet();
+		//token = strtok(NULL, seps);
+	}	
+	
+	delete pStrTok;
+	delete pContents;
+
+	if ((cReadModeA != 0) || (cReadModeB != 0)) {
+		PutLogList("(!!!) CRITICAL ERROR! world.cfg configuration file contents error!");
+		return FALSE;
+	}
+
+	wsprintf(cTxt, "(!) World configuration - success!");
+	PutLogList(cTxt);
+
+	return TRUE;
+}
+
+// v2.15 2002-8-7 // 2002-09-06 #1
+BOOL CGame::_bDecodeNpcItemConfigFileContents(char * pData, DWORD dwMsgSize)
+{
+ char * pContents, * token, cTxt[120];
+ char seps[] = "= \t\n";
+ char cReadModeA = 0;
+ char cReadModeB = 0;
+ int  iNpcConfigListIndex = 0;
+ int k = 0;
+ class CStrTok * pStrTok;
+ class CNpcItem * pTempNpcItem = NULL ;
+  
+	pContents = new char[dwMsgSize+1];
+	ZeroMemory(pContents, dwMsgSize+1);
+	memcpy(pContents, pData, dwMsgSize);
+
+	pStrTok = new class CStrTok(pContents, seps);
+	token = pStrTok->pGet();
+	while( token != NULL ) {
+		if (cReadModeA != 0) {
+			switch (cReadModeA) {
+			case 1:
+
+				switch (cReadModeB) {
+
+				case 1:
+					// NPC 이름
+					if (strlen(token) > 20)	{
+						PutLogList("(!!!) CRITICAL ERROR! NPCITEM configuration file error - Too long Npc name.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					for (iNpcConfigListIndex = 0; iNpcConfigListIndex < DEF_MAXNPCTYPES; iNpcConfigListIndex++)
+						if (m_pNpcConfigList[iNpcConfigListIndex] != NULL) {
+							if(strcmp(m_pNpcConfigList[iNpcConfigListIndex]->m_cNpcName,token) == 0) {
+								PutLogList(token);
+								break ;	
+							}
+						}
+
+					if (iNpcConfigListIndex == DEF_MAXNPCTYPES ) {
+						PutLogList("(!!!) CRITICAL ERROR! NPCITEM configuration file error - No exist Npc Name");
+						delete pContents;
+						delete pStrTok;
+						return FALSE ;
+					}
+
+					cReadModeB = 2;
+					break;
+
+				case 2:
+					// 2002-09-17 #1
+					// npcitem type 설정
+					if( strlen(token) > 2 ) {
+						PutLogList("(!!!) CRITICAL ERROR! NPCITEM configuration file error - Type Error.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+
+					m_pNpcConfigList[iNpcConfigListIndex]->m_iNpcitemType = atoi(token);
+
+					cReadModeB = 3;
+					break;
+
+				case 3:
+					// 아이템 이름 
+					if (strlen(token) > 20)	{
+						PutLogList("(!!!) CRITICAL ERROR! NPCITEM configuration file error - Too long Item name.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+
+					if (pTempNpcItem == NULL)
+						pTempNpcItem = new class CNpcItem();
+
+
+					if( memcmp(token,"[ENDITEM]",9) == 0 ){
+						cReadModeA = 0 ;
+						cReadModeB = 0 ;
+
+						if ( pTempNpcItem  != NULL) {
+							delete pTempNpcItem ; 
+							pTempNpcItem = NULL ;
+						}
+						break;
+					}
+					
+					strcpy(pTempNpcItem->m_cName, token);
+
+					// 2002-09-09 #1 NPCITEM List 에 ID를 추가한다.
+					// 주의 : ITEM List가 NPCITEM List 보다 먼저 WLS에서 보내져야 한다.
+					if( !m_bReceivedItemList )	// ITEM List가 오지 않았다.
+					{
+						PutLogList("(!!!) CRITICAL ERROR! NPCITEM configuration error - Before Item List receiving.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+
+					for(k=0; k<DEF_MAXITEMTYPES; k++)
+					{
+						if ( m_pItemConfigList[k] == NULL )
+							continue;
+			
+						if ( strcmp(token, m_pItemConfigList[k]->m_cName) == 0 ) {
+							pTempNpcItem->m_sItemID = m_pItemConfigList[k]->m_sIDnum;
+
+							break;
+						}
+					}
+
+					if ( k == DEF_MAXITEMTYPES ) {
+						PutLogList("(!!!) CRITICAL ERROR! NPCITEM configuration error - Do Not exist in ITEM LIST");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+
+					cReadModeB = 4;
+					break;
+
+				case 4:
+					// 첫번째 확률
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! NPCITEM configuration file error - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					pTempNpcItem->m_sFirstProbability = atoi(token);
+
+					if (pTempNpcItem->m_sFirstProbability <= 0 ) {
+						PutLogList("(!!!) CRITICAL ERROR! NPCITEM configuration file error - First probability have wrong value");
+						delete pContents;
+						delete pStrTok;
+						return FALSE ; 
+					}
+
+					// 첫번째 확률에 대한 타겟값을 임의로 준다. 
+					if ( pTempNpcItem->m_sFirstProbability > 13) 
+						pTempNpcItem->m_cFirstTargetValue = 13;
+					else if ( pTempNpcItem->m_sFirstProbability > 3) 
+						pTempNpcItem->m_cFirstTargetValue = 3;
+					else 
+						pTempNpcItem->m_cFirstTargetValue = 1;
+						
+					cReadModeB = 5;
+					break;
+
+				case 5:
+					// 두번째 확률
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! NPCITEM configuration file error - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+
+					pTempNpcItem->m_sSecondProbability = atoi(token);
+
+					if (pTempNpcItem->m_sSecondProbability <= 0 ) {
+						PutLogList("(!!!) CRITICAL ERROR! NPCITEM configuration file error - Second probability have wrong value");
+						delete pContents;
+						delete pStrTok;
+						return FALSE ; 
+					}
+
+					// 두번째 확률에 대한 타겟값을 임의로 준다. 
+					if ( pTempNpcItem->m_sSecondProbability > 13) 
+						pTempNpcItem->m_cSecondTargetValue = 13 ;
+					else if ( pTempNpcItem->m_sSecondProbability > 3) 
+						pTempNpcItem->m_cSecondTargetValue = 3 ;
+					else 
+						pTempNpcItem->m_cSecondTargetValue = 1 ;
+
+					cReadModeB = 3;
+			
+					// vector에 현재 까지 읽어 드린 값을 넣는다. 
+					m_pNpcConfigList[iNpcConfigListIndex]->m_vNpcItem.push_back(*pTempNpcItem);
+
+					// 2002-09-17 #1 NPCITEM Type 2일 경우
+					if( m_pNpcConfigList[iNpcConfigListIndex]->m_iNpcitemMax < pTempNpcItem->m_sSecondProbability )
+						m_pNpcConfigList[iNpcConfigListIndex]->m_iNpcitemMax = pTempNpcItem->m_sSecondProbability;
+
+					break;
+
+				} // switch #2
+
+			default: 
+				break;
+
+			} // switch #1
+		} // if
+		else {
+
+			if (memcmp(token, "NpcItem", 7) == 0) {
+				cReadModeA = 1;
+				cReadModeB = 1;
+			
+			}
+		}
+		token = pStrTok->pGet();
+	}
+
+	delete pStrTok;
+	delete pContents;
+
+	if ((cReadModeA != 0) || (cReadModeB != 0)) {
+		PutLogList("(!!!) CRITICAL ERROR! NPCITEM configuration file contents error!");
+		return FALSE;
+	}
+
+	return TRUE;
+
+} // _bDecodeNpcItemConfigFileContents()
+
 
 int CGame::_iGetMagicNumber(char * pMagicName, int * pReqInt, int * pCost)
 {
@@ -21308,6 +25418,11 @@ void CGame::TrainSkillResponse(BOOL bSuccess, int iClientH, int iSkillNum, int i
 		*cp = iSkillLevel;
 		cp++;
 	 
+#ifdef DEF_TAIWANLOG
+		if (m_pSkillConfigList[iSkillNum]->m_cName != NULL) 
+			_bItemLog(DEF_ITEMLOG_SKILLLEARN,iClientH,m_pSkillConfigList[iSkillNum]->m_cName,NULL) ;
+#endif
+
 		// 정보 전송 
 		iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, 8);
 		switch (iRet) {
@@ -21430,73 +25545,11 @@ int CGame::_iGetSkillNumber(char * pSkillName)
 	return 0;
 }
 
-BOOL CGame::bPlayerItemToBank(int iClientH, short sItemIndex)
-{
- register int i, iIndex;
-
-	if (m_pClientList[iClientH] == NULL) return FALSE;
-
-	for (i = 0; i < DEF_MAXBANKITEMS; i++)
-	if (m_pClientList[iClientH]->m_pItemInBankList[i] == NULL) {
-		iIndex = i;
-		goto NEXT_STEP_PLTB;
-	}
-	// 더이상 저장할 공간이 없다. 
-	return FALSE;
-
-NEXT_STEP_PLTB:;
-
-	// 아이템을 저장할 공간이 남아있다. 
-	// 먼저 장착되어 있다면 해제시킨다.
-	ReleaseItemHandler(iClientH, sItemIndex, TRUE);
-
-	// 아이템 클래스의 주소를 바꾼다. 
-	m_pClientList[iClientH]->m_pItemInBankList[iIndex] = m_pClientList[iClientH]->m_pItemList[sItemIndex];
-	// 플레이어 아이템 리스트를 클리어하고 
-	m_pClientList[iClientH]->m_pItemList[sItemIndex] = NULL;
-	m_pClientList[iClientH]->m_bIsItemEquipped[sItemIndex] = FALSE;
-
-	// 아이템 리스트의 빈 공간을 삭제한다.
-	for (i = 1; i < DEF_MAXITEMS; i++)
-	if ((m_pClientList[iClientH]->m_pItemList[i-1] == NULL) && (m_pClientList[iClientH]->m_pItemList[i] != NULL)) {
-		m_pClientList[iClientH]->m_pItemList[i-1]       = m_pClientList[iClientH]->m_pItemList[i];	
-		m_pClientList[iClientH]->m_bIsItemEquipped[i-1] = m_pClientList[iClientH]->m_bIsItemEquipped[i];	
-		m_pClientList[iClientH]->m_pItemList[i]   = NULL;
-		m_pClientList[iClientH]->m_bIsItemEquipped[i] = FALSE;
-	}
-
-	return TRUE;
-}
 
 
 
-BOOL CGame::bBankItemToPlayer(int iClientH, short sItemIndex)
-{
- register int i, iIndex;
 
-	if (m_pClientList[iClientH] == NULL) return FALSE;
-	
-	if (m_pClientList[iClientH]->m_pItemInBankList[sItemIndex] == NULL) return FALSE;
 
-	for (i = 0; i < DEF_MAXITEMS; i++)
-	if (m_pClientList[iClientH]->m_pItemList[i] == NULL) {
-		iIndex = i;
-		goto NEXT_STEP_PLTB;
-	}
-	// 더이상 갖고있을 공간이 없다. 
-	return FALSE;
-
-NEXT_STEP_PLTB:;
-
-	// 아이템을 소지할 공간이 남아있다. 
-	
-	// 아이템 클래스의 주소를 바꾼다. 
-	m_pClientList[iClientH]->m_pItemList[iIndex] = m_pClientList[iClientH]->m_pItemInBankList[sItemIndex]; 
-	
-	m_pClientList[iClientH]->m_pItemInBankList[sItemIndex] = NULL;
-
-	return TRUE;
-}
 
 
 
@@ -21516,6 +25569,7 @@ BOOL CGame::__bReadMapInfo(int iMapIndex)
  int  iMineralPointIndex = 0;
  int  iStrategicPointIndex = 0;
  int  iIndex = 0;
+ int  iNumMob = 0;
 
  int  iNamingValue;
  class CStrTok * pStrTok;
@@ -21525,10 +25579,24 @@ BOOL CGame::__bReadMapInfo(int iMapIndex)
 
  char cName[6], cNpcName[21], cNpcMoveType, cNpcWaypointIndex[10], cNamePrefix;
  short sIPindex;
+ SYSTEMTIME SysTime;
 
 	// 사투장인지를 판단.
-	if (memcmp(m_pMapList[iMapIndex]->m_cName, "fightzone", 9) == 0) 
+	// 2002-7-4 사투장의 갯수를 늘릴 수 있도록 
+	if (memcmp(m_pMapList[iMapIndex]->m_cName, "fight", 5) == 0) 
 		m_pMapList[iMapIndex]->m_bIsFightZone = TRUE;
+
+
+	// v2.20 2002-12-20 크리스마스와 iceboud맵에서는 항상 눈이 내린다.
+	if (memcmp(m_pMapList[iMapIndex]->m_cName, "icebound", 8) == 0) 
+		m_pMapList[iMapIndex]->m_bIsFixedSnowMode = TRUE;
+
+	GetLocalTime(&SysTime);
+	if( SysTime.wYear == 2002 && SysTime.wMonth == 12 && SysTime.wDay == 25 ) {
+		m_pMapList[iMapIndex]->m_bIsFixedSnowMode = TRUE;
+	}
+
+
 
 	ZeroMemory(cFn, sizeof(cFn));
 	strcat(cFn, "mapdata\\");
@@ -22148,6 +26216,10 @@ BOOL CGame::__bReadMapInfo(int iMapIndex)
 
 			case 11:
 				m_pMapList[iMapIndex]->m_bIsFixedDayMode = (BOOL)atoi(token);
+				// v2.20 2002-12-20 크리스마스와 iceboud맵에서는 항상 눈이 내린다.
+				// 건물안에는 눈이 내리지 않는다.
+				if (m_pMapList[iMapIndex]->m_bIsFixedDayMode == TRUE)
+					m_pMapList[iMapIndex]->m_bIsFixedSnowMode = FALSE;
 				cReadModeA = 0;
 				break;
 
@@ -22755,6 +26827,149 @@ BOOL CGame::__bReadMapInfo(int iMapIndex)
 				}
 				break;
 
+			case 24: // item event
+				/*
+				; mapdata에 들어갈 내용
+				;item-event = index	item_name	amount	TotalNumber	month	day	type	mob_list[Max:5]
+				;	type = 0 : 해당 아이템이 일반 아이템 생성과정에서 생성되지 않는다.
+				;	       1 : Item Event에 의해서도 생성되고 일반 아이템 생성과정을 통해서도 생성된다.
+
+				item-event = 	1	적색소원구	1	10		11	1	0	Cannibal-Plant Ettin EOL
+				item-event = 	2	녹색소원구	1	10		11	1	0	Giant-Frog Scorpion EOL
+				*/
+				switch (cReadModeB) {
+				case 1: //  index
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! Map Info file error 78 - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					iIndex = atoi(token);
+					
+					if (strlen(m_pMapList[iMapIndex]->m_stItemEventList[iIndex].cItemName) != NULL) {
+						// 이미 할당되어있는 Item-Event 번호이다.
+						wsprintf(G_cTxt, "(!!!) CRITICAL ERROR! Map Info file error 79 - Duplicate Item-Event number(%d:%s)", iIndex, m_pMapList[iMapIndex]->m_stItemEventList[iIndex].cItemName);
+						PutLogList(G_cTxt);
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					
+					m_pMapList[iMapIndex]->m_iTotalItemEvents++;
+					cReadModeB = 2;
+					break;
+				
+				case 2: // item_name
+					strcpy(m_pMapList[iMapIndex]->m_stItemEventList[iIndex].cItemName, token);
+					cReadModeB = 3;
+					break;
+
+				case 3: // amount
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! Map Info file error 81 - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					m_pMapList[iMapIndex]->m_stItemEventList[iIndex].iAmount = atoi(token);
+
+					cReadModeB = 4;
+					break;
+
+				case 4: // total number
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! Map Info file error 82 - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					m_pMapList[iMapIndex]->m_stItemEventList[iIndex].iTotalNum = atoi(token);
+					
+					cReadModeB = 5;
+					break;
+
+				case 5: // month
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! Map Info file error 83 - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					m_pMapList[iMapIndex]->m_stItemEventList[iIndex].iMonth = atoi(token);
+					
+					cReadModeB = 6;
+					break;
+
+				case 6: // day
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! Map Info file error 83 - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					m_pMapList[iMapIndex]->m_stItemEventList[iIndex].iDay = atoi(token);
+					
+					cReadModeB = 7;
+					break;
+
+				case 7: // type
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! Map Info file error 83 - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					m_pMapList[iMapIndex]->m_stItemEventList[iIndex].iType = atoi(token);
+
+					m_pMapList[iMapIndex]->m_stItemEventList[iIndex].iNumMob = 0;
+
+					cReadModeB = 8;
+					break;
+
+				case 8: // monster list
+					if( strcmp(token, "EOL") == 0 ) {
+						cReadModeA = 0;
+						cReadModeB = 0;
+					} else {
+						iNumMob = m_pMapList[iMapIndex]->m_stItemEventList[iIndex].iNumMob;
+						
+						if( iNumMob >= 5 ) {
+							cReadModeA = 0;
+							cReadModeB = 0;
+							PutLogList("(!!!) CRITICAL ERROR! Map Info file error 83 - Wrong Data format.");
+							break;
+						}
+
+						m_pMapList[iMapIndex]->m_stItemEventList[iIndex].cMob[iNumMob] = new char[21];
+
+						ZeroMemory(m_pMapList[iMapIndex]->m_stItemEventList[iIndex].cMob[iNumMob],
+							sizeof(m_pMapList[iMapIndex]->m_stItemEventList[iIndex].cMob[iNumMob]) );
+
+						strcpy(m_pMapList[iMapIndex]->m_stItemEventList[iIndex].cMob[iNumMob], token);
+
+						m_pMapList[iMapIndex]->m_stItemEventList[iIndex].iNumMob ++;
+
+						cReadModeB = 8;
+					}
+					break;
+				}
+				break;
+			case 25:
+				switch (cReadModeB) {
+				case 1:
+					if (_bGetIsStringIsNumber(token) == FALSE) {
+						PutLogList("(!!!) CRITICAL ERROR! Map Info file error 78 - Wrong Data format.");
+						delete pContents;
+						delete pStrTok;
+						return FALSE;
+					}
+					m_pMapList[iMapIndex]->sMobEventAmount = atoi(token);
+					cReadModeB = 0;
+					break;
+				}
+				break;
+
 			default: 
 				break;
 			}
@@ -22847,6 +27062,24 @@ BOOL CGame::__bReadMapInfo(int iMapIndex)
 
 			if (memcmp(token, "strike-point", 12) == 0) {
 				cReadModeA = 23;
+				cReadModeB = 1;
+			}
+			
+			if (memcmp(token, "item-event", 10) == 0) {
+				cReadModeA = 24;
+				cReadModeB = 1;
+			}
+
+			if (memcmp(token, "energy-sphere-auto-creation", 27) == 0) {
+				cReadModeA = 0;
+				cReadModeB = 0;
+				// 별도의 디코딩이 필요 없다.
+				m_pMapList[iMapIndex]->m_bIsEnergySphereAutoCreation = TRUE;
+			}
+
+			// 2002-7-4 몹이벤트시 몹의 갯수를 맵에서 설정 할 수 있게 한다.
+			if (memcmp(token, "mobevent-amount", 15) == 0) {
+				cReadModeA = 25;
 				cReadModeB = 1;
 			}
 
@@ -22943,6 +27176,8 @@ void CGame::Quit()
 
 	if (m_pNoticementData != NULL) delete m_pNoticementData;
 
+	if (m_pGold != NULL) delete m_pGold;
+
 }
 
 int CGame::iGetLevelExp(int iLevel)
@@ -22952,6 +27187,7 @@ int CGame::iGetLevelExp(int iLevel)
 	if (iLevel == 0) return 0;
 	
 	iRet = iGetLevelExp(iLevel - 1) + iLevel * ( 50 + (iLevel * (iLevel / 17) * (iLevel / 17) ) );
+
 
 	return iRet;
 }
@@ -22977,8 +27213,30 @@ BOOL CGame::bCheckLevelUp(int iClientH)
  char cLoopCnt;
 
 	if (m_pClientList[iClientH] == NULL) return FALSE;
+	
 	// 최대 레벨 제한 
-	if (m_pClientList[iClientH]->m_iLevel >= m_iPlayerMaxLevel) return FALSE;
+	if (m_pClientList[iClientH]->m_iLevel >= m_iPlayerMaxLevel) {
+		// 여기서 지존 관련 보너스 특성치 체크를 한다.
+		if (m_pClientList[iClientH]->m_iExp >= m_iLevelExpTable[m_iPlayerMaxLevel + 1]) {
+			// 경험치 환원
+			m_pClientList[iClientH]->m_iExp = m_iLevelExpTable[m_iPlayerMaxLevel];
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_EXP, NULL, NULL, NULL, NULL);
+			// 아이템 업그레이드 포인트 상승 
+			m_pClientList[iClientH]->m_iGizonItemUpgradeLeft++;
+			// if (m_pClientList[iClientH]->m_iGizonItemUpgradeLeft > 8) m_pClientList[iClientH]->m_iGizonItemUpgradeLeft = 8;
+			if (m_pClientList[iClientH]->m_iGizonItemUpgradeLeft > DEF_MAXGIZONPOINT ) m_pClientList[iClientH]->m_iGizonItemUpgradeLeft = DEF_MAXGIZONPOINT; // adamas
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_GIZONITEMUPGRADELEFT, m_pClientList[iClientH]->m_iGizonItemUpgradeLeft, 1, NULL, NULL);
+		}
+		return FALSE;
+	}
+
+	// v2.20 2002-12-31 민간인 모드 레벨 제한 과 이동지역 제한 추가 
+	// 기존의 레벨이 높은 캐릭터가 민간인 모드로 설정 되어 있으면 
+	if ((m_pClientList[iClientH]->m_iLevel > DEF_LIMITHUNTERLEVEL - 1 ) && (m_pClientList[iClientH]->m_bIsHunter == TRUE ) ) 
+	{
+		SetNoHunterMode(iClientH,TRUE) ;
+	}
+
 	if (m_pClientList[iClientH]->m_iExp < m_pClientList[iClientH]->m_iNextLevelExp) return FALSE;
 	
 	bStr = bVit = bDex = bInt = bMag = bChr = FALSE;
@@ -23036,9 +27294,10 @@ BOOL CGame::bCheckLevelUp(int iClientH)
 			// 특성치 재 계산. 
 			CalcTotalItemEffect(iClientH, -1, FALSE);
 
-			//v1.4 다음 레벨 
-			//wsprintf(G_cTxt, "(!) Level up: 레벨(%d) 경험치(%d) 다음레벨경험치(%d)", m_pClientList[iClientH]->m_iLevel, m_pClientList[iClientH]->m_iExp, m_pClientList[iClientH]->m_iNextLevelExp);
-			//PutLogFileList(G_cTxt);
+			if (m_pClientList[iClientH]->m_iLevel >= DEF_PLAYERMAXLEVEL) {
+				wsprintf(G_cTxt, "(!) 캐릭터(%s) 최고 레벨 도달", m_pClientList[iClientH]->m_cCharName);
+				PutLogFileList(G_cTxt);
+			}
 		}
 		else return TRUE;
 	}
@@ -23154,7 +27413,7 @@ void CGame::LevelUpSettingsHandler(int iClientH, char * pData, DWORD dwMsgSize)
 // v1.4311-3 추가 사투장 예약 함수 FightzoneReserveHandler
 void CGame::FightzoneReserveHandler(int iClientH, char * pData, DWORD dwMsgSize)
 {
- char * cp, cGuildName[21], cTxt[120], cData[100], cMsg[100];
+ char cData[100];
  int iFightzoneNum ,* ip ,  iEnableReserveTime ;
  DWORD * dwp, dwGoldCount ;
  WORD  * wp, wResult;
@@ -23177,6 +27436,9 @@ void CGame::FightzoneReserveHandler(int iClientH, char * pData, DWORD dwMsgSize)
 
 	// 잘못된 fightzone 번호를 걸러낸다.
 	if ((iFightzoneNum < 1) || (iFightzoneNum > DEF_MAXFIGHTZONE)) return;
+
+	// v2.05 길드전 연습용 사투장 1,2,3,4번은 당분간 판매하지 않는다.
+	//if ((iFightzoneNum >= 1) && (iFightzoneNum <= 4)) return;
 
 	// 사투장이 중복되지 않게 하기 위해 요일에 따라 사용할수 있는 사투장이 다르게 하기 위한 변수다.
 	// 홀수날에는 아레스덴 2 4 6 8 엘바인이 1 3 5 7  사투장이 사용가능하다 
@@ -23223,6 +27485,11 @@ void CGame::FightzoneReserveHandler(int iClientH, char * pData, DWORD dwMsgSize)
 		m_pClientList[iClientH]->m_iFightzoneNumber  = iFightzoneNum ;
 		m_pClientList[iClientH]->m_iReserveTime	 =  SysTime.wMonth*10000 + SysTime.wDay*100 + SysTime.wHour ;  
 
+		// v2.15 사투장 번호를 로그에 남기기 위해 
+#ifdef DEF_TAIWANLOG
+		_bItemLog(DEF_ITEMLOG_RESERVEFIGZONE,iClientH,(char *)NULL,NULL) ;
+#endif
+
 		if (SysTime.wHour%2 )	m_pClientList[iClientH]->m_iReserveTime  += 1  ;	// 홀수 시간대이면 한시간 후까지 예약된다.
 		else					m_pClientList[iClientH]->m_iReserveTime  += 2  ;    // 짝수 시간대이면 두 시간 후까지 예약된다.
 		wsprintf(G_cTxt, "(*) Reserve FIGHTZONETICKET : Char(%s) TICKENUMBER (%d)", m_pClientList[iClientH]->m_cCharName, m_pClientList[iClientH]->m_iReserveTime);		
@@ -23261,12 +27528,11 @@ void CGame::FightzoneReserveHandler(int iClientH, char * pData, DWORD dwMsgSize)
 }
 
 
-
 BOOL CGame::bCheckLimitedUser(int iClientH)
 {
 	if (m_pClientList[iClientH] == NULL) return FALSE;
 	
-	if ( (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) && 
+	if ( (m_pClientList[iClientH]->m_cSide == DEF_NETURAL) && 
 		 (m_pClientList[iClientH]->m_iExp >= m_iLevelExp20 ) ) {
 		// 여행자가 레벨 20 경험치를 얻었다면 19수준으로 환원. 
 
@@ -23274,7 +27540,6 @@ BOOL CGame::bCheckLimitedUser(int iClientH)
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_TRAVELERLIMITEDLEVEL, NULL, NULL, NULL, NULL);
 		return TRUE;
 	}
-
 
 	return FALSE;
 }
@@ -23290,7 +27555,7 @@ void CGame::RequestCivilRightHandler(int iClientH, char *pData)
 	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE) return;
 
 	// 이미 한 마을의 소속이 있다면 시민권을 가질 수 없다. 
-	if (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) != 0) wResult = 0;
+	if ( m_pClientList[iClientH]->m_cSide != DEF_NETURAL ) wResult = 0;
 	else wResult = 1;
 
 	// 레벨이 5 이하라도 시민권을 얻을 수 없다. 
@@ -23300,21 +27565,26 @@ void CGame::RequestCivilRightHandler(int iClientH, char *pData)
 		// 현재 맵의 이름을 할당한다.
 		ZeroMemory(m_pClientList[iClientH]->m_cLocation, sizeof(m_pClientList[iClientH]->m_cLocation));
 		strcpy(m_pClientList[iClientH]->m_cLocation, m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName);
+
+#ifdef DEF_TAIWANLOG
+		_bItemLog(DEF_ITEMLOG_APPLY, iClientH, (char) 0 , NULL) ;
+#endif
 	}
+
 
 	// Side 할당
 	if (memcmp(m_pClientList[iClientH]->m_cLocation, "aresden", 7) == 0) 
-		m_pClientList[iClientH]->m_cSide = 1;
+		m_pClientList[iClientH]->m_cSide = DEF_ARESDEN;
 
 	if (memcmp(m_pClientList[iClientH]->m_cLocation, "elvine", 6) == 0) 
-		m_pClientList[iClientH]->m_cSide = 2;
+		m_pClientList[iClientH]->m_cSide = DEF_ELVINE;
 
 	dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
 	*dwp = MSGID_RESPONSE_CIVILRIGHT;
 	wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
 	*wp  = wResult;
 
-	// v1.41 맵 이름 알려줌 
+	// v1.41 맵 이름 알려줌
 	cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
 	memcpy(cp, m_pClientList[iClientH]->m_cLocation, 10);
 	cp += 10;
@@ -23333,6 +27603,16 @@ void CGame::RequestCivilRightHandler(int iClientH, char *pData)
 
 	// 특성이 바뀌므로 외양을 새로 보낸다. 
 	SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTNULLACTION, NULL, NULL, NULL);
+	
+	// 시민권을 얻은 플레이어가 파티원이라면 파티에서 해제된다. 
+	if (m_pClientList[iClientH]->m_iPartyID != NULL) RequestDeletePartyHandler(iClientH);
+
+	// 2002-10-31 시민권 따는 순간에도 검사한다.
+	CheckSpecialEventThirdYear(iClientH);
+
+	// v2.20 2002-12-31 시민권 따는 순간 자동으로 민간인 모드로 설정된다.
+	RequestHuntmode(iClientH);
+
 }
 
 
@@ -23348,6 +27628,10 @@ void CGame::RequestRetrieveItemHandler(int iClientH, char *pData)
 
 	cp = (char *)(pData + DEF_INDEX2_MSGTYPE + 2);
 	cBankItemIndex = *cp;
+
+	// v2.20 2002-12-23 창고인지 체크 한다.
+	if (m_pClientList[iClientH]->m_bIsOnWarehouse == FALSE) return ;
+
 
 	if ((cBankItemIndex < 0) || (cBankItemIndex >= DEF_MAXBANKITEMS)) return;
 	if (m_pClientList[iClientH]->m_pItemInBankList[cBankItemIndex] == NULL) {
@@ -23414,6 +27698,16 @@ void CGame::RequestRetrieveItemHandler(int iClientH, char *pData)
 				delete m_pClientList[iClientH]->m_pItemInBankList[cBankItemIndex];
 				m_pClientList[iClientH]->m_pItemInBankList[cBankItemIndex] = NULL;
 
+				// v2.17 2002-7-31 새크리파이스 버그 여부를 판별하기 위해 추적 로그 추가 
+				if (m_pClientList[iClientH]->m_pItemList[i] != NULL)
+				{
+					if (m_pClientList[iClientH]->m_pItemList[i]->m_sIDnum == 650 )
+						_bItemLog(DEF_ITEMLOG_RETRIEVE, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[i], TRUE);
+					else 
+						_bItemLog(DEF_ITEMLOG_RETRIEVE, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[i]) ;
+				}
+
+
 				// 빈 공간을 없앤다. 
 				for ( j = 0; j <= DEF_MAXBANKITEMS - 2; j++) {
 					if ((m_pClientList[iClientH]->m_pItemInBankList[j+1] != NULL) && (m_pClientList[iClientH]->m_pItemInBankList[j] == NULL)) {
@@ -23444,6 +27738,12 @@ void CGame::RequestRetrieveItemHandler(int iClientH, char *pData)
 								
 				// 메시지 전송 
 				iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cMsg, 8);
+
+
+
+				// v2.13 성후니 추가 DB 부하를 줄이기 위한 변수
+				m_pClientList[iClientH]->m_bIsBankModified = TRUE ;
+
 				switch (iRet) {
 				case DEF_XSOCKEVENT_QUENEFULL:
 				case DEF_XSOCKEVENT_SOCKETERROR:
@@ -23475,6 +27775,16 @@ RRIH_NOQUANTITY:;
 				
 				m_pClientList[iClientH]->m_pItemInBankList[cBankItemIndex] = NULL;
 				
+				// v2.17 2002-7-31 새크리파이스 버그 여부를 판별하기 위해 추적 로그 추가 
+				if (m_pClientList[iClientH]->m_pItemList[i] != NULL)
+				{
+					if (m_pClientList[iClientH]->m_pItemList[i]->m_sIDnum == 650 )
+						_bItemLog(DEF_ITEMLOG_RETRIEVE, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[i], TRUE);
+					else 
+						_bItemLog(DEF_ITEMLOG_RETRIEVE, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[i]) ;
+				}
+
+				
 				// 빈 공간을 없앤다. 
 				for ( j = 0; j <= DEF_MAXBANKITEMS - 2; j++) {
 					if ((m_pClientList[iClientH]->m_pItemInBankList[j+1] != NULL) && (m_pClientList[iClientH]->m_pItemInBankList[j] == NULL)) {
@@ -23503,9 +27813,14 @@ RRIH_NOQUANTITY:;
 		
 				// 화살 할당
 				m_pClientList[iClientH]->m_cArrowIndex = _iGetArrowItemIndex(iClientH);
-					
+
+						
 				// 메시지 전송 
 				iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cMsg, 8);
+
+				// v2.13 성후니 추가 DB 부하를 줄이기 위한 변수
+				m_pClientList[iClientH]->m_bIsBankModified = TRUE ;
+
 				switch (iRet) {
 				case DEF_XSOCKEVENT_QUENEFULL:
 				case DEF_XSOCKEVENT_SOCKETERROR:
@@ -23554,6 +27869,9 @@ BOOL CGame::bSetItemToBankItem(int iClientH, short sItemIndex)
 	if (m_pClientList[iClientH] == NULL) return FALSE;
 	if ((sItemIndex < 0) || (sItemIndex >= DEF_MAXITEMS)) return FALSE;
 	if (m_pClientList[iClientH]->m_pItemList[sItemIndex] == NULL) return FALSE;
+	// v2.20 2002-12-23 창고인지 체크 한다.
+	if (m_pClientList[iClientH]->m_bIsOnWarehouse == FALSE) return FALSE;
+
 
 	for (i = 0; i < DEF_MAXBANKITEMS; i++)
 	if (m_pClientList[iClientH]->m_pItemInBankList[i] == NULL) {
@@ -23633,8 +27951,20 @@ BOOL CGame::bSetItemToBankItem(int iClientH, short sItemIndex)
 		*dwp = pItem->m_dwAttribute;
 		cp += 4;
 
+		// v2.14 창고에서 아이템을 가저오면 순도가 이상해지는 버그 수정 
+		*cp = (char) pItem->m_sItemSpecEffectValue2 ;
+		cp ++ ;
+
 		// 아이템 정보 전송 
-		iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, 55);
+		iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, 56);
+
+#ifdef DEF_TAIWANLOG
+		_bItemLog(DEF_ITEMLOG_DEPOSIT, iClientH, (int) -1, pItem);
+#endif
+
+		// v2.13 성후니 추가 DB 부하를 줄이기 위한 변수
+		m_pClientList[iClientH]->m_bIsBankModified = TRUE ;
+
 		switch (iRet) {
 		case DEF_XSOCKEVENT_QUENEFULL:
 		case DEF_XSOCKEVENT_SOCKETERROR:
@@ -23653,11 +27983,12 @@ BOOL CGame::bSetItemToBankItem(int iClientH, short sItemIndex)
 }
 
 
-void CGame::ApplyPKpenalty(short sAttackerH, short sVictumLevel)
+void CGame::ApplyPKpenalty(short sAttackerH, short sVictumH)
 {
  int iV1, iV2;
 
 	if (m_pClientList[sAttackerH] == NULL) return;
+	if (m_pClientList[sVictumH] == NULL) return;
 	// 안전 공격 모드가 켜진 상태에서 공격으로 인해 같은 편이 죽을수는 없지만 만약 있을경우 무시 
 	// 단 공격자가 범죄자가 아니어야만 해당된다.
 	if ((m_pClientList[sAttackerH]->m_bIsSafeAttackMode == TRUE) && (m_pClientList[sAttackerH]->m_iPKCount == 0)) return; 
@@ -23665,8 +27996,10 @@ void CGame::ApplyPKpenalty(short sAttackerH, short sVictumLevel)
 	// PK Count 증가  
 	m_pClientList[sAttackerH]->m_iPKCount++;
 
+	_bPKLog(DEF_PKLOG_BYPK,sAttackerH,sVictumH,NULL) ;
+
 	// 경험치 감소 
-	iV1 = iDice((sVictumLevel/2)+1, 50); 
+	iV1 = iDice((m_pClientList[sVictumH]->m_iLevel/2)+1, 50); 
 	iV2 = iDice((m_pClientList[sAttackerH]->m_iLevel/2)+1, 50);
 
 	m_pClientList[sAttackerH]->m_iExp -= iV1; 
@@ -23691,44 +28024,34 @@ void CGame::ApplyPKpenalty(short sAttackerH, short sVictumLevel)
 	if (m_pClientList[sAttackerH]->m_iRating > 10000)  m_pClientList[sAttackerH]->m_iRating =  10000;
 	if (m_pClientList[sAttackerH]->m_iRating < -10000) m_pClientList[sAttackerH]->m_iRating = -10000;
 	
-	// v2.03 PK시 강콜모드 삭제 
-/*	if (strcmp(m_pClientList[sAttackerH]->m_cLocation, "aresden") == 0) {
-		if ( (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "arebrk11") == 0)  ||
-			 (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "arebrk12") == 0)  ||
-			 (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "arebrk21") == 0)  ||
-			 (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "arebrk22") == 0)  ||
-			 (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "aresden") == 0)   ||
-			 (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "huntzone2") == 0) ||
-			 (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "areuni") == 0)    ||
-			 (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "arefarm") == 0)) {
-			
-			// 아레스덴 근교에서 PK를 했다. 블리딩 텔레포트 5분
-			ZeroMemory(m_pClientList[sAttackerH]->m_cLockedMapName, sizeof(m_pClientList[sAttackerH]->m_cLockedMapName));
-			strcpy(m_pClientList[sAttackerH]->m_cLockedMapName, "bisle");
-			m_pClientList[sAttackerH]->m_iLockedMapTime = 60*3;
-			RequestTeleportHandler(sAttackerH, "2   ", "bisle", -1, -1);
-			return;		
-		}
+
+	if ( m_pClientList[sAttackerH]->m_cSide == DEF_ARESDEN ) { // 2002-11-15 수정
+#ifndef DEF_PKPENALTY               //  v2.19 2002-11-18 PK 하면 무조건 감옥으로 
+		if (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cLocationName, "aresden") != 0 ) return ;
+#endif			
+		// 아레스덴 근교에서 PK를 했다. 블리딩 텔레포트 5분
+		// v2.16 성후니 수정
+		ZeroMemory(m_pClientList[sAttackerH]->m_cLockedMapName, sizeof(m_pClientList[sAttackerH]->m_cLockedMapName));
+		strcpy(m_pClientList[sAttackerH]->m_cLockedMapName, "arejail");
+		m_pClientList[sAttackerH]->m_iLockedMapTime = 60*3;
+		RequestTeleportHandler(sAttackerH, "2   ", "arejail", -1, -1);
+		return ;		
 	}
 
-	if (strcmp(m_pClientList[sAttackerH]->m_cLocation, "elvine") == 0) {
-		if ( (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "elvbrk11") == 0)  ||
-			 (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "elvbrk12") == 0)  ||
-			 (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "elvbrk21") == 0)  ||
-			 (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "elvbrk22") == 0)  ||
-			 (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "elvine") == 0)    ||
-			 (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "huntzone1") == 0) ||
-			 (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "elvuni") == 0)    ||
-			 (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cName, "elvfarm") == 0)) {
+	if ( m_pClientList[sAttackerH]->m_cSide == DEF_ELVINE ) { // 2002-11-15 수정
+
+#ifndef DEF_PKPENALTY               //  v2.19 2002-11-18 PK 하면 무조건 감옥으로 
+		if (strcmp(m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_cLocationName, "elvine") != 0  ) return ;
+#endif		
 			
-			// 아레스덴 근교에서 PK를 했다. 블리딩 텔레포트 5분
-			ZeroMemory(m_pClientList[sAttackerH]->m_cLockedMapName, sizeof(m_pClientList[sAttackerH]->m_cLockedMapName));
-			strcpy(m_pClientList[sAttackerH]->m_cLockedMapName, "bisle");
-			m_pClientList[sAttackerH]->m_iLockedMapTime = 60*3;
-			RequestTeleportHandler(sAttackerH, "2   ", "bisle", -1, -1);
-			return;		
-		}
-	} */
+		// 엘바인 근교에서 PK를 했다. 블리딩 텔레포트 5분
+		ZeroMemory(m_pClientList[sAttackerH]->m_cLockedMapName, sizeof(m_pClientList[sAttackerH]->m_cLockedMapName));
+		strcpy(m_pClientList[sAttackerH]->m_cLockedMapName, "elvjail");
+		m_pClientList[sAttackerH]->m_iLockedMapTime = 60*3;
+		RequestTeleportHandler(sAttackerH, "2   ", "elvjail", -1, -1);
+		return;		
+		
+	}
 }
 
 
@@ -23736,6 +28059,8 @@ void CGame::PK_KillRewardHandler(short sAttackerH, short sVictumH)
 {
 	if (m_pClientList[sAttackerH] == NULL) return;
 	if (m_pClientList[sVictumH] == NULL)   return;
+
+	_bPKLog(DEF_PKLOG_BYPLAYER,sAttackerH,sVictumH,NULL) ;
 
 	if (m_pClientList[sAttackerH]->m_iPKCount != 0) {
 		// PK를 잡은 사람이 PK면 아무런 득이 없다.
@@ -23757,12 +28082,37 @@ void CGame::PK_KillRewardHandler(short sAttackerH, short sVictumH)
 
 void CGame::EnemyKillRewardHandler(int iAttackerH, int iClientH)
 {
- int iRewardExp;
+ int iRewardExp, iEK_Level;
 
 	if (m_pClientList[iAttackerH] == NULL) return;
 	if (m_pClientList[iClientH] == NULL)   return;
-	if (m_pClientList[iAttackerH]->m_iLevel >= m_iPlayerMaxLevel) return;
 
+	_bPKLog(DEF_PKLOG_BYENERMY,iAttackerH,iClientH,NULL) ;
+
+	iEK_Level = 30;
+	if (m_pClientList[iAttackerH]->m_iLevel >= 80) iEK_Level = 80;
+
+	/* v2.181 2002-10-24 지존인 경우 경험치 적게 먹는 버그 수정 
+	if (m_pClientList[iAttackerH]->m_iLevel >= m_iPlayerMaxLevel) {
+		// 최고렙인 경우 무조건 레벨 80 이상을 잡아야 한다.
+		if (iGetExpLevel(m_pClientList[iClientH]->m_iExp) >= iEK_Level) {
+			// 희생자의 레벨이 80이상이고
+			if (memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iClientH]->m_cMapName, 10) != 0) {
+				// 희생자가 죽은 곳이 자신의 마을이 아니라면 EK로 인정 
+				m_pClientList[iAttackerH]->m_iEnemyKillCount++;
+			}
+		}
+		// 포상금 누적 
+		m_pClientList[iAttackerH]->m_iRewardGold += iDice(1, (iGetExpLevel(m_pClientList[iClientH]->m_iExp)));
+		if (m_pClientList[iAttackerH]->m_iRewardGold > DEF_MAXREWARDGOLD) 
+			m_pClientList[iAttackerH]->m_iRewardGold = DEF_MAXREWARDGOLD;
+		if (m_pClientList[iAttackerH]->m_iRewardGold < 0) 
+			m_pClientList[iAttackerH]->m_iRewardGold = 0;
+
+		// 적을 잡았다는 메시지 보냄 
+		SendNotifyMsg(NULL, iAttackerH, DEF_NOTIFY_ENEMYKILLREWARD, iClientH, NULL, NULL, NULL);
+		return;
+	} */
 	
 	if (m_pClientList[iAttackerH]->m_iPKCount != 0) {
 		// 적을 잡은 사람이 PK면 아무런 득이 없다.
@@ -23771,12 +28121,13 @@ void CGame::EnemyKillRewardHandler(int iAttackerH, int iClientH)
 		// 희생자의 시민, 길드원 여부에 따라 포상이 달라진다. 
 		if (m_pClientList[iClientH]->m_iGuildRank == -1) {
 			// 길드원이 아니므로 시민. (여행자의 경우에는 이 함수가 호출되지 않으므로)
-			iRewardExp = iDice(1, (2*iGetExpLevel(m_pClientList[iClientH]->m_iExp))) + iGetExpLevel(m_pClientList[iClientH]->m_iExp);
+			// v2.15 적을 죽였을때 평균경험치를 얻기위해 
+			iRewardExp = (iDice(3, (3*iGetExpLevel(m_pClientList[iClientH]->m_iExp))) + iGetExpLevel(m_pClientList[iClientH]->m_iExp))/ 3 ;
 			
 			if (m_bIsCrusadeMode == TRUE) {
 				// 크루세이드 모드라면 경험치의 (1/3)*3을 먼저 주고 나머지는 6배로 전쟁 공헌도에 누적 
-				m_pClientList[iAttackerH]->m_iExp += (iRewardExp/3)*4;
-				m_pClientList[iAttackerH]->m_iWarContribution += (iRewardExp - (iRewardExp/3))*12;
+				m_pClientList[iAttackerH]->m_iExp += iRewardExp;
+				m_pClientList[iAttackerH]->m_iWarContribution += (iRewardExp)*5;
 
 				if (m_pClientList[iAttackerH]->m_iWarContribution > DEF_MAXWARCONTRIBUTION)
 					m_pClientList[iAttackerH]->m_iWarContribution = DEF_MAXWARCONTRIBUTION;
@@ -23793,10 +28144,11 @@ void CGame::EnemyKillRewardHandler(int iAttackerH, int iClientH)
 				// 알려준다.
 				SendNotifyMsg(NULL, iAttackerH, DEF_NOTIFY_CONSTRUCTIONPOINT, m_pClientList[iAttackerH]->m_iConstructionPoint, m_pClientList[iAttackerH]->m_iWarContribution, NULL, NULL);
 
-				// 희생자의 레벨이 30 이상인 경우 Enemy Kill count를 올린다.
-				if (iGetExpLevel(m_pClientList[iClientH]->m_iExp) >= 30) {
-					// 희생자의 레벨이 30이상이고
-					if (memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iClientH]->m_cMapName, 10) != 0) {
+				// 희생자의 레벨이 80 이상인 경우 Enemy Kill count를 올린다.
+				if (iGetExpLevel(m_pClientList[iClientH]->m_iExp) >= iEK_Level) {
+					// 희생자의 레벨이 80이상이고
+					// 2002-11-14 사냥꾼 모드 추가 (사냥꾼은 죽여도 EK가 오르지 않는다.)
+					if ((memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iClientH]->m_cMapName, 10) != 0) ) {
 						// 희생자가 죽은 곳이 자신의 마을이 아니라면 EK로 인정 
 						m_pClientList[iAttackerH]->m_iEnemyKillCount++;
 					}
@@ -23811,10 +28163,12 @@ void CGame::EnemyKillRewardHandler(int iAttackerH, int iClientH)
 			else {
 				// 일반 모드.
 				m_pClientList[iAttackerH]->m_iExp += iRewardExp;
-				// 희생자의 레벨이 30 이상인 경우 Enemy Kill count를 올린다.
-				if (iGetExpLevel(m_pClientList[iClientH]->m_iExp) >= 30) {
-					// 희생자의 레벨이 30이상이고
-					if (memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iClientH]->m_cMapName, 10) != 0) {
+				// 희생자의 레벨이 80 이상인 경우 Enemy Kill count를 올린다.
+				if (iGetExpLevel(m_pClientList[iClientH]->m_iExp) >= iEK_Level) {
+					// 희생자의 레벨이 80이상이고
+					// 2002-11-14 사냥꾼 모드 추가 (사냥꾼은 죽여도 EK가 오르지 않는다.)
+					if ((memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iClientH]->m_cMapName, 10) != 0) )
+					{
 						// 희생자가 죽은 곳이 자신의 마을이 아니라면 EK로 인정 
 						m_pClientList[iAttackerH]->m_iEnemyKillCount++;
 					}
@@ -23828,14 +28182,15 @@ void CGame::EnemyKillRewardHandler(int iAttackerH, int iClientH)
 			}
 		}
 		else {
-			iRewardExp = iDice(1, (3*iGetExpLevel(m_pClientList[iClientH]->m_iExp))) + iGetExpLevel(m_pClientList[iClientH]->m_iExp);
+			// v2.15 적을 죽였을때 평균경험치를 얻기위해 
+			iRewardExp = (iDice(3, (3*iGetExpLevel(m_pClientList[iClientH]->m_iExp))) + iGetExpLevel(m_pClientList[iClientH]->m_iExp))/ 3 ;
 
 			// 길드원이다.
 			if (m_bIsCrusadeMode == TRUE) {
 				// 크루세이드 모드.
-				// 크루세이드 모드라면 경험치의 1/3을 먼저 주고 나머지는 2배로 전쟁 공헌도에 누적 
-				m_pClientList[iAttackerH]->m_iExp += (iRewardExp/3)*4;
-				m_pClientList[iAttackerH]->m_iWarContribution += (iRewardExp - (iRewardExp/3))*12;
+				// 크루세이드 모드라면 경험치를 먼저 주고 나머지는 5배로 전쟁 공헌도에 누적 
+				m_pClientList[iAttackerH]->m_iExp += iRewardExp;
+				m_pClientList[iAttackerH]->m_iWarContribution += (iRewardExp)*5;
 
 				if (m_pClientList[iAttackerH]->m_iWarContribution > DEF_MAXWARCONTRIBUTION)
 					m_pClientList[iAttackerH]->m_iWarContribution = DEF_MAXWARCONTRIBUTION;
@@ -23852,11 +28207,12 @@ void CGame::EnemyKillRewardHandler(int iAttackerH, int iClientH)
 				// 알려준다.
 				SendNotifyMsg(NULL, iAttackerH, DEF_NOTIFY_CONSTRUCTIONPOINT, m_pClientList[iAttackerH]->m_iConstructionPoint, m_pClientList[iAttackerH]->m_iWarContribution, NULL, NULL);
 				
-				// 희생자의 레벨이 30 이상인 경우 Enemy Kill count를 올린다.
-				if (iGetExpLevel(m_pClientList[iClientH]->m_iExp) >= 30) {
-					// 희생자의 레벨이 30이상이고
-					if (memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iClientH]->m_cMapName, 10) != 0) {
-						// 희생자가 죽은 곳이 자신의 마을이 아니라면 EK로 인정 
+				// 희생자의 레벨이 80 이상인 경우 Enemy Kill count를 올린다.
+				if (iGetExpLevel(m_pClientList[iClientH]->m_iExp) >= iEK_Level) {
+					// 희생자의 레벨이 80이상이고
+					// 2002-11-14 사냥꾼 모드 추가 (사냥꾼은 죽여도 EK가 오르지 않는다.)
+					if ((memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iClientH]->m_cMapName, 10) != 0) ) {
+
 						m_pClientList[iAttackerH]->m_iEnemyKillCount++;
 					}
 				}
@@ -23871,9 +28227,11 @@ void CGame::EnemyKillRewardHandler(int iAttackerH, int iClientH)
 				// 일반 모드.
 				m_pClientList[iAttackerH]->m_iExp += iRewardExp;
 				// Enemy Kill count를 올린다.
-				if (iGetExpLevel(m_pClientList[iClientH]->m_iExp) >= 30) {
-					// 희생자의 레벨이 30이상이고
-					if (memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iClientH]->m_cMapName, 10) != 0) {
+				if (iGetExpLevel(m_pClientList[iClientH]->m_iExp) >= iEK_Level) {
+					// 희생자의 레벨이 80이상이고
+					// 2002-11-14 사냥꾼 모드 추가 
+					if ((memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iClientH]->m_cMapName, 10) != 0) ) {
+
 						// 희생자가 죽은 곳이 자신의 마을이 아니라면 EK로 인정 
 						m_pClientList[iAttackerH]->m_iEnemyKillCount++;
 					}
@@ -23902,7 +28260,7 @@ void CGame::EnemyKillRewardHandler(int iAttackerH, int iClientH)
 	}
 }
 
-void CGame::ApplyCombatKilledPenalty(int iClientH, char cPenaltyLevel, BOOL bIsSAattacked)
+void CGame::ApplyCombatKilledPenalty(int iClientH, char cPenaltyLevel, BOOL bIsSAattacked, BOOL bItemDrop)
 {  
  int iExp;
 
@@ -23913,20 +28271,32 @@ void CGame::ApplyCombatKilledPenalty(int iClientH, char cPenaltyLevel, BOOL bIsS
 	if (m_bIsCrusadeMode == TRUE) {
 		// 크루세이드 모드인 경우 전쟁중에 죽어도 아무런 페널티가 없다.
 		// PKcount만 감소 
-		if (m_pClientList[iClientH]->m_iPKCount > 0) 
+		if (m_pClientList[iClientH]->m_iPKCount > 0) {
 			m_pClientList[iClientH]->m_iPKCount--;
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PKPENALTY, NULL, NULL, NULL, NULL);	
+			// v2.15 
+			_bPKLog(DEF_PKLOG_REDUCECRIMINAL,(int) -1,iClientH,NULL) ;
+
+		}
 		return;
 	}
 	else {
 		// PKcount 감소 
-		if (m_pClientList[iClientH]->m_iPKCount > 0) 
+		if (m_pClientList[iClientH]->m_iPKCount > 0) {
 			m_pClientList[iClientH]->m_iPKCount--;
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PKPENALTY, NULL, NULL, NULL, NULL);	
+			// v2.15
+			_bPKLog(DEF_PKLOG_REDUCECRIMINAL,(int) -1,iClientH,NULL) ;
+		}
 
 		// 플레이어로부터의 공격을 받고 전쟁중 사망했다.
 		iExp = iDice(1, (5*cPenaltyLevel*m_pClientList[iClientH]->m_iLevel));
 
 		// 중립인 경우 죽었을 때 떨어지는 경험치는 1/3
 		if (m_pClientList[iClientH]->m_bIsNeutral == TRUE) iExp = iExp / 3;
+
+		// v2.17 2002-7-31 최고렙은 죽었을때 경치가 떨어지지 않는다. 수정 
+		// if (m_pClientList[iClientH]->m_iLevel == DEF_PLAYERMAXLEVEL) iExp = 0;
 
 		m_pClientList[iClientH]->m_iExp -= iExp;
 		if (m_pClientList[iClientH]->m_iExp < 0) m_pClientList[iClientH]->m_iExp = 0;
@@ -23935,19 +28305,37 @@ void CGame::ApplyCombatKilledPenalty(int iClientH, char cPenaltyLevel, BOOL bIsS
 	
 		// v1.41 중립은 아이템이 떨어지지 않는다.
 		if (m_pClientList[iClientH]->m_bIsNeutral != TRUE) {
-			if (m_pClientList[iClientH]->m_iLevel < 50) {
-				// 레벨 50 미만은 아이템이 하나 적게 떨어진다.
+			// v2.19 2002-11-14
+#ifdef DEF_ITEMDROP
+			if (m_pClientList[iClientH]->m_iLevel < 80) {
+				// 레벨 80 미만은 아이템이 하나 적게 떨어진다.
+				// v2.03 60 -> 80
+				cPenaltyLevel--;
+				if (cPenaltyLevel <= 0) cPenaltyLevel = 1;
+
+				_PenaltyItemDrop(iClientH, cPenaltyLevel, bIsSAattacked,bItemDrop); 
+				
+			}
+			else 
+			{
+				_PenaltyItemDrop(iClientH, cPenaltyLevel, bIsSAattacked,bItemDrop); 
+			}
+#else
+			if (m_pClientList[iClientH]->m_iLevel < 80) {
+				// 레벨 80 미만은 아이템이 하나 적게 떨어진다.
+				// v2.03 60 -> 80
 				cPenaltyLevel--;
 				if (cPenaltyLevel <= 0) cPenaltyLevel = 1;
 				_PenaltyItemDrop(iClientH, cPenaltyLevel, bIsSAattacked);
 			}
 			else _PenaltyItemDrop(iClientH, cPenaltyLevel, bIsSAattacked);
+#endif
 		}
 	}
 }
 
 
-void CGame::_PenaltyItemDrop(int iClientH, int iTotal, BOOL bIsSAattacked)
+void CGame::_PenaltyItemDrop(int iClientH, int iTotal, BOOL bIsSAattacked , BOOL bItemDrop)
 {
  register int i, j, iRemainItem;
  char cItemIndexList[DEF_MAXITEMS], cItemIndex;
@@ -23956,24 +28344,76 @@ void CGame::_PenaltyItemDrop(int iClientH, int iTotal, BOOL bIsSAattacked)
 	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE) return;
 
 	if ((m_pClientList[iClientH]->m_iAlterItemDropIndex != -1) && (m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_iAlterItemDropIndex] != NULL)) {
-		// 대체적으로 떨어지는 아이템이 있다면 다른 아이템이 떨어지지 않고 이 아이템만 떨어진다. 
-		if (m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_iAlterItemDropIndex]->m_wCurLifeSpan > 0)
-			m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_iAlterItemDropIndex]->m_wCurLifeSpan--;
+		// Testcode
+		if (m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_iAlterItemDropIndex]->m_sItemEffectType == DEF_ITEMEFFECTTYPE_ALTERITEMDROP) {
+			// v2.04 스톤 오브 새크리파이스가 맞는지 확인
+			// 대체적으로 떨어지는 아이템이 있다면 다른 아이템이 떨어지지 않고 이 아이템만 떨어진다. 
+			if (m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_iAlterItemDropIndex]->m_wCurLifeSpan > 0)
+				m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_iAlterItemDropIndex]->m_wCurLifeSpan--;
 
-		DropItemHandler(iClientH, m_pClientList[iClientH]->m_iAlterItemDropIndex, -1, m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_iAlterItemDropIndex]->m_cName);
+			DropItemHandler(iClientH, m_pClientList[iClientH]->m_iAlterItemDropIndex, -1, m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_iAlterItemDropIndex]->m_cName);
+
+			m_pClientList[iClientH]->m_iAlterItemDropIndex = -1;
+		}
+		else {
+			// v2.04 testcode
+			PutLogFileList("Alter Drop Item Index Error1");
+			// 다시 검색 
+			for (i = 0; i < DEF_MAXITEMS; i++) 
+			if ((m_pClientList[iClientH]->m_pItemList[i] != NULL) && (m_pClientList[iClientH]->m_pItemList[i]->m_sItemEffectType == DEF_ITEMEFFECTTYPE_ALTERITEMDROP)) {
+				m_pClientList[iClientH]->m_iAlterItemDropIndex = i;
+				if (m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_iAlterItemDropIndex]->m_wCurLifeSpan > 0)
+					m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_iAlterItemDropIndex]->m_wCurLifeSpan--;
+
+				DropItemHandler(iClientH, m_pClientList[iClientH]->m_iAlterItemDropIndex, -1, m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_iAlterItemDropIndex]->m_cName);	
+				m_pClientList[iClientH]->m_iAlterItemDropIndex = -1;
+				return;
+			}
+
+			// 오류발생! 희생석이 없다. 
+			goto PID_DROP;
+		}
 		return;
 	}
+
+PID_DROP:;
 
 	for (i = 1; i <= iTotal; i++) {
 		iRemainItem = 0;
 		ZeroMemory(cItemIndexList, sizeof(cItemIndexList));
-		
-		for (j = 0; j < DEF_MAXITEMS; j++) 
-		if (m_pClientList[iClientH]->m_pItemList[j] != NULL) {
-			cItemIndexList[iRemainItem] = j;
-			iRemainItem++;
+
+#ifdef DEF_ITEMDROP
+		//v2.19 2002-11-14 소모성 아이템과 먹는 아이템만 드랍
+		if (bItemDrop) // 범죄자..
+		{		
+			//범죄자...			
+			for (j = 0; j < DEF_MAXITEMS; j++) 
+				if (m_pClientList[iClientH]->m_pItemList[j] != NULL )
+				{
+					cItemIndexList[iRemainItem] = j;
+					iRemainItem++;
+				}
 		}
-		
+		else 
+		{
+			//
+			for (j = 0; j < DEF_MAXITEMS; j++) 
+				if (m_pClientList[iClientH]->m_pItemList[j] != NULL 
+					&& ( (m_pClientList[iClientH]->m_pItemList[j]->m_cItemType == DEF_ITEMTYPE_CONSUME) 
+					|| (m_pClientList[iClientH]->m_pItemList[j]->m_cItemType == DEF_ITEMTYPE_EAT) ))
+				{
+					cItemIndexList[iRemainItem] = j;
+					iRemainItem++;
+				}
+		}
+#else
+		for (j = 0; j < DEF_MAXITEMS; j++) 
+			if (m_pClientList[iClientH]->m_pItemList[j] != NULL )
+			{
+				cItemIndexList[iRemainItem] = j;
+				iRemainItem++;
+			}
+#endif
 		if (iRemainItem == 0) return;
 		cItemIndex = cItemIndexList[ iDice(1, iRemainItem) - 1 ];
 		
@@ -24329,6 +28769,7 @@ void CGame::CalculateSSN_ItemIndex(int iClientH, short sWeaponIndex, int iValue)
 		case 9:
 		case 10:
 		case 11:
+		case 14:  // v2.16 망치류 공격 
 			if (m_pClientList[iClientH]->m_cSkillMastery[sSkillIndex] > (m_pClientList[iClientH]->m_iDex * 2)) {
 				// 제한치보다 커졌다. 무효이므로 이전상태로 되돌린다.
 				m_pClientList[iClientH]->m_cSkillMastery[sSkillIndex]--;
@@ -24338,7 +28779,6 @@ void CGame::CalculateSSN_ItemIndex(int iClientH, short sWeaponIndex, int iValue)
 			break;
 
 		case 12:
-		case 14:
 		case 15:
 		case 19:
 			if (m_pClientList[iClientH]->m_cSkillMastery[sSkillIndex] > (m_pClientList[iClientH]->m_iInt * 2)) {
@@ -24407,8 +28847,24 @@ void CGame::CalculateSSN_SkillIndex(int iClientH, short sSkillIndex, int iValue)
 	// 기술 수준이 0이라면 스킬은 오르지 않는다.
 	if (m_pClientList[iClientH]->m_cSkillMastery[sSkillIndex] == 0) return;
 
+    // v2.19 2002-11-17 공격 스킬은 빨리 오른다.
+	switch (sSkillIndex) {
+	case 4:
+	case 5:
+	case 6:
+	case 7:
+	case 8:
+	case 9:
+	case 10:
+	case 14:
+	case 21:
+		iValue *= 2 ;
+		break;
+	}
+
 #ifdef DEF_TESTSERVER
-	iValue = iValue *100;
+	iValue = iValue * 100;
+	
 #endif
 
 	iOldSSN = m_pClientList[iClientH]->m_iSkillSSN[sSkillIndex];
@@ -24425,7 +28881,6 @@ void CGame::CalculateSSN_SkillIndex(int iClientH, short sSkillIndex, int iValue)
 		// 특성치 제한이 있는 Skill을 처리한다.
 		switch (sSkillIndex) {
 		case 0:
-		case 2:
 		case 5:
 		case 13:
 			if (m_pClientList[iClientH]->m_cSkillMastery[sSkillIndex] > (m_pClientList[iClientH]->m_iStr * 2)) {
@@ -24463,6 +28918,7 @@ void CGame::CalculateSSN_SkillIndex(int iClientH, short sSkillIndex, int iValue)
 		case 9:
 		case 10:
 		case 11:
+		case 14: // v2.16 성후니 수정 
 			if (m_pClientList[iClientH]->m_cSkillMastery[sSkillIndex] > (m_pClientList[iClientH]->m_iDex * 2)) {
 				// 제한치보다 커졌다. 무효이므로 이전상태로 되돌린다.
 				m_pClientList[iClientH]->m_cSkillMastery[sSkillIndex]--;
@@ -24471,8 +28927,8 @@ void CGame::CalculateSSN_SkillIndex(int iClientH, short sSkillIndex, int iValue)
 			else m_pClientList[iClientH]->m_iSkillSSN[sSkillIndex] = 0;
 			break;
 
+		case 2:		//v2.19 2002-12-16 농사 스킬 관련 INT로 제한..
 		case 12:
-		case 14:
 		case 15:
 		case 19:
 			if (m_pClientList[iClientH]->m_cSkillMastery[sSkillIndex] > (m_pClientList[iClientH]->m_iInt * 2)) {
@@ -24534,17 +28990,19 @@ void CGame::MobGenerator()
  register int i, j, iNamingValue, iResult, iTotalMob;
  char cNpcName[21], cName_Master[11], cName_Slave[11], cWaypoint[11];
  char cSA;
- int  pX, pY, iMapLevel, iProbSA, iKindSA, iResultNum, iMin;
+ int  pX, pY, iMapLevel, iProbSA, iKindSA, iResultNum, iMin, iFirmSAType;
  BOOL bMaster, bFirmBerserk, bIsSpecialEvent;
  double dV1, dV2, dV3;
+ short sNpcType = 0 ;
+
  
 	if (m_bOnExitProcess == TRUE) return;
 	
 	for (i = 0; i < DEF_MAXMAPS; i++) {
 		// Random Mob Generator
-		
-		/*
 		iResultNum = 0;
+
+#ifdef DEF_CHECKUSERNPCNUM
 		// v1.432 월드 서버의 총 사용자 수에 비례하여 최대 오브젝트 수를 결정한다. 1000명 이상이면 100%  최소 50%
 		if ((m_pMapList[i] != NULL) && (m_pMapList[i]->m_bRandomMobGenerator == TRUE)) {
 			// 사용자 수에 비례하여 랜덤 몹 갯수 보정.
@@ -24564,16 +29022,12 @@ void CGame::MobGenerator()
 			if (iResultNum > (m_pMapList[i]->m_iMaximumObject - 30)) iResultNum = (m_pMapList[i]->m_iMaximumObject - 30);
 			if (iResultNum < iMin) iResultNum = iMin;
 		}
-		*/
+#endif		
 
 		//if ( (m_pMapList[i] != NULL) && (m_pMapList[i]->m_bRandomMobGenerator == TRUE) && 
 		//	 ((m_pMapList[i]->m_iMaximumObject - 30) > m_pMapList[i]->m_iTotalActiveObject) ) {
 
-		// 크루세이드 모드일때는 평소의 30% 수준으로 몬스터가 생성된다.
 		if (m_pMapList[i] != NULL) {
-			//if (m_bIsCrusadeMode == TRUE) 
-			//	 iResultNum = (m_pMapList[i]->m_iMaximumObject - 30) / 3;
-			//else iResultNum = (m_pMapList[i]->m_iMaximumObject - 30);
 			iResultNum = (m_pMapList[i]->m_iMaximumObject - 30);
 		}
 				
@@ -24593,18 +29047,29 @@ void CGame::MobGenerator()
 			
 				ZeroMemory(cNpcName, sizeof(cNpcName));
 			
+				// 고정 특수 능력 플래그 
+				iFirmSAType  = NULL;
 				bFirmBerserk = FALSE;
 				iResult = iDice(1,100);
 				// 몹 제네레이터의 레벨 
 				switch (m_pMapList[i]->m_cRandomMobGeneratorLevel) {
 				case 1:
-					if ((iResult >= 1) && (iResult < 40)) {
-						iResult = 1;
+					if ((iResult >= 1) && (iResult < 20)) {
+						iResult = 1;  // 슬라임 
 					}
-					else if ((iResult >= 40) && (iResult < 80)) {
-						iResult = 2;
+					else if ((iResult >= 20) && (iResult < 40)) {
+						iResult = 2;  // 개미 
 					}
-					else iResult = 3;
+					else if ((iResult >= 40) && (iResult < 85)) {
+						iResult = 24; // 토끼 
+					}
+					else if ((iResult >= 85) && (iResult < 95)) {
+						iResult = 25; // 고양이 
+					}				
+					else if ((iResult >= 95) && (iResult <= 100)) {
+						iResult = 3;  // 오크 
+					}
+
 					iMapLevel = 1;
 					break;
 
@@ -24619,12 +29084,15 @@ void CGame::MobGenerator()
 					iMapLevel = 1;
 					break;
 
-				case 3:     // v1.4334 몹제너레이터 변경
-					if ((iResult >= 1) && (iResult < 25)) {
+				case 3:     // v1.4334 몹제너레이터 변경 // MiddleLand
+					if ((iResult >= 1) && (iResult < 20)) {
 						switch ( iDice(1,2) ) {
 						case 1: iResult = 3; break;
 						case 2: iResult = 4; break;
 						}
+					}
+					else if ((iResult >= 20) && (iResult < 25)) {
+						iResult = 30;  //v2.19 2002-12-9 루돌프 추가 관련
 					}
 					else if ((iResult >= 25) && (iResult < 50)) {
 						switch ( iDice(1,3) ) {
@@ -24634,21 +29102,25 @@ void CGame::MobGenerator()
 						}
 					}
 					else if ((iResult >= 50) && (iResult < 75)) {
-						switch ( iDice(1,5) ) {	
-						case 1:
+						// 2002-09-12 #1 Ettin 추가 고랩 사냥터에
+						switch ( iDice(1,7) ) {	
+						case 1: 
 						case 2: iResult = 8;  break;
 						case 3:	iResult = 11; break;
 						case 4:	iResult = 12; break;
 						case 5: iResult = 18; break;
+						case 6: iResult = 26; break;
+						case 7: iResult = 28; break;	// Ettin
 						}
-						
 					}
 					else if ((iResult >= 75) && (iResult <= 100)) {
-						switch ( iDice(1,4) ) {
+						// 2002-09-12 #1 Mountain-Giant 추가
+						switch ( iDice(1,5) ) {
 						case 1:
 						case 2:	iResult = 9;  break;
 						case 3:	iResult = 13; break;
 						case 4: iResult = 14; break;
+						case 5: iResult = 27; break;	// Mountain-Giant
 						}
 					}
 					iMapLevel = 4;
@@ -24715,7 +29187,7 @@ void CGame::MobGenerator()
 					iMapLevel = 3;
 					break;
 
-				case 6:
+				case 6: // huntzone 2,4
 					if ((iResult >= 1) && (iResult < 60)) {
 						switch ( iDice(1,4) ) {
 						case 1: iResult = 5; break;
@@ -24724,29 +29196,33 @@ void CGame::MobGenerator()
 						case 4: iResult = 4; break;
 						}
 					}
-					else if ((iResult >= 60) && (iResult < 95)) {
+					else if ((iResult >= 60) && (iResult < 90)) {
 						switch ( iDice(1,4) ) {
 						case 1:
 						case 2: iResult = 8;  break;
 						case 3:	iResult = 11; break;
 						case 4:	iResult = 12; break;
 						}
-						
 					}
-					else if ((iResult >= 95) && (iResult <= 100)) {
-						switch ( iDice(1,5) ) {
-						case 1:
+					else if ((iResult >= 90) && (iResult <= 100)) {
+						// 2002-09-12 #1 Ettin 추가 고랩 사냥터에
+						// 2002-09-12 #1 Mountain-Giant, Cannibal-Plant 추가
+						switch ( iDice(1,8) ) {
+						case 1: iResult = 26; break;
 						case 2:	iResult = 9;  break;
 						case 3:	iResult = 13; break;
 						case 4: iResult = 14; break;
 						case 5: iResult = 18; break;
+						case 6: iResult = 28; break;	// Ettin
+						case 7: iResult = 27; break;	// Mountain-Giant
+						case 8: iResult = 29; break;	// Cannibal-Plant
 						}
 					}
 					iMapLevel = 4;
 					break;
 
-				case 7:
-					if ((iResult >= 1) && (iResult < 70)) {
+				case 7: // 화원(areuni, elvuni)
+					if ((iResult >= 1) && (iResult < 50)) {
 						switch ( iDice(1,4) ) {
 						case 1:	iResult = 1;  break;
 						case 2: iResult = 2;  break;
@@ -24754,7 +29230,10 @@ void CGame::MobGenerator()
 						case 4: iResult = 3;  break;
 						}
 					}
-					else if ((iResult >= 70) && (iResult < 95)) {
+					else if ((iResult >= 50) && (iResult < 60)) {
+						iResult = 30;  //v2.19 2002-12-9 루돌프 추가 관련
+					}
+					else if ((iResult >= 60) && (iResult < 85)) {
 						switch ( iDice(1,4) ) {
 						case 1:
 						case 2:
@@ -24762,8 +29241,8 @@ void CGame::MobGenerator()
 						case 4: iResult = 12; break;
 						}
 					}
-					else if ((iResult >= 95) && (iResult < 100)) {
-						switch ( iDice(1,3) ) {
+					else if ((iResult >= 85) && (iResult < 100)) {
+						switch ( iDice(1,4) ) {
 						case 1: iResult = 12; break;
 						case 2: iResult = 2;  break;
 						case 3: 
@@ -24771,6 +29250,8 @@ void CGame::MobGenerator()
 								 iResult = 17;
 							else iResult = 12;
 							break;
+						// 2002-09-18 #1
+						case 4: iResult = 29; break; // Cannibal-Plant
 						}
 					}
 					iMapLevel = 4;
@@ -24895,10 +29376,10 @@ void CGame::MobGenerator()
 						case 3: iResult = 8; break;
 						}
 					}
-					iMapLevel = 3;
+					iMapLevel = 4;
 					break;
 
-				case 12:
+				case 12: // middled1n
 					if ((iResult >= 1) && (iResult < 50)) {
 						switch ( iDice(1,3) ) {
 						case 1:	iResult = 1 ; break;
@@ -24913,13 +29394,152 @@ void CGame::MobGenerator()
 						}
 					}
 					else if ((iResult >= 85) && (iResult < 100)) {
-						switch ( iDice(1,2) ) {
+						switch ( iDice(1,3) ) {
 						case 1: iResult = 8; break;
 						case 2: iResult = 11; break;
+						case 3: iResult = 26; break;
 						}
 					}
-					iMapLevel = 2;
+					iMapLevel = 4;
 					break;
+
+				case 13: // 타워 오브 헬 1층 : 광 스켈레톤, 광 오우거, 광 헬하운드
+					if ((iResult >= 1) && (iResult < 15)) {
+						// 광 스켈레톤 : 마법 혹은  대미지 흡수 
+						iResult = 4;
+						bFirmBerserk = TRUE;
+						iFirmSAType  = 4 - (iDice(1,2)-1);
+					}
+					else if ((iResult >= 15) && (iResult < 40)) {
+						// 광 헬하운드 : 물리 대미지 흡수 
+						iResult = 14;
+						bFirmBerserk = TRUE;
+						iFirmSAType  = 4 - (iDice(1,2)-1);
+					}
+
+					else if ((iResult >= 40) && (iResult < 60)) {
+						// 광 사이클롭스 : 물리 대미지 흡수 
+						iResult = 9;
+						bFirmBerserk = TRUE;
+						iFirmSAType  = 4 - (iDice(1,2)-1);
+					}
+					else if ((iResult >= 60) && (iResult < 75)) {
+						// 광 오우거 : 마법 대미지 흡수 
+						iResult = 13;
+						bFirmBerserk = TRUE;
+						iFirmSAType  = 4 - (iDice(1,2)-1);
+					}
+					else if ((iResult >= 75) && (iResult < 95)) {
+						// 다크 엘프
+						iResult = 23;
+					}
+					else if ((iResult >= 95) && (iResult < 100)) {
+						// 비홀더
+						iResult = 22;
+					}
+					iMapLevel = 4;
+					break;
+
+				case 14: // 타워 오브 헬 2층 : 다크 엘프, 비홀더, 광 리치, 데몬 
+					if ((iResult >= 1) && (iResult < 30)) {
+						// 다크 엘프 
+						iResult = 23;
+					}
+					else if ((iResult >= 30) && (iResult < 50)) {
+						// 비홀더
+						iResult = 22;
+					}
+					else if ((iResult >= 50) && (iResult < 70)) {
+						// 광 리치 : 마법 대미지 흡수 
+						iResult = 15;
+						bFirmBerserk = TRUE;
+						iFirmSAType  = 4 - (iDice(1,2)-1);
+					}
+					else if ((iResult >= 70) && (iResult < 90)) {
+						// 데몬
+						iResult = 16;
+					}	
+					else if ((iResult >= 90) && (iResult < 100)) {
+						// 가고일
+						iResult = 21;
+					}
+					iMapLevel = 4;
+					break;
+
+				case 15: // 가고일, 다크 엘프, 비홀더, 광 데몬 
+					if ((iResult >= 1) && (iResult < 35)) {
+						// 다크 엘프 
+						iResult = 23;
+						bFirmBerserk = TRUE;
+					}
+					else if ((iResult >= 35) && (iResult < 50)) {
+						// 비홀더
+						iResult = 22;
+						bFirmBerserk = TRUE;
+					}
+					else if ((iResult >= 50) && (iResult < 80)) {
+						// 광 데몬 
+						iResult = 16;
+						bFirmBerserk = TRUE;
+					}
+					else if ((iResult >= 80) && (iResult < 100)) {
+						// 가고일
+						iResult = 21;
+					}
+					iMapLevel = 4;
+					break;
+				case 16: //Huntzone 1,2 초보 미들.  //v2.19 2002-12-9
+					if ((iResult >= 1) && (iResult < 40)) {
+						switch ( iDice(1,3) ) {
+						case 1:	iResult = 1 ; break;
+						case 2: iResult = 2 ; break;
+						case 3: iResult = 10; break;
+						}
+					}
+					else if ((iResult >= 40) && (iResult < 50)) {
+						iResult = 30;	//v2.19 2002-12-9 루돌프 추가 관련
+					}
+					else if ((iResult >= 50) && (iResult < 85)) {
+						switch ( iDice(1,2) ) {
+						case 1: iResult = 5; break;
+						case 2: iResult = 4; break;
+						}
+					}
+					else if ((iResult >= 85) && (iResult < 100)) {
+						switch ( iDice(1,3) ) {
+						case 1: iResult = 8; break;
+						case 2: iResult = 11; break;
+						case 3: iResult = 26; break;
+						}
+					}
+					iMapLevel = 1 ;
+					break;
+				case 17:	//v2.19 2002-12-18 맵 몬스터 아이템 추가
+					if ((iResult >= 1) && (iResult < 30)) {
+						switch ( iDice(1,4) ) {
+						case 1:	iResult = 22 ; break;
+						case 2: iResult = 8; break;
+						case 3: iResult = 24 ; break;
+						case 4: iResult = 5; break;
+						}
+					}
+					else if ((iResult >= 30) && (iResult < 40)) {
+						iResult = 30;	//v2.19 2002-12-9 루돌프 추가 관련
+					}
+					else if ((iResult >= 40) && (iResult < 70)) {
+						iResult = 32;
+						
+					}
+					else if ((iResult >= 70) && (iResult < 90)) {
+						iResult = 31;
+						if (iDice(1,5) == 1) bFirmBerserk = TRUE;
+					}
+					else if ((iResult >= 90) && (iResult <= 100)) {
+						iResult = 33;
+					}
+					iMapLevel = 1 ;
+					break;
+
 				}
 
 				pX = NULL;
@@ -24957,11 +29577,16 @@ void CGame::MobGenerator()
 						// 데몬 혹은 유니콘을 생성 
 						if (iDice(1,3) == 2) {
 							// 셋중 한번은 데몬이 생성된다.
-							if ((memcmp(m_pMapList[i]->m_cLocationName, "aresden", 7)   == 0) ||
-								(memcmp(m_pMapList[i]->m_cLocationName, "middled1n", 9) == 0) ||
-								(memcmp(m_pMapList[i]->m_cLocationName, "elvine", 6)    == 0)) {
+							// v2.14 농경지에서는 대몬이 잘 생성 않되게 수정 
+							// v2.19 2002-11-12 강콜 지역을 확대하기 위해 LocationName 을 m_cName 으로 변경함 
+							// Location Name을 강콜 지역으로 설정함 .
+							if ((memcmp(m_pMapList[i]->m_cName, "aresden", 7)   == 0) ||
+								(memcmp(m_pMapList[i]->m_cName, "middled1n", 9) == 0) ||
+								(memcmp(m_pMapList[i]->m_cName, "arefarm", 7) == 0) ||
+								(memcmp(m_pMapList[i]->m_cName, "elvfarm", 7) == 0) ||
+								(memcmp(m_pMapList[i]->m_cName, "elvine", 6)    == 0)) {
 									// 마을 내에서는 데몬의 출현 가능성을 더 낮춘다. 
-								if (iDice(1,20) == 5) 
+								if (iDice(1,30) == 5) 
 									 iResult = 16;
 								else iResult = 5;
 							}
@@ -24977,35 +29602,52 @@ void CGame::MobGenerator()
 				
 				ZeroMemory(cNpcName, sizeof(cNpcName));
 				switch (iResult) {
-				case 1:  strcpy(cNpcName, "Slime");       iProbSA = 5;  iKindSA = 1; break;
-				case 2:  strcpy(cNpcName, "Giant-Ant");   iProbSA = 10; iKindSA = 2; break;
-				case 3:  strcpy(cNpcName, "Orc");         iProbSA = 15; iKindSA = 1; break;
-				case 4:  strcpy(cNpcName, "Zombie");      iProbSA = 15; iKindSA = 3; break;
-				case 5:  strcpy(cNpcName, "Skeleton");    iProbSA = 35; iKindSA = 8; break;
-				case 6:  strcpy(cNpcName, "Orc-Mage");    iProbSA = 30; iKindSA = 7; break;
-				case 7:  strcpy(cNpcName, "Scorpion");    iProbSA = 15; iKindSA = 3; break;
-				case 8:  strcpy(cNpcName, "Stone-Golem"); iProbSA = 25; iKindSA = 5; break;
-				case 9:  strcpy(cNpcName, "Cyclops");     iProbSA = 35; iKindSA = 8; break;
-				case 10: strcpy(cNpcName, "Amphis");      iProbSA = 20; iKindSA = 3; break;
-				case 11: strcpy(cNpcName, "Clay-Golem");  iProbSA = 20; iKindSA = 5; break;
-				case 12: strcpy(cNpcName, "Troll");       iProbSA = 25; iKindSA = 3; break; 
-				case 13: strcpy(cNpcName, "Orge");        iProbSA = 25; iKindSA = 1; break;
-				case 14: strcpy(cNpcName, "Hellbound");   iProbSA = 25; iKindSA = 8; break;
-				case 15: strcpy(cNpcName, "Liche");		  iProbSA = 30; iKindSA = 8; break;
-				case 16: strcpy(cNpcName, "Demon");			iProbSA = 20; iKindSA = 8; break;
-				case 17: strcpy(cNpcName, "Unicorn");		iProbSA = 35; iKindSA = 7; break;
-				case 18: strcpy(cNpcName, "WereWolf");		iProbSA = 25; iKindSA = 1; break;
-				case 19: strcpy(cNpcName, "YB-Aresden");	iProbSA = 15; iKindSA = 1; break;
-				case 20: strcpy(cNpcName, "YB-Elvine");		iProbSA = 15; iKindSA = 1; break;
-				default: strcpy(cNpcName, "Orc");			iProbSA = 15; iKindSA = 1; break;
+				case 1:  strcpy(cNpcName, "Slime");     sNpcType = 10 ;   iProbSA = 5;  iKindSA = 1; break;
+				case 2:  strcpy(cNpcName, "Giant-Ant"); sNpcType = 16 ;   iProbSA = 10; iKindSA = 2; break;
+				case 3:  strcpy(cNpcName, "Orc");       sNpcType = 14 ;   iProbSA = 15; iKindSA = 1; break;
+				case 4:  strcpy(cNpcName, "Zombie");    sNpcType = 18 ;   iProbSA = 15; iKindSA = 3; break;
+				case 5:  strcpy(cNpcName, "Skeleton");  sNpcType = 11 ;   iProbSA = 35; iKindSA = 8; break;
+				case 6:  strcpy(cNpcName, "Orc-Mage");  sNpcType = 14 ;   iProbSA = 30; iKindSA = 7; break;
+				case 7:  strcpy(cNpcName, "Scorpion");  sNpcType = 17 ;   iProbSA = 15; iKindSA = 3; break;
+				case 8:  strcpy(cNpcName, "Stone-Golem"); sNpcType = 12 ; iProbSA = 25; iKindSA = 5; break;
+				case 9:  strcpy(cNpcName, "Cyclops");    sNpcType = 13 ;  iProbSA = 35; iKindSA = 8; break;
+				case 10: strcpy(cNpcName, "Amphis");     sNpcType = 22 ;  iProbSA = 20; iKindSA = 3; break;
+				case 11: strcpy(cNpcName, "Clay-Golem"); sNpcType = 23 ;  iProbSA = 20; iKindSA = 5; break;
+				case 12: strcpy(cNpcName, "Troll");      sNpcType = 28 ;  iProbSA = 25; iKindSA = 3; break; 
+				case 13: strcpy(cNpcName, "Orge");       sNpcType = 29 ;  iProbSA = 25; iKindSA = 1; break;
+				case 14: strcpy(cNpcName, "Hellbound");  sNpcType = 27 ;  iProbSA = 25; iKindSA = 8; break;
+				case 15: strcpy(cNpcName, "Liche");		 sNpcType = 30 ;  iProbSA = 30; iKindSA = 8; break;
+				case 16: strcpy(cNpcName, "Demon");		 sNpcType = 31 ;  iProbSA = 20; iKindSA = 8; break;
+				case 17: strcpy(cNpcName, "Unicorn");	 sNpcType = 32 ;  iProbSA = 35; iKindSA = 7; break;
+				case 18: strcpy(cNpcName, "WereWolf");	 sNpcType = 33 ;  iProbSA = 25; iKindSA = 1; break;
+				case 19: strcpy(cNpcName, "YB-Aresden"); sNpcType = 1 ;   iProbSA = 15; iKindSA = 1; break;
+				case 20: strcpy(cNpcName, "YB-Elvine");	 sNpcType = 1 ;   iProbSA = 15; iKindSA = 1; break;
+				case 21: strcpy(cNpcName, "Gagoyle");	 sNpcType = 52 ;  iProbSA = 20; iKindSA = 8; break;
+				case 22: strcpy(cNpcName, "Beholder");	 sNpcType = 53 ;  iProbSA = 20; iKindSA = 5; break;
+				case 23: strcpy(cNpcName, "Dark-Elf");	 sNpcType = 54 ;  iProbSA = 20; iKindSA = 3; break;
+				// v2.17 토끼와 고양이를 추가한다.
+				case 24: strcpy(cNpcName, "Rabbit");	 sNpcType = 55 ;  iProbSA =  5; iKindSA = 1; break;
+				case 25: strcpy(cNpcName, "Cat");		 sNpcType = 56 ;  iProbSA = 10; iKindSA = 2; break;
+				case 26: strcpy(cNpcName, "Giant-Frog"); sNpcType = 57 ;  iProbSA = 10; iKindSA = 2; break;
+				// 2002-09-12 #1 몬스터 추가
+				case 27: strcpy(cNpcName, "Mountain-Giant");  sNpcType = 58 ; 	iProbSA = 25; iKindSA = 1; break;
+				case 28: strcpy(cNpcName, "Ettin");			  sNpcType = 59 ;	iProbSA = 20; iKindSA = 8; break;
+				case 29: strcpy(cNpcName, "Cannibal-Plant");  sNpcType = 60 ; 	iProbSA = 20; iKindSA = 5; break;
+				//v2.19 2002-12-9 루돌프 추가 관련 
+				case 30: strcpy(cNpcName, "Rudolph");    sNpcType = 61 ; 	iProbSA = 20; iKindSA = 5; break;
+				case 31: strcpy(cNpcName, "Ice-Golem");  sNpcType = 65 ;    iProbSA = 35; iKindSA = 8; break;
+				case 32: strcpy(cNpcName, "DireBoar");  sNpcType = 62 ; 	iProbSA = 20; iKindSA = 5; break;
+				case 33: strcpy(cNpcName, "Frost");		 sNpcType = 63 ;    iProbSA = 30; iKindSA = 8; break;
+				default: strcpy(cNpcName, "Orc");		      sNpcType = 14 ; 	iProbSA = 15; iKindSA = 1; break;
 				}
 
 				// v1.411 몬스터의 특수 특성치를 입력한다. 
 				cSA = 0;
-				if (iDice(1,100) <= iProbSA) {
-					cSA = _cGetSpecialAbility(iKindSA);
+				if (iFirmSAType == NULL) {
+					if (iDice(1,100) <= iProbSA) cSA = _cGetSpecialAbility(iKindSA);
 				}
-								
+				else cSA = (char)iFirmSAType;
+												
 				if ((bMaster = bCreateNewNpc(cNpcName, cName_Master, m_pMapList[i]->m_cName, (rand() % 3), cSA, DEF_MOVETYPE_RANDOM, &pX, &pY, cWaypoint, NULL, NULL, -1, FALSE, FALSE, bFirmBerserk, TRUE)) == FALSE) {
 					// 실패했으므로 예약된 NameValue를 해제시킨다.
 					m_pMapList[i]->SetNamingValueEmpty(iNamingValue);
@@ -25017,24 +29659,42 @@ void CGame::MobGenerator()
 			
 			// 처음 생성된 몹의 종류에 따른 생성 갯수를 계산한다.
 			switch (iResult) {
-			case 1:	 iTotalMob = iDice(1,5)-1; break;
-			case 2:	 iTotalMob = iDice(1,5)-1; break;
-			case 3:	 iTotalMob = iDice(1,5)-1; break;
-			case 4:	 iTotalMob = iDice(1,3)-1; break;
+			case 1:	 iTotalMob = iDice(1,5)-1; break;  // Slime 
+			case 2:	 iTotalMob = iDice(1,5)-1; break; // Giant-Ant
+			case 3:	 iTotalMob = iDice(1,5)-1; break; // Orc
+			case 4:	 iTotalMob = iDice(1,3)-1; break; // Zombie
 			case 5:	 iTotalMob = iDice(1,3)-1; break;
-			case 6:  iTotalMob = iDice(1,3)-1; break;
-			case 7:  iTotalMob = iDice(1,3)-1; break;
-			case 8:  iTotalMob = iDice(1,2)-1; break;
+			case 6:  iTotalMob = iDice(1,3)-1; break; // Skeleton
+			case 7:  iTotalMob = iDice(1,3)-1; break; // Scorpion
+			case 8:  iTotalMob = iDice(1,2)-1; break; // Stone-Golem
 			case 9:  iTotalMob = iDice(1,2)-1; break;
-			case 10: iTotalMob = iDice(1,5)-1; break;
-			case 11: iTotalMob = iDice(1,3)-1; break;
-			case 12: iTotalMob = iDice(1,5)-1; break;
-			case 13: iTotalMob = iDice(1,3)-1; break;
-			case 14: iTotalMob = iDice(1,3)-1; break;
-			case 15: iTotalMob = iDice(1,3)-1; break;
-			case 16: iTotalMob = iDice(1,2)-1; break;
-			case 17: iTotalMob = iDice(1,2)-1; break;
-			case 18: iTotalMob = iDice(1,5)-1; break;
+			case 10: iTotalMob = iDice(1,5)-1; break; // Amphis
+			case 11: iTotalMob = iDice(1,3)-1; break; // Clay-Golem
+			case 12: iTotalMob = iDice(1,5)-1; break; // Troll
+			case 13: iTotalMob = iDice(1,3)-1; break; // Orge
+			case 14: iTotalMob = iDice(1,3)-1; break; // Rabbit
+			case 15: iTotalMob = iDice(1,3)-1; break; // Cat
+			case 16: iTotalMob = iDice(1,2)-1; break; // Giant-Frog
+			case 17: iTotalMob = iDice(1,2)-1; break; // Mountain-Giant
+			case 18: iTotalMob = iDice(1,5)-1; break; // Ettin
+			case 21: iTotalMob = iDice(1,2)-1; break; // Cannibal-Plant
+			case 22: iTotalMob = iDice(1,2)-1; break;
+			case 23: iTotalMob = iDice(1,5)-1; break;
+			// v2.17 토끼와 고양이 추가
+			case 24: iTotalMob = iDice(1,2)-1; break;
+			case 25: iTotalMob = iDice(1,2)-1; break;
+			case 26: iTotalMob = iDice(1,4)-1; break;
+			// 2002-09-12 #1
+			case 27: iTotalMob = iDice(1,2)-1; break;
+			case 28: iTotalMob = iDice(1,3)-1; break;
+			case 29: iTotalMob = iDice(1,3)-1; break;
+			//v2.19 2002-12-11 루돌프 추가 관련 
+			case 30: iTotalMob = iDice(1,3)-1; break;
+
+			case 31: iTotalMob = iDice(1,5)-1; break;
+			case 32: iTotalMob = iDice(1,3)-1; break;
+			case 33: iTotalMob = iDice(1,3)-1; break;
+
 			default: iTotalMob = 0; break;
 			}
 			// 마스터를 생성할 수 없었다면 슬레이브도 만들지 않는다. 
@@ -25046,7 +29706,7 @@ void CGame::MobGenerator()
 			// v1.432 몬스터의 종류에 따라 무리를 지을 확률이 다르다.
 			if (iTotalMob >= 2) {
 				switch (iResult) {
-				case 1:  // Slime 
+				case 1:   // Slime 
 				case 2:  // Giant-Ant
 				case 3:  // Orc
 				case 4:  // Zombie
@@ -25057,7 +29717,17 @@ void CGame::MobGenerator()
 				case 11: // Clay-Golem
 				case 12: // Troll
 				case 13: // Orge
-					if (iDice(1,5) != 1) iTotalMob = 0;  // 75% 확률로 혼자 발생.
+				case 24: // Rabbit
+				case 25: // Cat
+				case 26: // Giant-Frog
+				case 27: // Mountain-Giant
+				case 28: // Ettin
+				case 29: // Cannibal-Plant
+				//v2.19 2002-12-11 루돌프 추가 관련 
+				case 30:
+				case 32: // DireBoar
+				case 33: // Frost
+					if (iDice(1,5) != 1) iTotalMob = 0;  // 25% 확률로 혼자 발생.
 					break;
 
 				case 9:  // Cyclops
@@ -25067,24 +29737,42 @@ void CGame::MobGenerator()
 				case 16: // Demon
 				case 17: // Unicorn
 				case 18: // WereWolf
+				case 31: // Ice-Golem
 					if (iDice(1,5) == 1) iTotalMob = 0;  // 75% 확률로 무리를 짓는다.
+					break;
+
+				default: // 기타 다른 몬스터들은 무조건 무리를 짓는다.
 					break;
 				}
 			}
 			
 			// 만약 정기정으로 몹을 대량 추가해야 할 시점이라면 슬레이브 갯수를 늘린다. Special Event 1번 
+			// 2002-7-4
 			if (bIsSpecialEvent == TRUE) {
 				switch (m_cSpecialEventType) {
 				case 1:
 					// 몹 이벤트
-					if ((iResult != 15) && (iResult != 16)) iTotalMob = 30;
+					if ((iResult != 15) && (iResult != 16) && (iResult != 21))
+						iTotalMob = m_pMapList[i]->sMobEventAmount;
+
+
+						for (j = 1; j < DEF_MAXCLIENTS; j++) 
+							if ((m_pClientList[j] != NULL) && (m_pClientList[j]->m_bIsInitComplete == TRUE) && (m_pClientList[j]->m_cMapIndex == i)) 
+								SendNotifyMsg(NULL, j, DEF_NOTIFY_MONSTEREVENT_POSITION, pX, pY, sNpcType, NULL);	
+
 					break;
+
 				
 				case 2:
 					// 데몬 출몰 
-					if ( (memcmp(m_pMapList[i]->m_cLocationName, "aresden", 7) == 0) ||
-						 (memcmp(m_pMapList[i]->m_cLocationName, "elvine",  6) == 0) ) {
-						// 만약 마을이라면 슬래이브 데몬은 없다.
+					// v2.19 2002-11-12 강콜 지역을 확대하기 위해 LocationName 을 m_cName 으로 변경함 
+					// Location Name을 강콜 지역으로 설정함 .
+
+					if ( (memcmp(m_pMapList[i]->m_cName, "aresden", 7) == 0) ||
+						 (memcmp(m_pMapList[i]->m_cName, "elvine",  6) == 0) ||
+						 (memcmp(m_pMapList[i]->m_cName, "elvfarm", 7) == 0) ||
+						 (memcmp(m_pMapList[i]->m_cName, "arefarm", 7) == 0) ) {
+						// v2.14 마을과 농경지라면 슬레이브 데몬은 없다. 
 						iTotalMob = 0;
 					}
 					break;
@@ -25101,11 +29789,12 @@ void CGame::MobGenerator()
 					cName_Slave[0] = '_';
 					cName_Slave[1] = i + 65;
 			
-					// v1.411 몬스터의 특수 특성치를 입력한다. 
+					// v1.411 몬스터의 특수 특성치를 입력한다.
 					cSA = 0;
-					if (iDice(1,100) <= iProbSA) {
-						cSA = _cGetSpecialAbility(iKindSA);
+					if (iFirmSAType == NULL) {
+						if (iDice(1,100) <= iProbSA) cSA = _cGetSpecialAbility(iKindSA);
 					}
+					else cSA = (char)iFirmSAType;
 
 					if (bCreateNewNpc(cNpcName, cName_Slave, m_pMapList[i]->m_cName, (rand() % 3), cSA, DEF_MOVETYPE_RANDOM, &pX, &pY, cWaypoint, NULL, NULL, -1, FALSE, FALSE, bFirmBerserk) == FALSE) {
 						// 실패했으므로 예약된 NameValue를 해제시킨다.
@@ -25143,46 +29832,73 @@ void CGame::MobGenerator()
 					case 13:  strcpy(cNpcName,"Cyclops");      iProbSA = 35; iKindSA = 8; break;
 					case 22:  strcpy(cNpcName,"Amphis");       iProbSA = 20; iKindSA = 3; break;
 					case 23:  strcpy(cNpcName,"Clay-Golem");   iProbSA = 20; iKindSA = 5; break;
-
 					case 24:  strcpy(cNpcName,"Guard-Aresden");iProbSA = 20; iKindSA = 1; break;
 					case 25:  strcpy(cNpcName,"Guard-Elvine"); iProbSA = 20; iKindSA = 1; break;
-					case 26:  strcpy(cNpcName,"Guard-Neutral"); iProbSA = 20; iKindSA = 1; break;
+					case 26:  strcpy(cNpcName,"Guard-Neutral");iProbSA = 20; iKindSA = 1; break;
 					case 27:  strcpy(cNpcName,"Hellbound");    iProbSA = 20; iKindSA = 1; break;
+					case 29:  strcpy(cNpcName,"Orge");         iProbSA = 20; iKindSA = 1; break;
 					case 30:  strcpy(cNpcName,"Liche");        iProbSA = 30; iKindSA = 8; break;
 					case 31:  strcpy(cNpcName,"Demon");        iProbSA = 20; iKindSA = 8; break;
 					case 32:  strcpy(cNpcName,"Unicorn");      iProbSA = 35; iKindSA = 7; break;
-					case 33:  strcpy(cNpcName,"Werewolf");     iProbSA = 25; iKindSA = 1; break;
+					case 33:  strcpy(cNpcName,"WereWolf");     iProbSA = 25; iKindSA = 1; break;
 					case 34:  strcpy(cNpcName,"Dummy");        iProbSA = 5;  iKindSA = 1; break;
 					// v1.4334 공격하는 더미와 공격하지 않는 더미를 넣었다.
 					case 35:  strcpy(cNpcName,"Attack-Dummy"); iProbSA = 5;  iKindSA = 1; break;
 					case 48:  strcpy(cNpcName,"Stalker");      iProbSA = 20; iKindSA = 3; break;
 					case 49:  
-						if (iDice(1, 2*60*60) == 135) {
+						if (iDice(1, 40*60*60) == 13) {
 							strcpy(cNpcName,"Hellclaw");
 							iProbSA = 20;
 							iKindSA = 8;
 						}
-						else {
-							strcpy(cNpcName, "Orc");
-							iProbSA = 15;
-							iKindSA = 1;
-						}
 						break;
 					
 					case 50:  
-						if (iDice(1, 2*60*60) == 135) {
+						if (iDice(1, 2*60*30) == 135) {
 							strcpy(cNpcName,"Tigerworm");
 							iProbSA = 20;
 							iKindSA = 8;
 						}
 						else {
-							strcpy(cNpcName, "Orc");
+							strcpy(cNpcName, "Stalker");
 							iProbSA = 15;
 							iKindSA = 1;
 						}
 						break;
 
-					default: 
+					case 51:  strcpy(cNpcName,"Hellclaw");      iProbSA = 20; iKindSA = 8; break;
+					case 52:  strcpy(cNpcName,"Tigerworm");     iProbSA = 20; iKindSA = 8; break;
+					case 53:  strcpy(cNpcName,"Dark-Elf");      iProbSA = 20; iKindSA = 8; break;
+					case 54:  strcpy(cNpcName,"Beholder");      iProbSA = 20; iKindSA = 8; break;
+					case 55:  strcpy(cNpcName,"Gagoyle");       iProbSA = 20; iKindSA = 8; break;
+					case 56:
+						if (iDice(1, 2*60*30) == 13) {
+							strcpy(cNpcName,"Hellclaw");
+							iProbSA = 20;
+							iKindSA = 8;
+						}
+						break;
+
+					// v2.17 몬스터 추가 (2002-09-12 #1)
+					case 57:   strcpy(cNpcName,"Giant-Frog");		iProbSA = 10; iKindSA = 2; break;
+
+					// 2002-09-12 #1 몬스터 추가
+					case 58:   strcpy(cNpcName,"Mountain-Giant");	iProbSA = 25; iKindSA = 1; break;
+					case 59:   strcpy(cNpcName,"Ettin");			iProbSA = 20; iKindSA = 8; break;
+					case 60:   strcpy(cNpcName,"Cannibal_Plant");	iProbSA = 20; iKindSA = 5; break;
+					//v2.19 2002-12-9 루돌프 추가 관련
+					case 61:   strcpy(cNpcName,"Rudolph");			iProbSA = 20; iKindSA = 1; break;
+					//v2.20 2002-12-9 몬스터 추가 관련 (npc.cfg랑 밑에 숫자는 같지가 않음.. -_-;;)
+					case 62:   strcpy(cNpcName,"DireBoar");			iProbSA = 20; iKindSA = 1; break;
+					case 63:   strcpy(cNpcName,"Frost");			iProbSA = 20; iKindSA = 8; break;
+					case 65:   strcpy(cNpcName,"Ice-Golem");		iProbSA = 20; iKindSA = 8; break;
+					case 66:   strcpy(cNpcName,"Wyvern");			iProbSA = 20; iKindSA = 1; break;
+					case 5 :   strcpy(cNpcName,"Rabbit");			iProbSA = 20; iKindSA = 1; break;
+					//v2.20 2002-12-20 도우미 NPC
+					case 67:   strcpy(cNpcName,"McGaffin");			iProbSA = 20; iKindSA = 1; break;
+					case 68:   strcpy(cNpcName,"Perry");			iProbSA = 20; iKindSA = 1; break;
+					case 69:   strcpy(cNpcName,"Devlin");			iProbSA = 20; iKindSA = 1; break;
+					default:
 						strcpy(cNpcName, "Orc");
 						iProbSA = 15; 
 						iKindSA = 1; 
@@ -25191,7 +29907,7 @@ void CGame::MobGenerator()
 
 					// Spot Mob Generator도 FirmBersek된 몬스터를 생성한다.
 					bFirmBerserk = FALSE;
-					if ((m_pMapList[i]->m_cRandomMobGeneratorLevel >= 9) && (iDice(1,3) == 1)) bFirmBerserk = TRUE;
+					if ((m_pMapList[i]->m_cRandomMobGeneratorLevel >= 9) &&(iMapLevel >= 4) && (iDice(1,3) == 1)  ) bFirmBerserk = TRUE;
 					
 					ZeroMemory(cName_Master, sizeof(cName_Master));
 					wsprintf(cName_Master, "XX%d", iNamingValue);
@@ -25316,7 +30032,7 @@ CNW_GET_VALIDLOC_SUCCESS:;
 
 void CGame::DeleteNpc(int iNpcH)
 {
- int  i, iNamingValue;
+ int  i, iNamingValue, iItemID = 0 ;
  char cTmp[21], cItemName[21];
  class CItem * pItem;
  DWORD dwCount, dwTime;
@@ -25362,164 +30078,198 @@ void CGame::DeleteNpc(int iNpcH)
 			break;	
 		}
 		break;
+
+	// 2002-12-24 전면전시 소환할 수 있는 (건물 수를 제외한) NPC의 수를 제한한다.(대만 요청)
+	case 43:
+	case 44:
+	case 45:
+	case 46:
+	case 47:
+	case 51:
+		for (i = 0; i < DEF_MAXGUILDS; i++) 
+		if (m_pGuildTeleportLoc[i].m_iV1 == m_pNpcList[iNpcH]->m_iGuildGUID) {
+			m_pGuildTeleportLoc[i].m_iNumSummonNpc--;
+			if (m_pGuildTeleportLoc[i].m_iNumSummonNpc < 0) m_pGuildTeleportLoc[i].m_iNumSummonNpc = 0;
+			break;
+		}
+		break;
+
+	case 64:	//v2.19 2002-12-16 농사 스킬 관련
+		m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->bRemoveCropsTotalSum();
+		break;
 	}
 
 	// DelayEvent를 삭제 
 	bRemoveFromDelayEventList(iNpcH, DEF_OWNERTYPE_NPC, NULL);
+
+	int iItemprobability = 65 ;
+
+	if((m_iMiddlelandMapIndex == m_pNpcList[iNpcH]->m_cMapIndex) && (m_iMiddlelandMapIndex != -1))
+	{
+		iItemprobability = 55 ;
+	}
+
 	if (m_pNpcList[iNpcH]->m_bIsSummoned == FALSE) {
 		// 소환몹이 아니라면 연금 재료가 나온다.
 		pItem = new class CItem;
 		ZeroMemory(cItemName, sizeof(cItemName));
+
 		switch (m_pNpcList[iNpcH]->m_sType) {
 		case 10: 
-			if (iDice(1,16) == 1) strcpy(cItemName, "슬라임젤리");					// 1/16
+			if (iDice(1,25) == 1) iItemID = 220 ;				 // "슬라임젤리"	1/16
 			break;
 		case 16:
 			switch (iDice(1,3)) {
-			case 1: if (iDice(1,9) == 1)  strcpy(cItemName, "큰개미다리"); break;	// 1/18
-			case 2: if (iDice(1,10) == 1) strcpy(cItemName, "큰개미더듬이"); break;	// 1/20
-			case 3: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+			case 1: if (iDice(1,9) == 1)  iItemID = 192 ; break; // "큰개미다리"	// 1/18
+			case 2: if (iDice(1,10) == 1) iItemID = 193 ; break; // "큰개미더듬이"	// 1/20
+			case 3: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);
 			default: break;
 			}
 			break;
 		case 22:
 			switch (iDice(1,5)) {
-			case 1: if (iDice(1,5) == 1) strcpy(cItemName, "뱀고기"); break;	// 1/20
-			case 2: if (iDice(1,6) == 1) strcpy(cItemName, "뱀껍질"); break;	// 1/24
-			case 3: if (iDice(1,6) == 1) strcpy(cItemName, "뱀이빨"); break;	// 1/24
-			case 4: if (iDice(1,7) == 1) strcpy(cItemName, "뱀혀"); break;		// 1/28
-			case 5: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;	
+			case 1: if (iDice(1,15) == 1) iItemID = 188 ; break; // "뱀고기"	// 1/20
+			case 2: if (iDice(1,16) == 1) iItemID = 189 ; break; // "뱀껍질"	// 1/24
+			case 3: if (iDice(1,16) == 1) iItemID = 190 ; break; // "뱀이빨"	// 1/24
+			case 4: if (iDice(1,17) == 1) iItemID = 191 ; break; // "뱀혀"		// 1/28
+			case 5: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);	
 			default: break;
 			}
 			break;
 		case 14:
 			switch (iDice(1,4)) {
-			case 1: if (iDice(1,7) == 1) strcpy(cItemName, "오크고기"); break;	// 1/21
-			case 2: if (iDice(1,10) == 1) strcpy(cItemName,"오크가죽"); break;	// 1/30
-			case 3: if (iDice(1,11) == 1) strcpy(cItemName,"오크이빨"); break;	// 1/33
-			case 4: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+			case 1: if (iDice(1,11) == 1) iItemID = 206 ; break; // "오크고기"	// 1/21
+			case 2: if (iDice(1,20) == 1) iItemID = 207 ; break; // "오크가죽"	// 1/30
+			case 3: if (iDice(1,21) == 1) iItemID = 208 ; break; // "오크이빨"	// 1/33
+			case 4: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);
 			default: break;
 			}
 			break;
 		case 17:
 			switch (iDice(1,5)) {
-			case 1: if (iDice(1,7) == 1) strcpy(cItemName, "큰전갈집게"); break;	// 1/28
-			case 2: if (iDice(1,7) == 1) strcpy(cItemName, "큰전갈고기"); break;	// 1/28
-			case 3: if (iDice(1,9) == 1) strcpy(cItemName, "큰전갈독침"); break;	// 1/36
-			case 4: if (iDice(1,8) == 1) strcpy(cItemName, "큰전갈껍질"); break;	// 1/32
-			case 5: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+			// 2002-7-15 전갈 집게와 껍질 나올 확률 변경 
+			case 1: if (iDice(1,50) == 1) iItemID = 215 ; break; // "큰전갈집게"	// 1/28
+			case 2: if (iDice(1,20) == 1) iItemID = 216 ; break; // "큰전갈고기"	// 1/28
+			case 3: if (iDice(1,50) == 1) iItemID = 217 ; break; // "큰전갈독침"	// 1/36
+			case 4: if (iDice(1,40) == 1) iItemID = 218 ; break; // "큰전갈껍질"	// 1/32
+			case 5: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);
 			default: break;
 			}
 			break;
 
 		case 18: // Zombie
 			switch (iDice(1,1)) {
-			case 1: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+			case 1: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);
 		 	}
 			break;
 
 		case 11:
 			switch (iDice(1,2)) {
-			case 1: if (iDice(1,30) == 1) strcpy(cItemName, "해골뼈다귀"); break;	// 1/30
-			case 2: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+			case 1: if (iDice(1,20) == 1) iItemID = 219 ; break; // "해골뼈다귀"	// 1/30
+			case 2: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);
 			}
 			break;
 		case 23:
 			switch (iDice(1,2)) {
-			case 1: if (iDice(1,30) == 1) strcpy(cItemName, "진흙덩이"); break;		// 1/30
-			case 2: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+			case 1: if (iDice(1,30) == 1) iItemID = 205 ; break; // "진흙덩이"		// 1/30
+			case 2: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);
 			}
 			break;
 		case 12:
 			switch (iDice(1,2)) {
-			case 1: if (iDice(1,30) == 1) strcpy(cItemName, "스톤골렘조각"); break;	// 1/30  
-			case 2: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+			case 1: if (iDice(1,30) == 1) iItemID = 221 ; break; // "스톤골렘조각"	// 1/30  
+			case 2: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);
 			}
 			break;
 		case 27:
 			switch (iDice(1,7)) {
-			case 1: if (iDice(1,10) == 1) strcpy(cItemName,"헬하운드심장"); break;	// 1/60
-			case 2: if (iDice(1,8) == 1) strcpy(cItemName, "헬하운드가죽"); break;	// 1/48
-			case 3: if (iDice(1,8) == 1) strcpy(cItemName, "헬하운드꼬리"); break;	// 1/48
-			case 4: if (iDice(1,6) == 1)  strcpy(cItemName,"헬하운드이빨"); break;	// 1/36
-			case 5: if (iDice(1,6) == 1)  strcpy(cItemName,"헬하운드발톱"); break;	// 1/36
-			case 6: if (iDice(1,10) == 1) strcpy(cItemName,"헬하운드혀"); break;	// 1/60
-			case 7: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+			case 1: if (iDice(1,40) == 1) iItemID = 199 ; break; // "헬하운드심장"	// 1/60
+			case 2: if (iDice(1,38) == 1) iItemID = 200 ; break; // "헬하운드가죽"	// 1/48
+			case 3: if (iDice(1,38) == 1) iItemID = 201 ; break; // "헬하운드꼬리"	// 1/48
+			case 4: if (iDice(1,36) == 1) iItemID = 202 ; break; // "헬하운드이빨"	// 1/36
+			case 5: if (iDice(1,36) == 1) iItemID = 203 ; break; // "헬하운드발톱"	// 1/36
+			case 6: if (iDice(1,50) == 1) iItemID = 204 ; break; // "헬하운드혀"	// 1/60
+			case 7: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);
 			default: break;
 			}
 			break;
 		case 13:
 			switch (iDice(1,6)) {
-			case 1: if (iDice(1,16) == 1) strcpy(cItemName, "싸이클롭스눈알"); break;	// 1/80
-			case 2: if (iDice(1,20) == 1) strcpy(cItemName, "싸이클롭스손칼날"); break;	// 1/100
-			case 3: if (iDice(1,20) == 1)  strcpy(cItemName,"싸이클롭스심장"); break;	// 1/100
-			case 4: if (iDice(1,12) == 1)  strcpy(cItemName,"싸이클롭스고기"); break;	// 1/60
-			case 5: if (iDice(1,18) == 1)  strcpy(cItemName,"싸이클롭스가죽"); break;	// 1/90
-			case 6: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+			case 1: if (iDice(1,36) == 1) iItemID = 194 ; break; // "싸이클롭스눈알"	// 1/80
+			case 2: if (iDice(1,40) == 1) iItemID = 195 ; break; // "싸이클롭스손칼날"	// 1/100
+			case 3: if (iDice(1,30) == 1) iItemID = 196 ; break; // "싸이클롭스심장"	// 1/100
+			case 4: if (iDice(1,22) == 1) iItemID = 197 ; break; // "싸이클롭스고기"	// 1/60
+			// 2002-09-11 #2
+			// case 5: if (iDice(1,48) == 1) iItemID = 198 ; break; // "싸이클롭스가죽"	// 1/90
+			case 5: if (iDice(1,40) == 1) iItemID = 198 ; break; // "싸이클롭스가죽"	// 1/90
+			case 6: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);
 			default: break;
 			}
 			break;
 		case 28:
 			switch (iDice(1,5)) {
-			case 1: if (iDice(1,15) == 1) strcpy(cItemName, "트롤심장"); break;	// 1/60
-			case 2: if (iDice(1,13) == 1) strcpy(cItemName, "트롤고기"); break;	// 1/52
-			case 3: if (iDice(1,15) == 1) strcpy(cItemName, "트롤가죽"); break;	// 1/60
-			case 4: if (iDice(1,17) == 1) strcpy(cItemName, "트롤발톱"); break;	// 1/68
-			case 5: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+			case 1: if (iDice(1,35) == 1) iItemID = 222 ; break; // "트롤심장"	// 1/60
+			case 2: if (iDice(1,23) == 1) iItemID = 223 ; break; // "트롤고기"	// 1/52
+			case 3: if (iDice(1,25) == 1) iItemID = 224 ; break; // "트롤가죽"	// 1/60
+			case 4: if (iDice(1,27) == 1) iItemID = 225 ; break; // "트롤발톱"	// 1/68
+			case 5: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);
 			default: break;
 			}
 			break;
 		case 29:
 			switch (iDice(1,7)) {
-			case 1: if (iDice(1,20) == 1) strcpy(cItemName, "오우거머리카락"); break;	// 1/120
-			case 2: if (iDice(1,22) == 1) strcpy(cItemName, "오우거심장"); break;		// 1/132
-			case 3: if (iDice(1,15) == 1) strcpy(cItemName, "오우거고기"); break;		// 1/90
-			case 4: if (iDice(1,15) == 1) strcpy(cItemName, "오우거가죽"); break;		// 1/90
-			case 5: if (iDice(1,18) == 1) strcpy(cItemName, "오우거이빨"); break;		// 1/108
-			case 6: if (iDice(1,18) == 1) strcpy(cItemName, "오우거발톱"); break;		// 1/108
-			case 7: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+			case 1: if (iDice(1,20) == 1) iItemID = 209 ; break; // "오우거머리카락"	// 1/120
+			case 2: if (iDice(1,22) == 1) iItemID = 210 ; break; // "오우거심장"		// 1/132
+			case 3: if (iDice(1,25) == 1) iItemID = 211 ; break; // "오우거고기"		// 1/90
+			case 4: if (iDice(1,25) == 1) iItemID = 212 ; break; // "오우거가죽"		// 1/90
+			case 5: if (iDice(1,28) == 1) iItemID = 213 ; break; // "오우거이빨"		// 1/108
+			case 6: if (iDice(1,28) == 1) iItemID = 214 ; break; // "오우거발톱"		// 1/108
+			case 7: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);
 			default: break;
 			}
 			break;
 		case 30:
 			// 리치
 			switch (iDice(1,1)) {
-			case 1: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+			case 1: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);
 			}
 			break;
 
 		case 31:
 			// 데몬이 죽었을 경우 
 			switch (iDice(1,5)) {
-			case 1: if (iDice(1,400) == 123) strcpy(cItemName, "데몬심장"); break;	
-			case 2:	if (iDice(1,100) == 123) strcpy(cItemName, "데몬고기"); break;	
-			case 3:	if (iDice(1,200) == 123) strcpy(cItemName, "데몬가죽"); break;	
-			case 4:	if (iDice(1,300) == 123) strcpy(cItemName, "데몬눈알"); break;	
-			case 5: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+			case 1: if (iDice(1,400) == 123) iItemID = 541 ; break; // "데몬심장"
+			case 2:	if (iDice(1,100) == 123) iItemID = 542 ; break; // "데몬고기"
+			case 3:	if (iDice(1,200) == 123) iItemID = 543 ; break; // "데몬가죽"
+			case 4:	if (iDice(1,300) == 123) iItemID = 540 ; break; // "데몬눈알"
+			case 5: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);
 			}
 			break;
 
 		case 32:
 			// 유니콘 죽었을때 
 			switch (iDice(1,5)) {
-			case 1: if (iDice(1,2000) == 396) strcpy(cItemName, "유니콘뿔");   break;	  
-			case 2: if (iDice(1,500) == 3)    strcpy(cItemName, "유니콘심장"); break;	
-			case 3: if (iDice(1,100) == 3)    strcpy(cItemName, "유니콘고기"); break;	
-			case 4: if (iDice(1,200) == 3)    strcpy(cItemName, "유니콘가죽"); break;	
-			case 5: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+			case 1: if (iDice(1,3000) == 396) iItemID = 544 ; break; // "유니콘뿔");   break;	  
+			case 2: if (iDice(1,500) == 3)    iItemID = 545 ; break; // "유니콘심장"	
+			case 3: if (iDice(1,100) == 3)    iItemID = 546 ; break; // "유니콘고기"	
+			case 4: if (iDice(1,200) == 3)    iItemID = 547 ; break; // "유니콘가죽"	
+			case 5: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);
 			}
 			break;
 
 		case 33:
 			// 웨어울프 죽었을때 
-			switch (iDice(1,7)) {
-			case 1: if (iDice(1,20) == 3) strcpy(cItemName, "웨어울프꼬리"); break;	    // 1/120
-			case 2: if (iDice(1,22) == 3) strcpy(cItemName, "웨어울프심장"); break;		// 1/132
-			case 3: if (iDice(1,15) == 3) strcpy(cItemName, "웨어울프고기"); break;		// 1/90
-			case 4: if (iDice(1,15) == 3) strcpy(cItemName, "웨어울프가죽"); break;		// 1/90
-			case 5: if (iDice(1,18) == 3) strcpy(cItemName, "웨어울프이빨"); break;		// 1/108
-			case 6: if (iDice(1,18) == 3) strcpy(cItemName, "웨어울프발톱"); break;		// 1/108
-			case 7: bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+			switch (iDice(1,8)) {
+			case 1: if (iDice(1,30) == 3) iItemID = 551 ; break; // "웨어울프꼬리"	    // 1/120
+			// 2002-09-11 #2
+			// case 2: if (iDice(1,32) == 3) iItemID = 548 ; break; // "웨어울프심장"		// 1/132
+			case 2: if (iDice(1,28) == 3) iItemID = 548 ; break; // "웨어울프심장"		// 1/132
+			case 3: if (iDice(1,25) == 3) iItemID = 550 ; break; // "웨어울프고기"		// 1/90
+			case 4: if (iDice(1,35) == 3) iItemID = 553 ; break; // "웨어울프가죽"		// 1/90
+			case 5: if (iDice(1,28) == 3) iItemID = 552 ; break; // "웨어울프이빨"		// 1/108
+			case 6: if (iDice(1,28) == 3) iItemID = 554 ; break; // "웨어울프발톱"		// 1/108
+			case 7: if (iDice(1,38) == 3) iItemID = 549 ; break; // "웨어울프손톱"		// 1/108
+			case 8: bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability);
 			default: break;
 			}
 			break;
@@ -25527,25 +30277,33 @@ void CGame::DeleteNpc(int iNpcH)
 		case 48:
 		case 49:
 		case 50:
-			bGetItemNameWhenDeleteNpc(cItemName, m_pNpcList[iNpcH]->m_sType); break;
+		case 52:
+		case 53:
+		case 54:
+		case 55:
+		case 56:
+		case 57:
+		case 61:
+			bGetItemNameWhenDeleteNpc(iItemID, m_pNpcList[iNpcH]->m_sType, iItemprobability); break;
+
 			break;
 		}
 
 		// 특수 아이템이 안나온 경우 리치나 데몬, 유니콘은 Gold가 대체된다.
 		dwCount = 1;
-		if (strlen(cItemName) == 0) {
+		if (iItemID == 0) {
 			switch (m_pNpcList[iNpcH]->m_sType) {
 			case 30:
 			case 31:
 			case 32:
-				strcpy(cItemName, "Gold");
+				iItemID = 90 ;
 				dwCount = (DWORD)(iDice(1, m_pNpcList[iNpcH]->m_iExpDice * 4) + m_pNpcList[iNpcH]->m_iExpDice);
 				dwCount = dwCount - (dwCount/3);
 				break;
 			}
 		}
 		
-		if (_bInitItemAttr(pItem, cItemName) == FALSE) {
+		if (_bInitItemAttr(pItem, iItemID) == FALSE) {
 			delete pItem;
 			pItem = NULL;
 		}
@@ -25557,14 +30315,19 @@ void CGame::DeleteNpc(int iNpcH)
 			pItem->m_sTouchEffectType   = DEF_ITET_ID;
 			pItem->m_sTouchEffectValue1 = iDice(1,100000);
 			pItem->m_sTouchEffectValue2 = iDice(1,100000);
-			//pItem->m_sTouchEffectValue3 = timeGetTime();
+#ifdef DEF_LOGTIME
+			pItem->m_sTouchEffectValue3 = timeGetTime();
+#else 
 			// 마지막 숫자는 아이템 생성 월, 일	
 			SYSTEMTIME SysTime;
 			char cTemp[256];
 			GetLocalTime(&SysTime);
 			ZeroMemory(cTemp, sizeof(cTemp));
-			wsprintf(cTemp, "%d%2d",  (short)SysTime.wMonth, (short)SysTime.wDay);
+//			wsprintf(cTemp, "%d%02d%02d",  (short)SysTime.wMonth, (short)SysTime.wDay,(short) SysTime.wHour);
+			wsprintf(cTemp, "%d%02d%",  (short)SysTime.wMonth, (short)SysTime.wDay);
+
 			pItem->m_sTouchEffectValue3 = atoi(cTemp);
+#endif
 			
 			// 아이템을 서있는 위치에 떨어뜨린다. 
 			m_pMapList[ m_pNpcList[iNpcH]->m_cMapIndex ]->bSetItem(m_pNpcList[iNpcH]->m_sX, m_pNpcList[iNpcH]->m_sY, pItem);
@@ -25575,7 +30338,7 @@ void CGame::DeleteNpc(int iNpcH)
 						                pItem->m_sSprite, pItem->m_sSpriteFrame, pItem->m_cItemColor); // v1.4 color
 
 			// 로그 남긴다.
-			_bItemLog(DEF_ITEMLOG_NEWGENDROP, NULL, NULL, pItem);
+			_bItemLog(DEF_ITEMLOG_NEWGENDROP, 0, m_pNpcList[iNpcH]->m_cNpcName, pItem);
 		}
 	}
 
@@ -25652,7 +30415,8 @@ void CGame::RequestFullObjectData(int iClientH, char *pData)
 		// sStatus의 상위 4비트가 FOE 관계를 나타낸다. 
 		sTemp = m_pClientList[wObjectID]->m_sStatus;
 		sTemp = 0x0FFF & sTemp; // 상위 4비트 클리어
-		sTemp2 = (short)iGetPlayerABSStatus(wObjectID, iClientH); //(short)iGetPlayerRelationship(iClientH, wObjectID);
+		//sTemp2 = (short)iGetPlayerABSStatus(wObjectID); // 2002-11-14
+		sTemp2 = (short)iGetPlayerABSStatus(wObjectID, iClientH);
 		sTemp  = (sTemp | (sTemp2 << 12));
 		
 		*sp = sTemp;
@@ -25743,7 +30507,7 @@ int CGame::_iGetArrowItemIndex(int iClientH)
 	return -1;
 }
 
-void CGame::ItemDepleteHandler(int iClientH, short sItemIndex, BOOL bIsUseItemResult)
+void CGame::ItemDepleteHandler(int iClientH, short sItemIndex, BOOL bIsUseItemResult, BOOL bIsLog)
 {
 	// 소모성 아이템의 카운트가 0이면 삭제한다. 혹은 중고 아이템을 팔아버린 겅우  
  
@@ -25752,9 +30516,17 @@ void CGame::ItemDepleteHandler(int iClientH, short sItemIndex, BOOL bIsUseItemRe
 	if ((sItemIndex < 0) || (sItemIndex >= DEF_MAXITEMS)) return;
 	if (m_pClientList[iClientH]->m_pItemList[sItemIndex] == NULL) return;
 	
-	// v1.411 로그를 남긴다. 
-	_bItemLog(DEF_ITEMLOG_DEPLETE, iClientH, NULL, m_pClientList[iClientH]->m_pItemList[sItemIndex]);
-
+	// v2.15 불필요한 Deplete 로그를 남기지 않는다.
+	if ((bIsLog == TRUE) && (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_cItemType != DEF_ITEMTYPE_CONSUME) 
+		                 && (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_cItemType != DEF_ITEMTYPE_EAT) 
+						 && (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_cItemType != DEF_ITEMTYPE_USE_DEPLETE) 
+						 && (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_cItemType != DEF_ITEMTYPE_USE_DEPLETE_DEST)
+						 && (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_cItemType != DEF_ITEMTYPE_MATERIAL)
+						 && (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sIDnum != 380)
+						 && (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sIDnum != 381)
+						 && (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sIDnum != 382) // 마법 스크롤지는 로그에 남아야 한다.
+						 )
+		_bItemLog(DEF_ITEMLOG_DEPLETE, iClientH,(int) -1, m_pClientList[iClientH]->m_pItemList[sItemIndex]);
 	// 먼저 장착되어 있다면 해제시킨다. 이런 경우는 거의 없을 듯 
 	ReleaseItemHandler(iClientH, sItemIndex, TRUE);
 	
@@ -25826,7 +30598,10 @@ void CGame::NpcBehavior_Stop(int iNpcH)
 			}
 			break;
 
-		case 42: // ManaStone
+		case 42: // ManaStone: v2.05 정기적으로 마나스톤의 에너지를 5씩 생성한다.
+			m_pNpcList[iNpcH]->m_sBehaviorTurnCount = 0;
+			m_pNpcList[iNpcH]->m_iV1 += 5;
+			if (m_pNpcList[iNpcH]->m_iV1 >= 5) m_pNpcList[iNpcH]->m_iV1 = 5;
 			break;
 
 		default: 
@@ -25881,6 +30656,25 @@ void CGame::UseItemHandler(int iClientH, short sItemIndex, short dX, short dY, s
 				
 		// 아이템의 효과에 맞는 처리를 한다. 
 		switch (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectType) {
+		case DEF_ITEMEFFECTTYPE_WARM: // v2.172 2002-7-5 해동 시약. 
+
+			// 냉동 상태인 경우 해동 되었다는 메세지를 보내준다. 
+			if (m_pClientList[iClientH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_ICE ] == 1) {
+			//	SetIceFlag(iClientH, DEF_OWNERTYPE_PLAYER, FALSE);
+
+				bRemoveFromDelayEventList(iClientH, DEF_OWNERTYPE_PLAYER, DEF_MAGICTYPE_ICE);
+
+				// 효과가 해제될 때 발생할 딜레이 이벤트를 등록한다.
+				bRegisterDelayEvent(DEF_DELAYEVENTTYPE_MAGICRELEASE, DEF_MAGICTYPE_ICE, dwTime + (1*1000), 
+							                iClientH, DEF_OWNERTYPE_PLAYER, NULL, NULL, NULL, 1, NULL, NULL);
+
+								
+//				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_MAGICEFFECTOFF, DEF_MAGICTYPE_ICE, NULL, NULL, NULL);
+			}
+
+			m_pClientList[iClientH]->m_dwWarmEffectTime = dwTime;
+			break;
+		
 		case DEF_ITEMEFFECTTYPE_LOTTERY:
 			// 복권 아이템 EV1(확률: 최저 100) EV2(상품 종류) EV3(상품 수량)
 			iTemp = iDice(1, m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemSpecEffectValue1);
@@ -26023,7 +30817,7 @@ void CGame::UseItemHandler(int iClientH, short sItemIndex, short dX, short dY, s
 			case 1:
 				// Recall 마법 효과가 있는 아이템. 
 				// testcode
-				PutLogList("Recall!");
+				// PutLogList("Recall!");
 				RequestTeleportHandler(iClientH, "1   ");
 				break;
 
@@ -26046,7 +30840,9 @@ void CGame::UseItemHandler(int iClientH, short sItemIndex, short dX, short dY, s
 					if (memcmp(m_pClientList[iClientH]->m_cMapName, "bisle", 5) != 0) {
 						//v1.42
 						ItemDepleteHandler(iClientH, sItemIndex, TRUE);
-						RequestTeleportHandler(iClientH, "2   ", "bisle", -1, -1);
+						// v2.16 2002-6-2 입장권도 적마을에서 사용 불가능하게 하기 위해
+						RequestTeleportHandler(iClientH, "3   ", "bisle", -1, -1);
+
 					}
 					break;
 				
@@ -26065,7 +30861,7 @@ void CGame::UseItemHandler(int iClientH, short sItemIndex, short dX, short dY, s
 					GetLocalTime(&SysTime);
 					// v1.4311-3 변경 입장권 체크 달/날짜/시간으로 체크한다. 
 					// 입장 가능한 시간보다 작거나 같으면 입장권이 사라진다.
-					if ((m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sTouchEffectValue1 != SysTime.wMonth) ||
+					if ((m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sTouchEffectValue1 != SysTime.wMonth) |
 						(m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sTouchEffectValue2 != SysTime.wDay) ||
 						(m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sTouchEffectValue3 <= SysTime.wHour) ) {
 						// 날짜가 정확하지 않다. 아무런 효과가 없고 입장권은 사라진다.
@@ -26077,7 +30873,8 @@ void CGame::UseItemHandler(int iClientH, short sItemIndex, short dX, short dY, s
 						if (memcmp(m_pClientList[iClientH]->m_cMapName, cDestMapName, 10) != 0) {
 							//v1.42
 							ItemDepleteHandler(iClientH, sItemIndex, TRUE);
-							RequestTeleportHandler(iClientH, "2   ", cDestMapName, -1, -1);
+							// v2.16 2002-6-2 입장권도 적마을에서 사용 불가능하게 하기위해
+							RequestTeleportHandler(iClientH, "3   ", cDestMapName, -1, -1);
 						}
 					}
 					break;
@@ -26171,6 +30968,15 @@ void CGame::UseItemHandler(int iClientH, short sItemIndex, short dX, short dY, s
 					//
 				}
 				break;
+			
+			case 5: // v2.16 2002-5-27 속옷 변환 시약 추가 
+				// 속옷 스타일을 바꾼다.
+				m_pClientList[iClientH]->m_cUnderwear++;
+				if (m_pClientList[iClientH]->m_cUnderwear > 7) m_pClientList[iClientH]->m_cUnderwear = 0;
+
+				sTemp = (m_pClientList[iClientH]->m_cHairStyle << 8) | (m_pClientList[iClientH]->m_cHairColor << 4) | (m_pClientList[iClientH]->m_cUnderwear);
+				m_pClientList[iClientH]->m_sAppr1 = sTemp;
+				break;
 			}
 
 			SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTNULLACTION, NULL, NULL, NULL);
@@ -26235,7 +31041,14 @@ void CGame::UseItemHandler(int iClientH, short sItemIndex, short dX, short dY, s
 				else
 				if (strcmp(m_pClientList[iClientH]->m_cMapName, "huntzone3") == 0)
 					 SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_SHOWMAP, iV1, 8, NULL, NULL);
+				else
+				if (strcmp(m_pClientList[iClientH]->m_cMapName, "arefarm") == 0)
+					 SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_SHOWMAP, iV1, 9, NULL, NULL);
+				else
+				if (strcmp(m_pClientList[iClientH]->m_cMapName, "elvfarm") == 0)
+					 SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_SHOWMAP, iV1, 10, NULL, NULL);
 				else SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_SHOWMAP, iV1, 0, NULL, NULL);
+				break;
 				break;
 			}
 			break;
@@ -26280,10 +31093,11 @@ void CGame::UseItemHandler(int iClientH, short sItemIndex, short dX, short dY, s
   
 void CGame::Effect_Damage_Spot(short sAttackerH, char cAttackerType, short sTargetH, char cTargetType, short sV1, short sV2, short sV3, BOOL bExp, int iAttr)
 {
- int iDamage, iSideCondition, iIndex, iRemainLife;
- char cAttackerSide;
+ int iPartyID, iDamage, iSideCondition, iIndex, iRemainLife, iTemp, iMaxSuperAttack;
+ char cAttackerSide, cDamageMoveDir;
  DWORD dwTime;
  register double dTmp1, dTmp2, dTmp3;
+ short sAtkX, sAtkY, sTgtX, sTgtY, dX, dY;
 
 	if (cAttackerType == DEF_OWNERTYPE_PLAYER)
 		if (m_pClientList[sAttackerH] == NULL) return;
@@ -26297,9 +31111,17 @@ void CGame::Effect_Damage_Spot(short sAttackerH, char cAttackerType, short sTarg
 	iDamage = iDice(sV1, sV2) + sV3;
 	if (iDamage <= 0) iDamage = 0;
 
+	iPartyID = 0;
+
 	// 공격자가 플레이어라면 Mag에 따른 보너스 대미지를 가산 
 	switch (cAttackerType) {
 	case DEF_OWNERTYPE_PLAYER:
+
+		// 2002-11-14 사냥꾼 모드 추가 (사냥꾼은 다른 Player를 공격하지 않는다. 전면전시 제외)
+		if ( m_bIsCrusadeMode == FALSE &&
+			(m_pClientList[sAttackerH]->m_bIsHunter == TRUE ) &&
+			 (cTargetType == DEF_OWNERTYPE_PLAYER) ) return ;
+
 		dTmp1 = (double)iDamage;
 		if (m_pClientList[sAttackerH]->m_iMag <= 0)
 			 dTmp2 = 1.0f;
@@ -26320,13 +31142,30 @@ void CGame::Effect_Damage_Spot(short sAttackerH, char cAttackerType, short sTarg
 
 		// Crusade : 전면전 모드일때 군인 대인 공격력 1.33배 
 		if ((cTargetType == DEF_OWNERTYPE_PLAYER) && (m_bIsCrusadeMode == TRUE) && (m_pClientList[sAttackerH]->m_iCrusadeDuty == 1)) 
-			iDamage += iDamage/3;
+		{
+			// v2.15 저랩의 경우는 데미지가 증가한다. 1.7 배 
+			if (m_pClientList[sAttackerH]->m_iLevel <= 80)
+			{
+				iDamage += (iDamage* 7)/10 ;
+			} // v2.15 저랩의 경우는 데미지가 증가한다. 1.5 배 
+			else if (m_pClientList[sAttackerH]->m_iLevel <= 100)
+			{
+				iDamage += iDamage/2;
+
+			} else iDamage += iDamage/3;
+		}
 		 
 		cAttackerSide = m_pClientList[sAttackerH]->m_cSide;
+		sAtkX = m_pClientList[sAttackerH]->m_sX;
+		sAtkY = m_pClientList[sAttackerH]->m_sY;
+
+		iPartyID = m_pClientList[sAttackerH]->m_iPartyID;
 		break;
 
 	case DEF_OWNERTYPE_NPC:
 		cAttackerSide = m_pNpcList[sAttackerH]->m_cSide;
+		sAtkX = m_pNpcList[sAttackerH]->m_sX;
+		sAtkY = m_pNpcList[sAttackerH]->m_sY;
 		break;
 	}
 
@@ -26334,8 +31173,41 @@ void CGame::Effect_Damage_Spot(short sAttackerH, char cAttackerType, short sTarg
 	case DEF_OWNERTYPE_PLAYER:
 		// 공격 대상이 존재하지 않으면 리턴 
 		if (m_pClientList[sTargetH] == NULL) return;
+		if (m_pClientList[sTargetH]->m_bIsInitComplete == FALSE) return;
 		// 이미 죽어 있다면 처리 안함.
 		if (m_pClientList[sTargetH]->m_bIsKilled == TRUE) return;
+
+		// 2002-11-14 사냥꾼 모드 추가 (사냥꾼은 공격 당하지 않는다. 전면전시 제외)
+		if ((m_bIsCrusadeMode == FALSE) &&
+			(m_pClientList[sTargetH]->m_iPKCount == 0) && 
+			(m_pClientList[sTargetH]->m_bIsHunter == TRUE ) && 
+			(cAttackerType == DEF_OWNERTYPE_PLAYER) ) return ;
+
+#ifdef DEF_ALLPLAYERPROTECT
+		// v2.19 마을에서 공격당하지 않는다. 범죄자와 NPC는 예외 현재 초보 미들은 마을과 같은 룰이 적용되며 다른편도 공격이 가능하지 않는다.
+		if(cAttackerType == DEF_OWNERTYPE_PLAYER)
+		{
+			if( m_pClientList[sTargetH]->m_iIsOnTown == DEF_NEVERNONPK )
+			{
+				if (m_pClientList[sTargetH]->m_iPKCount == 0)  return ;
+			}
+			else
+			{
+				if ((m_bIsCrusadeMode == FALSE) &&			
+					(m_pClientList[sTargetH]->m_iPKCount == 0) &&
+					(m_pClientList[sTargetH]->m_cSide == m_pClientList[sAttackerH]->m_cSide ) &&
+					(m_pClientList[sTargetH]->m_iIsOnTown == DEF_NONPK)) return ;
+			}
+		}
+
+#endif  
+#ifdef DEF_SAMESIDETOWNPROTECT
+		// v2.172 같은편끼리는 마을에서 공격당하지 않는다. 범죄자와 NPC는 예외 중립도 공격 않되게 
+		if ((m_pClientList[sTargetH]->m_iPKCount == 0) && (cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sTargetH]->m_cSide == cAttackerSide) && (m_pClientList[sTargetH]->m_iIsOnTown == DEF_NONPK)) return ;
+#endif 		
+#ifdef DEF_BEGINNERTOWNPROTECT
+		if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sTargetH]->m_bIsNeutral == TRUE) && (m_pClientList[sTargetH]->m_iPKCount == 0) && (m_pClientList[sTargetH]->m_iIsOnTown == DEF_NONPK)) return;
+#endif
 		// 랙으로 인해 보호를 받아야 한다면 
 		if ((dwTime - m_pClientList[sTargetH]->m_dwTime) > DEF_RAGPROTECTIONTIME) return;
 		// 공격자가 위치한 맵이 공격 불가능 맵이라면 
@@ -26343,6 +31215,9 @@ void CGame::Effect_Damage_Spot(short sAttackerH, char cAttackerType, short sTarg
 		// v1.41 공격자가 중립이면 대인 공격이 불가능하다. 
 		if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sAttackerH]->m_bIsNeutral == TRUE) && (m_pClientList[sTargetH]->m_iPKCount == 0)) return;
 		
+		// 01-12-17 같은 파티원이면 공격 불가 
+		if ((m_pClientList[sTargetH]->m_iPartyID != NULL) && (iPartyID == m_pClientList[sTargetH]->m_iPartyID)) return;
+
 		// 만약 공격자가 플레이어이고 
 		if (cAttackerType == DEF_OWNERTYPE_PLAYER) { 
 			// 공격자가 안전 공격 모드라면 공격의 의미가 없다. 
@@ -26489,6 +31364,29 @@ void CGame::Effect_Damage_Spot(short sAttackerH, char cAttackerType, short sTarg
 		}
 		else {
 			if (iDamage > 0) {
+				// v2.04 타격을 받았는데 마나 변환 특성치가 있었다면 
+				if (m_pClientList[sTargetH]->m_iAddTransMana > 0) {
+					dTmp1 = (double)m_pClientList[sTargetH]->m_iAddTransMana;
+					dTmp2 = (double)iDamage;
+					dTmp3 = (dTmp1/100.0f)*dTmp2 +1.0f;
+
+					// 최대 마나치 
+					iTemp = (2*m_pClientList[sTargetH]->m_iMag) + (2*m_pClientList[sTargetH]->m_iLevel) + (m_pClientList[sTargetH]->m_iInt/2);
+					m_pClientList[sTargetH]->m_iMP += (int)dTmp3;
+					if (m_pClientList[sTargetH]->m_iMP > iTemp) m_pClientList[sTargetH]->m_iMP = iTemp;
+				}
+
+				// v2.04 타격을 받았는데 필살 충전의 특성치가 있었다면 
+				if (m_pClientList[sTargetH]->m_iAddChargeCritical > 0) {
+					// 확률 계산에 따라서 필살기가 충전된다.
+					if (iDice(1,100) < (m_pClientList[sTargetH]->m_iAddChargeCritical)) {
+						iMaxSuperAttack = (m_pClientList[sTargetH]->m_iLevel / 10);
+						if (m_pClientList[sTargetH]->m_iSuperAttackLeft < iMaxSuperAttack) m_pClientList[sTargetH]->m_iSuperAttackLeft++;
+						// v1.12 서버와 클라이언트 간에 카운트가 일치하지 않는 경우가 있을 수 있으므로 가감에 상관없이 보낸다.
+						SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_SUPERATTACKLEFT, NULL, NULL, NULL, NULL);
+					}
+				}
+				
 				// 받은 대미지를 통보한다. <- HP를 그대로 알린다.
 				SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_HP, NULL, NULL, NULL, NULL);
 				// 충격을 받았다면 충격동작 전송 
@@ -26511,19 +31409,93 @@ void CGame::Effect_Damage_Spot(short sAttackerH, char cAttackerType, short sTarg
 				}
 			}
 		}
+
+		sTgtX = m_pClientList[sTargetH]->m_sX;
+		sTgtY = m_pClientList[sTargetH]->m_sY;
 		break;
 
 	case DEF_OWNERTYPE_NPC:
 		if (m_pNpcList[sTargetH] == NULL) return;
 		if (m_pNpcList[sTargetH]->m_iHP <= 0) return;
-		if ((m_bIsCrusadeMode == TRUE) && (cAttackerSide == m_pNpcList[sTargetH]->m_cSize)) return;
+		if ((m_bIsCrusadeMode == TRUE) && (cAttackerSide == m_pNpcList[sTargetH]->m_cSide)) return;
+		
+		sTgtX = m_pNpcList[sTargetH]->m_sX;
+		sTgtY = m_pNpcList[sTargetH]->m_sY;
 
-		//if (m_pNpcList[sTargetH]->m_cActionLimit != 0) return;
 		switch (m_pNpcList[sTargetH]->m_cActionLimit) {
 		case 1:
 		case 2:
-		case 4:
-		case 5:
+		case 6: // v2.20 2002-12-20 마을 NPC 공격 않되게 
+			return;
+
+		case 4: // 맞았을 경우 이동하는 오브젝트.
+			if (sTgtX == sAtkX) {
+				if (sTgtY == sAtkY) return;
+				else if (sTgtY > sAtkY) cDamageMoveDir = 5;
+				else if (sTgtY < sAtkY) cDamageMoveDir = 1;
+			}
+			else if (sTgtX > sAtkX) {
+				if (sTgtY == sAtkY)     cDamageMoveDir = 3;
+				else if (sTgtY > sAtkY) cDamageMoveDir = 4;
+				else if (sTgtY < sAtkY) cDamageMoveDir = 2;
+			}
+			else if (sTgtX < sAtkX) {
+				if (sTgtY == sAtkY)     cDamageMoveDir = 7;
+				else if (sTgtY > sAtkY) cDamageMoveDir = 6;
+				else if (sTgtY < sAtkY) cDamageMoveDir = 8;							
+			}
+
+			dX = m_pNpcList[sTargetH]->m_sX + _tmp_cTmpDirX[cDamageMoveDir];
+			dY = m_pNpcList[sTargetH]->m_sY + _tmp_cTmpDirY[cDamageMoveDir];
+
+			if (m_pMapList[m_pNpcList[sTargetH]->m_cMapIndex]->bGetMoveable(dX, dY, NULL) == FALSE) {
+				// 다시 한번 방향을 랜덤하게 구한다.
+				cDamageMoveDir = iDice(1,8);
+				dX = m_pNpcList[sTargetH]->m_sX + _tmp_cTmpDirX[cDamageMoveDir];
+				dY = m_pNpcList[sTargetH]->m_sY + _tmp_cTmpDirY[cDamageMoveDir];
+						
+				if (m_pMapList[m_pNpcList[sTargetH]->m_cMapIndex]->bGetMoveable(dX, dY, NULL) == FALSE) return;
+			}
+						
+			// 예전 위치에서 지운다. 
+			m_pMapList[m_pNpcList[sTargetH]->m_cMapIndex]->ClearOwner(5, sTargetH, DEF_OWNERTYPE_NPC, m_pNpcList[sTargetH]->m_sX, m_pNpcList[sTargetH]->m_sY);
+			// 새 위치에 표시한다. 
+			m_pMapList[m_pNpcList[sTargetH]->m_cMapIndex]->SetOwner(sTargetH, DEF_OWNERTYPE_NPC, dX, dY);
+			m_pNpcList[sTargetH]->m_sX   = dX;
+			m_pNpcList[sTargetH]->m_sY   = dY;
+			m_pNpcList[sTargetH]->m_cDir = cDamageMoveDir;
+					
+			// 이벤트 알린다.
+			SendEventToNearClient_TypeA(sTargetH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTMOVE, NULL, NULL, NULL);
+				
+			// 한번 더 간다.
+			dX = m_pNpcList[sTargetH]->m_sX + _tmp_cTmpDirX[cDamageMoveDir];
+			dY = m_pNpcList[sTargetH]->m_sY + _tmp_cTmpDirY[cDamageMoveDir];
+					
+			if (m_pMapList[m_pNpcList[sTargetH]->m_cMapIndex]->bGetMoveable(dX, dY, NULL) == FALSE) {
+				// 다시 한번 방향을 랜덤하게 구한다.
+				cDamageMoveDir = iDice(1,8);
+				dX = m_pNpcList[sTargetH]->m_sX + _tmp_cTmpDirX[cDamageMoveDir];
+				dY = m_pNpcList[sTargetH]->m_sY + _tmp_cTmpDirY[cDamageMoveDir];
+						
+				if (m_pMapList[m_pNpcList[sTargetH]->m_cMapIndex]->bGetMoveable(dX, dY, NULL) == FALSE) return;
+			}
+						
+			// 예전 위치에서 지운다. 
+			m_pMapList[m_pNpcList[sTargetH]->m_cMapIndex]->ClearOwner(5, sTargetH, DEF_OWNERTYPE_NPC, m_pNpcList[sTargetH]->m_sX, m_pNpcList[sTargetH]->m_sY);
+			// 새 위치에 표시한다. 
+			m_pMapList[m_pNpcList[sTargetH]->m_cMapIndex]->SetOwner(sTargetH, DEF_OWNERTYPE_NPC, dX, dY);
+			m_pNpcList[sTargetH]->m_sX   = dX;
+			m_pNpcList[sTargetH]->m_sY   = dY;
+			m_pNpcList[sTargetH]->m_cDir = cDamageMoveDir;
+					
+			// 이벤트 알린다.
+			SendEventToNearClient_TypeA(sTargetH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTMOVE, NULL, NULL, NULL);
+
+			if (bCheckEnergySphereDestination(sTargetH, sAttackerH, cAttackerType) == TRUE) {
+				// 경험치 상승은 없다.
+				DeleteNpc(sTargetH);
+			}
 			return;
 		}
 
@@ -26536,11 +31508,7 @@ void CGame::Effect_Damage_Spot(short sAttackerH, char cAttackerType, short sTarg
 				break;
 			}
 		}
-
-		// 만약 공격자가 플레이어이고 공격자가 안전 공격 모드라면 공격력은 절반. v1.3에서 공격력이 아니라 마나를 더 감소시킨다.
-		//if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sAttackerH]->m_bIsSafeAttackMode == TRUE))  
-		//	iDamage = iDamage / 2; 
-
+		
 		// 몬스터가 마법 대미지 흡수률이 있다면(AbsDamage가 0보다 크다) 원래 마법 대미지를 감소시킨다.
 		if (m_pNpcList[sTargetH]->m_iAbsDamage > 0) {
 			dTmp1 = (double)iDamage;
@@ -26562,11 +31530,12 @@ void CGame::Effect_Damage_Spot(short sAttackerH, char cAttackerType, short sTarg
 		}
 		else {
 			// 공격당했지만 살아있다. 반격한다.
-			
 			// 편이 같으면 반격하지 않는다.
 			switch (cAttackerType) {
 			case DEF_OWNERTYPE_PLAYER:
-				if (m_pClientList[sAttackerH]->m_cSide == m_pNpcList[sTargetH]->m_cSide) return;
+				// v2.15 경비는 같은 편도 반격한다.
+				if ((m_pNpcList[sTargetH]->m_sType != 21) && (m_pNpcList[sTargetH]->m_sType != 55) && (m_pNpcList[sTargetH]->m_sType != 56)
+					&& (m_pNpcList[sTargetH]->m_cSide == cAttackerSide)) return ;
 				break;
 
 			case DEF_OWNERTYPE_NPC:
@@ -26574,8 +31543,11 @@ void CGame::Effect_Damage_Spot(short sAttackerH, char cAttackerType, short sTarg
 				break;
 			}
 			
+			// 충격을 받았다면 충격동작 전송
+			SendEventToNearClient_TypeA(sTargetH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTDAMAGE, iDamage, NULL, NULL);
+			//
+						
 			if ((iDice(1,3) == 2) && (m_pNpcList[sTargetH]->m_cActionLimit == 0)) {
-
 				// 동족이고 편이 같으면 반격하지 않는다.
 				if ((cAttackerType == DEF_OWNERTYPE_NPC) && 
 					(m_pNpcList[sAttackerH]->m_sType == m_pNpcList[sTargetH]->m_sType) &&
@@ -26590,10 +31562,7 @@ void CGame::Effect_Damage_Spot(short sAttackerH, char cAttackerType, short sTarg
 				// Damage를 입은 충격으로 인한 지연효과.
 				m_pNpcList[sTargetH]->m_dwTime = dwTime;
 
-				// 충격을 받았다면 충격동작 전송
-				SendEventToNearClient_TypeA(sTargetH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTDAMAGE, iDamage, NULL, NULL);
 				// 여기서 표효 동작같은것을 위한 메시지 발송.
-
 				if (m_pNpcList[sTargetH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_HOLDOBJECT ] != 0) {
 					// Hold 되어 있었던 상태라면 풀린다. 	
 					m_pNpcList[sTargetH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_HOLDOBJECT ] = NULL;
@@ -26611,20 +31580,60 @@ void CGame::Effect_Damage_Spot(short sAttackerH, char cAttackerType, short sTarg
 						// Crusade
 						iExp = iDamage;
 						if ((m_bIsCrusadeMode == TRUE) && (iExp > 10)) iExp = 10;
+
+
+						//v2.03 918 경험치 증가 
+						if (m_pClientList[sAttackerH]->m_iAddExp > 0) {
+							dTmp1 = (double)m_pClientList[sAttackerH]->m_iAddExp;
+							dTmp2 = (double)iExp;
+							dTmp3 = (dTmp1/100.0f)*dTmp2;
+							iExp += (int)dTmp3;
+						}
+
+						// v2.17 2002-8-6 공격자의 레벨이 100 이상이면 토끼나 고양이를 잡을때 경험치가 올라가지 않는다.
+						if (m_pClientList[sAttackerH]->m_iLevel > 100 ) {
+							switch (m_pNpcList[sTargetH]->m_sType) {
+							case 55:
+							case 56:
+								iExp = 0 ;
+							break ;
+							default: break;
+							}
+						}
 											
 						if (bExp == TRUE) 
-							 m_pClientList[sAttackerH]->m_iExpStock += iExp;     //iDamage;
-						else m_pClientList[sAttackerH]->m_iExpStock += (iExp/2); //(iDamage/2);
+							 GetExp(sAttackerH, iExp, TRUE); //m_pClientList[sAttackerH]->m_iExpStock += iExp;     //iDamage;
+						else GetExp(sAttackerH, (iExp/2), TRUE); //m_pClientList[sAttackerH]->m_iExpStock += (iExp/2); //(iDamage/2);
 						m_pNpcList[sTargetH]->m_iNoDieRemainExp -= iDamage;
 					}
 					else {
 						// Crusade
 						iExp = m_pNpcList[sTargetH]->m_iNoDieRemainExp;
 						if ((m_bIsCrusadeMode == TRUE) && (iExp > 10)) iExp = 10;
+
+						//v2.03 918 경험치 증가 
+						if (m_pClientList[sAttackerH]->m_iAddExp > 0) {
+							dTmp1 = (double)m_pClientList[sAttackerH]->m_iAddExp;
+							dTmp2 = (double)iExp;
+							dTmp3 = (dTmp1/100.0f)*dTmp2;
+							iExp += (int)dTmp3;
+						}
+
+						// v2.17 2002-8-6 공격자의 레벨이 100 이상이면 토끼나 고양이를 잡을때 경험치가 올라가지 않는다.
+						if (m_pClientList[sAttackerH]->m_iLevel > 100 ) {
+							switch (m_pNpcList[sTargetH]->m_sType) {
+							case 55:
+							case 56:
+								iExp = 0 ;
+							break ;
+							default: break;
+							}
+						}
+
 						
 						if (bExp == TRUE) 
-							 m_pClientList[sAttackerH]->m_iExpStock += iExp;     //m_pNpcList[sTargetH]->m_iNoDieRemainExp;
-						else m_pClientList[sAttackerH]->m_iExpStock += (iExp/2); //(m_pNpcList[sTargetH]->m_iNoDieRemainExp/2);
+							 GetExp(sAttackerH, iExp, TRUE); //m_pClientList[sAttackerH]->m_iExpStock += iExp;     //m_pNpcList[sTargetH]->m_iNoDieRemainExp;
+						else GetExp(sAttackerH, (iExp/2), TRUE); //m_pClientList[sAttackerH]->m_iExpStock += (iExp/2); //(m_pNpcList[sTargetH]->m_iNoDieRemainExp/2);
 						m_pNpcList[sTargetH]->m_iNoDieRemainExp = 0;
 					}
 				}
@@ -26636,12 +31645,12 @@ void CGame::Effect_Damage_Spot(short sAttackerH, char cAttackerType, short sTarg
 
 void CGame::Effect_Damage_Spot_DamageMove(short sAttackerH, char cAttackerType, short sTargetH, char cTargetType, short sAtkX, short sAtkY, short sV1, short sV2, short sV3, BOOL bExp, int iAttr)
 {
- int iDamage, iSideCondition, iIndex, iRemainLife;
+ int iDamage, iSideCondition, iIndex, iRemainLife, iTemp, iMaxSuperAttack;
  DWORD dwTime;
- char cAttackerSide;
+ char cAttackerSide, cDamageMoveDir;
  register double dTmp1, dTmp2, dTmp3;
+ int iPartyID, iMoveDamage;
  short sTgtX, sTgtY;
- int iMoveDamage;
 
 	if (cAttackerType == DEF_OWNERTYPE_PLAYER)
 		if (m_pClientList[sAttackerH] == NULL) return;
@@ -26657,9 +31666,17 @@ void CGame::Effect_Damage_Spot_DamageMove(short sAttackerH, char cAttackerType, 
 	iDamage = iDice(sV1, sV2) + sV3;
 	if (iDamage <= 0) iDamage = 0;
 
+	iPartyID = 0;
+
 	// 공격자가 플레이어라면 Mag에 따른 보너스 대미지를 가산 
 	switch (cAttackerType) {
 	case DEF_OWNERTYPE_PLAYER:
+
+		// 2002-11-14 사냥꾼 모드 추가 (사냥꾼은 다른 Player를 공격하지 않는다. 전면전시 제외)
+		if ( (m_bIsCrusadeMode == FALSE) &&
+			(m_pClientList[sAttackerH]->m_bIsHunter == TRUE) &&
+			 cTargetType == DEF_OWNERTYPE_PLAYER ) return ;
+
 		dTmp1 = (double)iDamage;
 		if (m_pClientList[sAttackerH]->m_iMag <= 0)
 			 dTmp2 = 1.0f;
@@ -26679,9 +31696,21 @@ void CGame::Effect_Damage_Spot_DamageMove(short sAttackerH, char cAttackerType, 
 
 		// Crusade : 전면전 모드일때 대인 공격력 1.33배 
 		if ((cTargetType == DEF_OWNERTYPE_PLAYER) && (m_bIsCrusadeMode == TRUE) && (m_pClientList[sAttackerH]->m_iCrusadeDuty == 1)) 
-			iDamage += iDamage/3;
+		{
+ 			// v2.15 저랩의 경우는 데미지가 증가한다. 1.7 배 
+			if (m_pClientList[sAttackerH]->m_iLevel <= 80)
+			{
+				iDamage += (iDamage* 7)/10 ;
+			} // v2.15 저랩의 경우는 데미지가 증가한다. 1.5 배 
+			else if (m_pClientList[sAttackerH]->m_iLevel <= 100)
+			{
+				iDamage += iDamage/2;
+			} else iDamage += iDamage/3;
+		}
 
 		cAttackerSide = m_pClientList[sAttackerH]->m_cSide;
+		
+		iPartyID = m_pClientList[sAttackerH]->m_iPartyID;
 		break;
 
 	case DEF_OWNERTYPE_NPC:
@@ -26693,14 +31722,52 @@ void CGame::Effect_Damage_Spot_DamageMove(short sAttackerH, char cAttackerType, 
 	case DEF_OWNERTYPE_PLAYER:
 		// 공격 대상이 존재하지 않으면 리턴 
 		if (m_pClientList[sTargetH] == NULL) return;
+		if (m_pClientList[sTargetH]->m_bIsInitComplete == FALSE) return;
 		// 이미 죽어 있다면 처리 안함.
 		if (m_pClientList[sTargetH]->m_bIsKilled == TRUE) return;
 		// 랙으로 인해 보호를 받아야 한다면 
 		if ((dwTime - m_pClientList[sTargetH]->m_dwTime) > DEF_RAGPROTECTIONTIME) return;
 		// 공격자가 위치한 맵이 공격 불가능 맵이라면 
+		// v2.03 서버 다운되어서 고침 
+		if (m_pClientList[sTargetH]->m_cMapIndex == -1) return;
 		if (m_pMapList[ m_pClientList[sTargetH]->m_cMapIndex ]->m_bIsAttackEnabled == FALSE) return;
 		// v1.41 공격자가 중립이면 대인 공격이 불가능하다. 
 		if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sAttackerH]->m_bIsNeutral == TRUE) && (m_pClientList[sTargetH]->m_iPKCount == 0)) return;
+
+		// 2002-11-14 사냥꾼 모드 추가 (사냥꾼은 공격 당하지 않는다. 전면전시 제외)
+		if ((m_bIsCrusadeMode == FALSE) &&
+			(m_pClientList[sTargetH]->m_iPKCount == 0) && 
+			(m_pClientList[sTargetH]->m_bIsHunter == TRUE ) && 
+			(cAttackerType == DEF_OWNERTYPE_PLAYER) ) return ;
+
+#ifdef DEF_ALLPLAYERPROTECT
+		// v2.19 마을에서 공격당하지 않는다. 범죄자와 NPC는 예외 현재 초보 미들은 마을과 같은 룰이 적용되며 다른편도 공격이 가능하지 않는다.
+		if(cAttackerType == DEF_OWNERTYPE_PLAYER)
+		{
+			if( m_pClientList[sTargetH]->m_iIsOnTown == DEF_NEVERNONPK )
+			{
+				if (m_pClientList[sTargetH]->m_iPKCount == 0)  return ;
+			}
+			else
+			{
+				if ((m_bIsCrusadeMode == FALSE) &&			
+					(m_pClientList[sTargetH]->m_iPKCount == 0) &&
+					(m_pClientList[sTargetH]->m_cSide == m_pClientList[sAttackerH]->m_cSide ) &&
+					(m_pClientList[sTargetH]->m_iIsOnTown == DEF_NONPK)) return ;
+			}
+		}
+
+#endif 
+#ifdef DEF_SAMESIDETOWNPROTECT
+		// v2.172 같은편끼리는 마을에서 공격당하지 않는다. 범죄자와 NPC는 예외 중립도 공격 않되게 
+		if ((m_pClientList[sTargetH]->m_iPKCount == 0) && (cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sTargetH]->m_cSide == cAttackerSide) && (m_pClientList[sTargetH]->m_iIsOnTown == DEF_NONPK)) return ;
+#endif 		
+#ifdef DEF_BEGINNERTOWNPROTECT
+		if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sTargetH]->m_bIsNeutral == TRUE) && (m_pClientList[sTargetH]->m_iPKCount == 0) && (m_pClientList[sTargetH]->m_iIsOnTown == DEF_NONPK)) return;
+#endif
+
+		// 01-12-17 같은 파티원이면 공격 불가 
+		if ((m_pClientList[sTargetH]->m_iPartyID != NULL) && (iPartyID == m_pClientList[sTargetH]->m_iPartyID)) return;
 		
 		// 만약 공격자가 플레이어이고 공격자가 안전 공격 모드라면 공격의 의미가 없다. 
 		if (cAttackerType == DEF_OWNERTYPE_PLAYER) { 
@@ -26849,6 +31916,29 @@ void CGame::Effect_Damage_Spot_DamageMove(short sAttackerH, char cAttackerType, 
 		else {
 			if (iDamage > 0) {
 
+				// v2.04 타격을 받았는데 마나 변환 특성치가 있었다면 
+				if (m_pClientList[sTargetH]->m_iAddTransMana > 0) {
+					dTmp1 = (double)m_pClientList[sTargetH]->m_iAddTransMana;
+					dTmp2 = (double)iDamage;
+					dTmp3 = (dTmp1/100.0f)*dTmp2 +1.0f;
+
+					// 최대 마나치 
+					iTemp = (2*m_pClientList[sTargetH]->m_iMag) + (2*m_pClientList[sTargetH]->m_iLevel) + (m_pClientList[sTargetH]->m_iInt/2);
+					m_pClientList[sTargetH]->m_iMP += (int)dTmp3;
+					if (m_pClientList[sTargetH]->m_iMP > iTemp) m_pClientList[sTargetH]->m_iMP = iTemp;
+				}
+
+				// v2.04 타격을 받았는데 필살 충전의 특성치가 있었다면 
+				if (m_pClientList[sTargetH]->m_iAddChargeCritical > 0) {
+					// 확률 계산에 따라서 필살기가 충전된다.
+					if (iDice(1,100) < (m_pClientList[sTargetH]->m_iAddChargeCritical)) {
+						iMaxSuperAttack = (m_pClientList[sTargetH]->m_iLevel / 10);
+						if (m_pClientList[sTargetH]->m_iSuperAttackLeft < iMaxSuperAttack) m_pClientList[sTargetH]->m_iSuperAttackLeft++;
+						// v1.12 서버와 클라이언트 간에 카운트가 일치하지 않는 경우가 있을 수 있으므로 가감에 상관없이 보낸다.
+						SendNotifyMsg(NULL, sTargetH, DEF_NOTIFY_SUPERATTACKLEFT, NULL, NULL, NULL, NULL);
+					}
+				}
+
 				// v1.44 사투장이면 대미지 80이상일때 밀린다.
 				if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_bIsFightZone == TRUE)) 
 					 iMoveDamage = 80;
@@ -26856,7 +31946,7 @@ void CGame::Effect_Damage_Spot_DamageMove(short sAttackerH, char cAttackerType, 
 
 				if (iDamage >= iMoveDamage) {
 					// 대미지가 50이상이면 튕긴다.
-					char cDamageMoveDir;
+			///		char cDamageMoveDir;
 					sTgtX = m_pClientList[sTargetH]->m_sX;
 					sTgtY = m_pClientList[sTargetH]->m_sY;
 
@@ -26913,13 +32003,13 @@ EDSD_SKIPDAMAGEMOVE:;
 	case DEF_OWNERTYPE_NPC:
 		if (m_pNpcList[sTargetH] == NULL) return;
 		if (m_pNpcList[sTargetH]->m_iHP <= 0) return;
-		if ((m_bIsCrusadeMode == TRUE) && (cAttackerSide == m_pNpcList[sTargetH]->m_cSize)) return;
-		//if (m_pNpcList[sTargetH]->m_cActionLimit != 0) return;
+		if ((m_bIsCrusadeMode == TRUE) && (cAttackerSide == m_pNpcList[sTargetH]->m_cSide)) return;
+		
 		switch (m_pNpcList[sTargetH]->m_cActionLimit) {
 		case 1:
 		case 2:
 		case 4:
-		case 5:
+		case 6: // v2.20 2002-12-20 마을 NPC 공격 않되게 
 			return;
 		}
 		
@@ -26932,10 +32022,7 @@ EDSD_SKIPDAMAGEMOVE:;
 				break;
 			}
 		}
-		// 만약 공격자가 플레이어이고 공격자가 안전 공격 모드라면 공격력은 절반. v1.3에서 공격력이 아니라 마나를 더 감소시킨다.
-		//if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sAttackerH]->m_bIsSafeAttackMode == TRUE))  
-		//	iDamage = iDamage / 2; 
-
+		
 		// 몬스터가 마법 대미지 흡수률이 있다면(AbsDamage가 0보다 크다) 원래 마법 대미지를 감소시킨다.
 		if (m_pNpcList[sTargetH]->m_iAbsDamage > 0) {
 			dTmp1 = (double)iDamage;
@@ -26961,14 +32048,19 @@ EDSD_SKIPDAMAGEMOVE:;
 			// 편이 같으면 반격하지 않는다.
 			switch (cAttackerType) {
 			case DEF_OWNERTYPE_PLAYER:
-				if (m_pClientList[sAttackerH]->m_cSide == m_pNpcList[sTargetH]->m_cSide) return;
+				// v2.15 경비는 같은 편도 반격한다.			
+				if ((m_pNpcList[sTargetH]->m_sType != 21) && (m_pNpcList[sTargetH]->m_sType != 55) && (m_pNpcList[sTargetH]->m_sType != 56)
+					&& (m_pNpcList[sTargetH]->m_cSide == cAttackerSide)) return;
 				break;
 
 			case DEF_OWNERTYPE_NPC:
 				if (m_pNpcList[sAttackerH]->m_cSide == m_pNpcList[sTargetH]->m_cSide) return;
 				break;
 			}
-
+			
+			// 충격을 받았다면 충격동작 전송
+			SendEventToNearClient_TypeA(sTargetH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTDAMAGE, iDamage, NULL, NULL);
+			
 			if ((iDice(1,3) == 2) && (m_pNpcList[sTargetH]->m_cActionLimit == 0)) {
 
 				// 동족이고 편이 같으면 반격하지 않는다.
@@ -26981,13 +32073,11 @@ EDSD_SKIPDAMAGEMOVE:;
 				m_pNpcList[sTargetH]->m_sBehaviorTurnCount = 0;		
 				m_pNpcList[sTargetH]->m_iTargetIndex = sAttackerH;
 				m_pNpcList[sTargetH]->m_cTargetType  = cAttackerType;
+				
+				// 여기서 표효 동작같은것을 위한 메시지 발송.
 
 				// Damage를 입은 충격으로 인한 지연효과.
 				m_pNpcList[sTargetH]->m_dwTime = dwTime;
-
-				// 충격을 받았다면 충격동작 전송
-				SendEventToNearClient_TypeA(sTargetH, DEF_OWNERTYPE_NPC, MSGID_EVENT_MOTION, DEF_OBJECTDAMAGE, iDamage, NULL, NULL);
-				// 여기서 표효 동작같은것을 위한 메시지 발송.
 
 				if (m_pNpcList[sTargetH]->m_cMagicEffectStatus[ DEF_MAGICTYPE_HOLDOBJECT ] != 0) {
 					// Hold 되어 있었던 상태라면 풀린다. 	
@@ -27006,10 +32096,29 @@ EDSD_SKIPDAMAGEMOVE:;
 						// Crusade
 						iExp = iDamage;
 						if ((m_bIsCrusadeMode == TRUE) && (iExp > 10)) iExp = 10;
+
+						//v2.03 918 경험치 증가 
+						if (m_pClientList[sAttackerH]->m_iAddExp > 0) {
+							dTmp1 = (double)m_pClientList[sAttackerH]->m_iAddExp;
+							dTmp2 = (double)iExp;
+							dTmp3 = (dTmp1/100.0f)*dTmp2;
+							iExp += (int)dTmp3;
+						}
 						
+						// v2.17 2002-8-6 공격자의 레벨이 100 이상이면 토끼나 고양이를 잡을때 경험치가 올라가지 않는다.
+						if (m_pClientList[sAttackerH]->m_iLevel > 100 ) {
+							switch (m_pNpcList[sTargetH]->m_sType) {
+							case 55:
+							case 56:
+								iExp = 0 ;
+							break ;
+							default: break;
+							}
+						}
+
 						if (bExp == TRUE) 
-							 m_pClientList[sAttackerH]->m_iExpStock += iExp;     //iDamage;
-						else m_pClientList[sAttackerH]->m_iExpStock += (iExp/2); //(iDamage/2);
+							 GetExp(sAttackerH, iExp); //m_pClientList[sAttackerH]->m_iExpStock += iExp;     //iDamage;
+						else GetExp(sAttackerH, (iExp/2)); //m_pClientList[sAttackerH]->m_iExpStock += (iExp/2); //(iDamage/2);
 						m_pNpcList[sTargetH]->m_iNoDieRemainExp -= iDamage;
 					}
 					else {
@@ -27017,9 +32126,29 @@ EDSD_SKIPDAMAGEMOVE:;
 						iExp = m_pNpcList[sTargetH]->m_iNoDieRemainExp;
 						if ((m_bIsCrusadeMode == TRUE) && (iExp > 10)) iExp = 10;
 
+						//v2.03 918 경험치 증가 
+						if (m_pClientList[sAttackerH]->m_iAddExp > 0) {
+							dTmp1 = (double)m_pClientList[sAttackerH]->m_iAddExp;
+							dTmp2 = (double)iExp;
+							dTmp3 = (dTmp1/100.0f)*dTmp2;
+							iExp += (int)dTmp3;
+						}
+
+						// v2.17 2002-8-6 공격자의 레벨이 100 이상이면 토끼나 고양이를 잡을때 경험치가 올라가지 않는다.
+						if (m_pClientList[sAttackerH]->m_iLevel > 100 ) {
+							switch (m_pNpcList[sTargetH]->m_sType) {
+							case 55:
+							case 56:
+								iExp = 0 ;
+							break ;
+							default: break;
+							}
+						}
+
+
 						if (bExp == TRUE) 
-							 m_pClientList[sAttackerH]->m_iExpStock += iExp;     //m_pNpcList[sTargetH]->m_iNoDieRemainExp;
-						else m_pClientList[sAttackerH]->m_iExpStock += (iExp/2); //(m_pNpcList[sTargetH]->m_iNoDieRemainExp/2);
+							 GetExp(sAttackerH, iExp); //m_pClientList[sAttackerH]->m_iExpStock += iExp;     //m_pNpcList[sTargetH]->m_iNoDieRemainExp;
+						else GetExp(sAttackerH, (iExp/2)); //m_pClientList[sAttackerH]->m_iExpStock += (iExp/2); //(m_pNpcList[sTargetH]->m_iNoDieRemainExp/2);
 						m_pNpcList[sTargetH]->m_iNoDieRemainExp = 0;
 					}
 				}
@@ -27079,7 +32208,7 @@ void CGame::Effect_HpUp_Spot(short sAttackerH, char cAttackerType, short sTarget
 
 void CGame::Effect_SpDown_Spot(short sAttackerH, char cAttackerType, short sTargetH, char cTargetType, short sV1, short sV2, short sV3)
 {
- int iSP, iMaxSP;
+ int iSP, iMaxSP, iSideCondition;
  DWORD dwTime = timeGetTime();
 
 	if (cAttackerType == DEF_OWNERTYPE_PLAYER)
@@ -27092,7 +32221,30 @@ void CGame::Effect_SpDown_Spot(short sAttackerH, char cAttackerType, short sTarg
 	case DEF_OWNERTYPE_PLAYER:
 		if (m_pClientList[sTargetH] == NULL) return;
 		if (m_pClientList[sTargetH]->m_bIsKilled == TRUE) return;
-	
+			
+		// v2.13 만약 공격자가 플레이어이고 공격자가 안전 공격 모드라면 공격의 의미가 없다. 
+		if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sAttackerH] != NULL)) { 
+			// v2.13
+			if ((m_pClientList[sTargetH]->m_iPartyID != NULL) && (m_pClientList[sAttackerH]->m_iPartyID == m_pClientList[sTargetH]->m_iPartyID)) return;
+		
+			if (m_pClientList[sAttackerH]->m_bIsSafeAttackMode == TRUE) {
+				iSideCondition = iGetPlayerRelationship(sAttackerH, sTargetH);
+				if ((iSideCondition == 7) || (iSideCondition == 2) || (iSideCondition == 6)) {
+					// 적
+				}
+				else {
+					// 같은 편이지만 만약 사투장 내에서 편이 다르다면 공격 처리를 해야한다.
+					if (m_pMapList[m_pClientList[sAttackerH]->m_cMapIndex]->m_bIsFightZone == TRUE) {
+						if (m_pClientList[sAttackerH]->m_iGuildGUID != m_pClientList[sTargetH]->m_iGuildGUID) {
+							// 사투장 내에서 다른 길드다. 공격이 가능하다. 
+						}
+						else return;
+					}
+					else return;
+				}
+			}
+		}
+
 		iMaxSP = (2*m_pClientList[sTargetH]->m_iStr) + (2*m_pClientList[sTargetH]->m_iLevel);
 		if (m_pClientList[sTargetH]->m_iSP > 0) {
 			
@@ -27156,7 +32308,10 @@ BOOL CGame::bCheckResistingMagicSuccess(char cAttackerDir, short sTargetH, char 
 	case DEF_OWNERTYPE_PLAYER:
 		if (m_pClientList[sTargetH] == NULL) return FALSE;
 		// v1.4 운영자에 대한 마법 공격은 무의미 
+		// v2.13 운영자 레벨1은 공격이 가능하다. 
 		if (m_pClientList[sTargetH]->m_iAdminUserLevel > 0) return TRUE;
+
+		//v2.19 2002-12-7 산타복 관련
 
 		cTargetDir = m_pClientList[sTargetH]->m_cDir;
 		iTargetMagicResistRatio = m_pClientList[sTargetH]->m_cSkillMastery[3] +m_pClientList[sTargetH]->m_iAddMR; // 3번 Resisting Magic
@@ -27176,20 +32331,24 @@ BOOL CGame::bCheckResistingMagicSuccess(char cAttackerDir, short sTargetH, char 
 		break;
 	}
 
+	//v2.16 2002-5-23 고광현수정
+	// Absolute Magic Protection
+	if (cProtect == 5) return TRUE;
+
 	// 명중률 이전에 마법보호가 걸려있다면 무조건 성공: 단 명중률이 1000보다 크면 고려한다.
 	if ((iHitRatio < 1000) && (cProtect == 2)) return TRUE;
 	// 만약 명중률이 10000 이상이라면 9써클 이상의 마법이란 의미. 다시 10000을 빼서 제 명중률을 계산한다.
 	if (iHitRatio >= 10000) iHitRatio -= 10000;
 
 	if (iTargetMagicResistRatio < 1) iTargetMagicResistRatio = 1;
-
+		
 	// 최종 공격 명중률을 구한다. 
 	dTmp1 = (double)(iHitRatio);
 	dTmp2 = (double)(iTargetMagicResistRatio);
 
 	dTmp3 = (dTmp1 / dTmp2)*50.0f;
 	iDestHitRatio = (int)(dTmp3); 
-
+	
 	// 최소 공격 명중률을 보장한다. 
 	if (iDestHitRatio < DEF_MINIMUMHITRATIO) iDestHitRatio = DEF_MINIMUMHITRATIO;
 	// 최대 공격 명중률을 제한한다.
@@ -27211,20 +32370,29 @@ BOOL CGame::bCheckResistingMagicSuccess(char cAttackerDir, short sTargetH, char 
 BOOL CGame::bCheckResistingIceSuccess(char cAttackerDir, short sTargetH, char cTargetType, int iHitRatio)
 {
  // 냉동될 것인가의 확률 계산.
- double dTmp1, dTmp2, dTmp3;
- int    iTargetIceResistRatio, iDestHitRatio, iResult;
- char   cTargetDir, cProtect;								 
+ int    iTargetIceResistRatio, iResult;
+ char   cTargetDir;
 
 	switch (cTargetType) {
 	case DEF_OWNERTYPE_PLAYER:
 		if (m_pClientList[sTargetH] == NULL) return FALSE;
 		// v1.4 운영자에 대한 냉동공격은 무의미 
 		if (m_pClientList[sTargetH]->m_iAdminUserLevel > 0) return TRUE;
+		
+//		if ( m_pClientList[sTargetH]->m_pItemList[sItemIndex]->m_sIDnum == 770 
+//			|| m_pClientList[sTargetH]->m_pItemList[sItemIndex]->m_sIDnum == 771 )
+//			return TRUE;
+
 		iTargetIceResistRatio = m_pClientList[sTargetH]->m_iAddAbsWater*2; 
+		// v2.172 해동 포션을 먹고 30초간은 얼지 않는다.
+		if (m_pClientList[sTargetH]->m_dwWarmEffectTime == NULL) {
+		}
+		else if ((timeGetTime() - m_pClientList[sTargetH]->m_dwWarmEffectTime) < 1000*30) return TRUE;
 		break;
 
 	case DEF_OWNERTYPE_NPC:
 		if (m_pNpcList[sTargetH] == NULL) return FALSE;
+		if (m_pNpcList[sTargetH]->m_cAttribute == DEF_ATTRIBUTE_WATER) return TRUE; // 2002-12-20 물 속성을 가진 NPC는 ICE 계열에 데미지를 받지 않는다.
 		iTargetIceResistRatio = (m_pNpcList[sTargetH]->m_cResistMagic) - (m_pNpcList[sTargetH]->m_cResistMagic/3); // 여기에 얼음 방어 수치 입력. NPC의 경우 마법 저항의 70% 수준 
 		break;
 	}
@@ -27250,6 +32418,9 @@ BOOL CGame::bSetItemToBankItem(int iClientH, class CItem * pItem)
 	// 소지하고 있는 아이템을 보관한다.
 	if (m_pClientList[iClientH] == NULL) return FALSE;
 	if (pItem == NULL) return FALSE;
+
+	// v2.20 2002-12-23 창고인지 체크 한다.
+	if (m_pClientList[iClientH]->m_bIsOnWarehouse == FALSE) return FALSE;
 
 
 	for (i = 0; i < DEF_MAXBANKITEMS; i++)
@@ -27326,8 +32497,20 @@ BOOL CGame::bSetItemToBankItem(int iClientH, class CItem * pItem)
 		*dwp = pItem->m_dwAttribute;
 		cp += 4;
 
+		// v2.14 창고에서 아이템을 가저오면 순도가 이상해지는 버그 수정 
+		*cp = (char) pItem->m_sItemSpecEffectValue2 ;
+		cp ++ ;
+
 		// 아이템 정보 전송 
-		iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, 55);
+		iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, 56);
+
+#ifdef DEF_TAIWANLOG
+		_bItemLog(DEF_ITEMLOG_DEPOSIT, iClientH, (int) -1, pItem);
+#endif
+
+		// v2.13 성후니 추가 DB 부하를 줄이기 위한 변수
+		m_pClientList[iClientH]->m_bIsBankModified = TRUE ;
+
 		switch (iRet) {
 		case DEF_XSOCKEVENT_QUENEFULL:
 		case DEF_XSOCKEVENT_SOCKETERROR:
@@ -27701,8 +32884,6 @@ void CGame::OnKeyDown(WPARAM wParam, LPARAM lParam)
 void CGame::OnKeyUp(WPARAM wParam, LPARAM lParam)
 {
  int i;
- char * cp, cTemp[120];
- 
 	switch (wParam) {
 	case VK_F2:
 				
@@ -28059,7 +33240,8 @@ void CGame::SendObjectMotionRejectMsg(int iClientH)
  WORD  * wp;
  short * sp;
  int     iRet;
-
+	
+	m_pClientList[iClientH]->m_bIsMoveBlocked = TRUE; // v2.171
 	// 이동이 불가능하다. 
 	dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
  	*dwp = MSGID_RESPONSE_MOTION;
@@ -28120,6 +33302,9 @@ void CGame::DynamicObjectEffectProcessor()
 					case DEF_OWNERTYPE_PLAYER:
 						if (m_pClientList[sOwnerH] == NULL) break;
 						if (m_pClientList[sOwnerH]->m_bIsKilled == TRUE) break;
+						// v2.17 2002-8-5 운영자는 필드류 마법에 데미지를 받지 않는다. 
+						if(m_pClientList[sOwnerH]->m_iAdminUserLevel > 0 ) break ;
+
 						// v1.41 중립이고 전투모드가 아니면 피해를 입지 않는다.
 						//if ((m_pClientList[sOwnerH]->m_bIsNeutral == TRUE) && (m_pClientList[sOwnerH]->m_sAppr2 & 0xF000) == 0) break;
 
@@ -28159,6 +33344,9 @@ void CGame::DynamicObjectEffectProcessor()
 								m_pClientList[sOwnerH]->m_dwPoisonTime = dwTime;
 								// 중독되었음을 알린다. 
 								SendNotifyMsg(NULL, sOwnerH, DEF_NOTIFY_MAGICEFFECTON, DEF_MAGICTYPE_POISON, m_pClientList[sOwnerH]->m_iPoisonLevel, NULL, NULL);
+#ifdef DEF_TAIWANLOG
+								_bItemLog(DEF_ITEMLOG_POISONED,sOwnerH,(char *) NULL,NULL) ;
+#endif
 							}
 						}
 						break;
@@ -28176,6 +33364,7 @@ void CGame::DynamicObjectEffectProcessor()
 						switch (m_pNpcList[sOwnerH]->m_sType) {
 						case 40:
 						case 41:
+						case 6: // v2.20 2002-12-20 마을 NPC 공격 않되게 
 							iDamage = 0;
 							break;
 						}
@@ -28226,6 +33415,8 @@ void CGame::DynamicObjectEffectProcessor()
 					case DEF_OWNERTYPE_PLAYER:
 						if (m_pClientList[sOwnerH] == NULL) break;
 						if (m_pClientList[sOwnerH]->m_bIsKilled == TRUE) break;
+						// v2.17 2002-8-5 운영자는 필드류 마법에 데미지를 받지 않는다. 
+						if(m_pClientList[sOwnerH]->m_iAdminUserLevel > 0 ) break  ;
 						// v1.41 중립이고 전투모드가 아니면 피해를 입지 않는다.
 						//if ((m_pClientList[sOwnerH]->m_bIsNeutral == TRUE) && (m_pClientList[sOwnerH]->m_sAppr2 & 0xF000) == 0) break;
 
@@ -28276,6 +33467,7 @@ void CGame::DynamicObjectEffectProcessor()
 						switch (m_pNpcList[sOwnerH]->m_sType) {
 						case 40:
 						case 41:
+						case 6: // v2.20 2002-12-20 마을 NPC 공격 않되게 
 							iDamage = 0;
 							break;
 						}
@@ -28371,6 +33563,9 @@ void CGame::DynamicObjectEffectProcessor()
 					case DEF_OWNERTYPE_PLAYER:
 						if (m_pClientList[sOwnerH] == NULL) break;
 						if (m_pClientList[sOwnerH]->m_bIsKilled == TRUE) break;
+						// v2.17 2002-8-5 운영자는 필드류 마법에 데미지를 받지 않는다. 
+						if(m_pClientList[sOwnerH]->m_iAdminUserLevel > 0 ) break  ;
+
 						// v1.41 중립이고 전투모드가 아니면 피해를 입지 않는다.
 						//if ((m_pClientList[sOwnerH]->m_bIsNeutral == TRUE) && (m_pClientList[sOwnerH]->m_sAppr2 & 0xF000) == 0) break;
 
@@ -28408,6 +33603,7 @@ void CGame::DynamicObjectEffectProcessor()
 						switch (m_pNpcList[sOwnerH]->m_sType) {
 						case 40:
 						case 41:
+						case 6: // v2.20 2002-12-20 마을 NPC 공격 않되게 
 							iDamage = 0;
 							break;
 						}
@@ -28504,9 +33700,8 @@ void CGame::ClearSkillUsingStatus(int iClientH)
 int CGame::iCalculateUseSkillItemEffect(int iOwnerH, char cOwnerType, char cOwnerSkill, int iSkillNum, char cMapIndex, int dX, int dY)
 {
  class CItem * pItem;
- char  cItemName[21];
  short lX, lY;
- int   iResult, iFish;
+ int   iResult, iFish, iItemID = 0 ;
 
 	switch (cOwnerType) {
 	case DEF_OWNERTYPE_PLAYER:
@@ -28546,11 +33741,10 @@ int CGame::iCalculateUseSkillItemEffect(int iOwnerH, char cOwnerType, char cOwne
 	
 	case DEF_SKILLEFFECTTYPE_GET: 
 		// 아이템을 얻는 기술이었다. 
-		ZeroMemory(cItemName, sizeof(cItemName));
 		switch (m_pSkillConfigList[iSkillNum]->m_sValue1) {
 		case 1:
-			// 광물 
-			wsprintf(cItemName, "고기");
+			// v2.17 2002-7-31 아이템을 아이템 고유번호로 생성할 수 있게 한다.
+			iItemID = 99 ;  // 고기 
 			break;
 
 		case 2:
@@ -28561,24 +33755,33 @@ int CGame::iCalculateUseSkillItemEffect(int iOwnerH, char cOwnerType, char cOwne
 			// 근처에 다이나믹 오브젝트 물고기가 존재한다면 본격낚시 모드로 들어간다.
 			if (cOwnerType == DEF_OWNERTYPE_PLAYER) {
 				iFish = iCheckFish(iOwnerH, cMapIndex, dX, dY);
-		   		if (iFish == NULL) wsprintf(cItemName, "물고기");
+		   		if (iFish == NULL) iItemID = 100 ; // 물고기 
 			}
-			else wsprintf(cItemName, "물고기");
+			else iItemID = 100 ; // 물고기 
 			break;
 		}
 
-		if (strlen(cItemName) != 0) {
+		if (iItemID != 0) {
 			
 			// 낚시에 성공했다면 메시지를 전송.
-			if (memcmp(cItemName, "물고기", 6) == 0) {
+			if (iItemID == 100) { 
 				SendNotifyMsg(NULL, iOwnerH, DEF_NOTIFY_FISHSUCCESS, NULL, NULL, NULL, NULL);
 				// v1.41 약간의 경험치 상승 
-				m_pClientList[iOwnerH]->m_iExpStock += iDice(1,2);
+				// v2.15 낚시를 할때 경험치를 더 준다.
+				GetExp(iOwnerH, iDice(2,5)); //m_pClientList[iOwnerH]->m_iExpStock += iDice(1,2);
 			}
 			
 			pItem = new class CItem;
 			if (pItem == NULL) return 0;
-			if (_bInitItemAttr(pItem, cItemName) == TRUE) {
+			if (_bInitItemAttr(pItem, iItemID) == TRUE) {
+
+			// 아이템에 고유 코드 입력 
+				pItem->m_sTouchEffectType   = DEF_ITET_ID;
+				pItem->m_sTouchEffectValue1 = iDice(1,100000);
+				pItem->m_sTouchEffectValue2 = iDice(1,100000);
+
+				pItem->m_sTouchEffectValue3 = (short) timeGetTime();
+
 				// 아이템을 놓는다. 
 				m_pMapList[cMapIndex]->bSetItem(lX, lY, pItem);
 		
@@ -28588,6 +33791,7 @@ int CGame::iCalculateUseSkillItemEffect(int iOwnerH, char cOwnerType, char cOwne
 			}
 		}
 		break;
+
 	}
 
 	return 1;
@@ -28600,6 +33804,7 @@ void CGame::UseSkillHandler(int iClientH, int iV1, int iV2, int iV3)
  char  cOwnerType;
  short sAttackerWeapon, sOwnerH;
  int   iResult, iPlayerSkillLevel;
+ DWORD dwTime = timeGetTime();
 
 	if (m_pClientList[iClientH] == NULL) return;
 	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE) return;
@@ -28608,6 +33813,7 @@ void CGame::UseSkillHandler(int iClientH, int iV1, int iV2, int iV3)
 	if (m_pSkillConfigList[iV1]	== NULL) return;
 	// 이미 기술을 사용중이라도 리턴.
 	if (m_pClientList[iClientH]->m_bSkillUsingStatus[iV1] == TRUE) return;
+	m_pClientList[iClientH]->m_dwLastActionTime = dwTime;
 
 	// v1.3 !!1해킹 걸러내기용! 
 	/*
@@ -28681,6 +33887,14 @@ void CGame::UseSkillHandler(int iClientH, int iV1, int iV2, int iV3)
 				return;
 			}
 
+			// v2.17 2002-6-29 죽은척할때 명 모드였다면 마법 Casting시에 해제된다.
+			if ( (m_pClientList[iClientH]->m_sStatus & 0x10) != 0 )	{
+				SetInvisibilityFlag(iClientH, DEF_OWNERTYPE_PLAYER, FALSE);
+				
+				bRemoveFromDelayEventList(iClientH, DEF_OWNERTYPE_PLAYER, DEF_MAGICTYPE_INVISIBILITY);
+				m_pClientList[ iClientH ]->m_cMagicEffectStatus[ DEF_MAGICTYPE_INVISIBILITY ] = NULL;
+			}
+
 			// 스킬 카운트 올린다. <-- 내부에서 카운팅을 해야 엉뚱한 스킬이 오르는 경우가 없다. 
 			CalculateSSN_SkillIndex(iClientH, iV1, 1);
 			
@@ -28717,36 +33931,41 @@ void CGame::ReqSellItemHandler(int iClientH, char cItemID, char cSellToWhom, int
 	if (iNum <= 0) return;
 	if (m_pClientList[iClientH]->m_pItemList[cItemID]->m_dwCount < iNum) return;
 
+	iCalcTotalWeight(iClientH);
+
 	// v1.42
 	bNeutral = FALSE;
-	if (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) bNeutral = TRUE;
+	if (m_pClientList[iClientH]->m_cSide == DEF_NETURAL) bNeutral = TRUE;
 
+	// v2.13 성후니 수정 물건을 어디서나 팔게 수정하여서 팔때는 NPC 구분이 필요없다. 
+	// 단 카테고리를 기준으로 아이템 가격을 결정한다.
 	switch (cSellToWhom) {
-	case 15:
-		// 상점 아줌마 
+	case 15: 		// 상점 아줌마 
+	case 24:        // 대장간 주인 
 		cItemCategory = m_pClientList[iClientH]->m_pItemList[cItemID]->m_cCategory;
+		// 12-22 성후니 수정 어디서든 팔수 있게 수정 
+		// 상점아이템 
 		if ( (cItemCategory >= 11) && (cItemCategory <= 50) ) {
+
 			// 적합하다. 무조건 반값 
 			iPrice = (m_pClientList[iClientH]->m_pItemList[cItemID]->m_wPrice / 2)*iNum;
 			sRemainLife = m_pClientList[iClientH]->m_pItemList[cItemID]->m_wCurLifeSpan;
 
+			
 			//v1.42 중립인 경우 반의 반값.
 			if (bNeutral == TRUE) iPrice = iPrice/2;
 			if (iPrice <= 0)    iPrice = 1;
-			if (iPrice > 65500) iPrice = 65500;
-
-			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_SELLITEMPRICE, cItemID, sRemainLife, (WORD)iPrice, m_pClientList[iClientH]->m_pItemList[cItemID]->m_cName, iNum);
-		}
-		else SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CANNOTSELLITEM, cItemID, 1, NULL, m_pClientList[iClientH]->m_pItemList[cItemID]->m_cName);
-		break;
-	
-	case 24:
-		// 대장간 주인이다. 팔고자 하는 아이템의 종류가 적합한지를 검사한다. 
-		cItemCategory = m_pClientList[iClientH]->m_pItemList[cItemID]->m_cCategory;
-		if ( (cItemCategory >= 1) && (cItemCategory <= 10) ) {
-			// 적합하다. 가격을 계산 통보한다.
+			if (iPrice > 1000000) iPrice = 1000000;
 			
-			// 원래 아이템의 수명과 비교해서 감가 상각을 계산, 아이템의 가격을 매긴다.
+			if (m_pClientList[iClientH]->m_iCurWeightLoad + iGetItemWeight(m_pGold, iPrice) > (DWORD)_iCalcMaxLoad(iClientH)) {
+				// v2.12 팔 경우 무게가 초과되어서 팔 수 없다.
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CANNOTSELLITEM, cItemID, 4, NULL, m_pClientList[iClientH]->m_pItemList[cItemID]->m_cName);
+			}
+			else SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_SELLITEMPRICE, cItemID, sRemainLife, iPrice, m_pClientList[iClientH]->m_pItemList[cItemID]->m_cName, iNum);
+		}
+		// 대장간 아이템
+		else if ( (cItemCategory >= 1) && (cItemCategory <= 10) ) {
+				// 원래 아이템의 수명과 비교해서 감가 상각을 계산, 아이템의 가격을 매긴다.
 			sRemainLife = m_pClientList[iClientH]->m_pItemList[cItemID]->m_wCurLifeSpan;
 
 			if (sRemainLife == 0) {
@@ -28857,18 +34076,24 @@ void CGame::ReqSellItemHandler(int iClientH, char cItemID, char cSellToWhom, int
 					dwAddPrice2 = (int)(d1 + d3);
 				}
 
-				iPrice = iPrice + dwAddPrice1 + dwAddPrice2;
+				// v2.03 925 특수 아이템 가격 가중치를 77%수준으로 다운 
+				iPrice = iPrice + (dwAddPrice1 - (dwAddPrice1/3)) + (dwAddPrice2 - (dwAddPrice2/3));
 
 				//v1.42 중립인 경우 반의 반값.
 				if (bNeutral == TRUE) iPrice = iPrice/2;
 				if (iPrice <= 0)    iPrice = 1;
-				if (iPrice > 65500) iPrice = 65500;
+				if (iPrice > 1000000) iPrice = 1000000;
 
-				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_SELLITEMPRICE, cItemID, sRemainLife, (WORD)iPrice, m_pClientList[iClientH]->m_pItemList[cItemID]->m_cName, iNum);
+				if (m_pClientList[iClientH]->m_iCurWeightLoad + iGetItemWeight(m_pGold, iPrice) > (DWORD)_iCalcMaxLoad(iClientH)) {
+					// v2.12 팔 경우 무게가 초과되어서 팔 수 없다.
+					SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CANNOTSELLITEM, cItemID, 4, NULL, m_pClientList[iClientH]->m_pItemList[cItemID]->m_cName);
+				}
+				else SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_SELLITEMPRICE, cItemID, sRemainLife, iPrice, m_pClientList[iClientH]->m_pItemList[cItemID]->m_cName, iNum);
 			}
 		}
 		else SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CANNOTSELLITEM, cItemID, 1, NULL, m_pClientList[iClientH]->m_pItemList[cItemID]->m_cName);
 		break;
+	
 
 	default:
 		break;
@@ -28888,7 +34113,6 @@ void CGame::ReqSellItemConfirmHandler(int iClientH, char cItemID, int iNum, char
  short * sp;
  BOOL   bNeutral;
 
-
 	// 아이템을 팔겠다는 것이 결정되었다.
 	if (m_pClientList[iClientH] == NULL) return;
 	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE) return;
@@ -28896,12 +34120,16 @@ void CGame::ReqSellItemConfirmHandler(int iClientH, char cItemID, int iNum, char
 	if (m_pClientList[iClientH]->m_pItemList[cItemID] == NULL) return;
 	if (iNum <= 0) return;
 	if (m_pClientList[iClientH]->m_pItemList[cItemID]->m_dwCount < iNum) return;
+	// v2.182 2002-11-15 사고 팔수 있는 곳인지 체크하는 변수 추가 
+	if (m_pClientList[iClientH]->m_bIsOnShop == FALSE ) return;
 
+
+	iCalcTotalWeight(iClientH);
 	cItemCategory = m_pClientList[iClientH]->m_pItemList[cItemID]->m_cCategory;
 
 	// v1.42
 	bNeutral = FALSE;
-	if (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) bNeutral = TRUE;
+	if (m_pClientList[iClientH]->m_cSide == DEF_NETURAL) bNeutral = TRUE;
 
 	iPrice = 0;
 	// 아이템의 종류에 따라 가격 계산.
@@ -29016,15 +34244,18 @@ void CGame::ReqSellItemConfirmHandler(int iClientH, char cItemID, int iNum, char
 				dwAddPrice2 = (int)(d1 + d3);
 			}
 
-			iPrice = iPrice + dwAddPrice1 + dwAddPrice2;
+			// v2.03 925 특수 아이템 가격 가중치를 77%수준으로 다운 
+			iPrice = iPrice + (dwAddPrice1 - (dwAddPrice1/3)) + (dwAddPrice2 - (dwAddPrice2/3));
 
 			//v1.42 중립인 경우 반의 반값.
 			if (bNeutral == TRUE) iPrice = iPrice/2;
 			if (iPrice <= 0) iPrice = 1;
-			if (iPrice > 60000) iPrice = 60000;
+			if (iPrice > 1000000) iPrice = 1000000;
 
 			// 아이템을 팔았다는 메시지 전송 (다이얼로그 박스 비활성화용)
 			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMSOLD, cItemID, NULL, NULL, NULL);
+
+			_bItemLog(DEF_ITEMLOG_SELL, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[cItemID]) ;
 
 			// 팔 아이템을 삭제 
 			if ((m_pClientList[iClientH]->m_pItemList[cItemID]->m_cItemType == DEF_ITEMTYPE_CONSUME) ||
@@ -29033,7 +34264,9 @@ void CGame::ReqSellItemConfirmHandler(int iClientH, char cItemID, int iNum, char
 				// v1.41 !!!
 				SetItemCount(iClientH, cItemID, m_pClientList[iClientH]->m_pItemList[cItemID]->m_dwCount - iNum);
 			}
-			else ItemDepleteHandler(iClientH, cItemID, FALSE);
+			// v2.15 Sell 로그가 남기 때문에 Deplete 로그를 남기지 않는다.
+			else ItemDepleteHandler(iClientH, cItemID, FALSE, FALSE);
+
 		}
 	}
 	else 
@@ -29045,9 +34278,12 @@ void CGame::ReqSellItemConfirmHandler(int iClientH, char cItemID, int iNum, char
 		//v1.42 중립인 경우 반의 반값.
 		if (bNeutral == TRUE) iPrice = iPrice/2;
 		if (iPrice <= 0) iPrice = 1;
+		if (iPrice > 1000000) iPrice = 1000000;
 	
 		// 아이템을 팔았다는 메시지 전송 (다이얼로그 박스 비활성화용)
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMSOLD, cItemID, NULL, NULL, NULL);
+
+		_bItemLog(DEF_ITEMLOG_SELL, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[cItemID]) ;
 
 		// 아이템의 종류에 따라 적절한 처리를 한다.
 		if ((m_pClientList[iClientH]->m_pItemList[cItemID]->m_cItemType == DEF_ITEMTYPE_CONSUME) ||
@@ -29056,7 +34292,8 @@ void CGame::ReqSellItemConfirmHandler(int iClientH, char cItemID, int iNum, char
 			// v1.41 !!!
 			SetItemCount(iClientH, cItemID, m_pClientList[iClientH]->m_pItemList[cItemID]->m_dwCount - iNum);
 		}
-		else ItemDepleteHandler(iClientH, cItemID, FALSE);
+		// v2.15 Sell 로그가 남기 때문에 Deplete 로그를 남기지 않는다.
+		else ItemDepleteHandler(iClientH, cItemID, FALSE, FALSE);
 	}
 
 	// Gold를 증가시킨다. 만약 판 가격이 0 혹은 마이너스이면 금을 주지 않는다.
@@ -29232,8 +34469,8 @@ void CGame::ReqRepairItemHandler(int iClientH, char cItemID, char cRepairWhom, c
 
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_REPAIRITEMPRICE, cItemID, sRemainLife, sPrice, m_pClientList[iClientH]->m_pItemList[cItemID]->m_cName);
 	}
-	else if ( ((cItemCategory >= 43) && (cItemCategory <= 50)) || ((cItemCategory >= 11) && (cItemCategory <= 12))) {
-		// 낚시대, 곡괭이 등과 같은 비무기류 수리가능 아이템. 옷, 부츠류
+	else if ( ((cItemCategory >= 43) && (cItemCategory <= 50)) || ((cItemCategory >= 11) && (cItemCategory <= 13))) {
+		// 낚싯대, 곡괭이 등과 같은 비무기류 수리가능 아이템. 옷, 부츠류
 		
 		// 만약 상점 주인이 아닌 이에게 고쳐달라고 한다면 할 수 없다. 
 		if (cRepairWhom != 15) {
@@ -29283,6 +34520,8 @@ void CGame::ReqRepairItemCofirmHandler(int iClientH, char cItemID, char * pStrin
 	if ((cItemID < 0) || (cItemID >= 50)) return;
 	if (m_pClientList[iClientH]->m_pItemList[cItemID] == NULL) return;
 
+	// v2.19 2002-11-12 상점이나 대장간에서만 아이템 수리가 가능하게 수정 (해킹방지를 위해)
+	if( m_pClientList[iClientH]->m_bIsOnShop != TRUE ) return ;
 	//testcode
 	//PutLogList("Repair!");
 
@@ -29290,7 +34529,7 @@ void CGame::ReqRepairItemCofirmHandler(int iClientH, char cItemID, char * pStrin
 
 	// 아이템의 종류에 따라 가격 계산.
   	if ( ((cItemCategory >= 1) && (cItemCategory <= 10)) || ((cItemCategory >= 43) && (cItemCategory <= 50)) || 
-		 ((cItemCategory >= 11) && (cItemCategory <= 12))) {
+		((cItemCategory >= 11) && (cItemCategory <= 13))) { // v2.15 2002-5-15 Wizard 로브도 수리가능하게 수정 
 		// 무기류 혹은 낚시대, 곡괭이와 같은 아이템, 옷, 신발 
 
   		// 원래 아이템의 수명과 비교해서 감가 상각을 계산, 아이템의 수리 비용을 매긴다.
@@ -29342,6 +34581,11 @@ void CGame::ReqRepairItemCofirmHandler(int iClientH, char cItemID, char * pStrin
 			// 아이템의 수명을 늘리고 통보한다. !BUG POINT 위치가 중요하다. 먼저 수명을 늘리고 돈의 카운트를 낮춘다.
 			m_pClientList[iClientH]->m_pItemList[cItemID]->m_wCurLifeSpan = m_pClientList[iClientH]->m_pItemList[cItemID]->m_wMaxLifeSpan;
 		 	SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMREPAIRED, cItemID, m_pClientList[iClientH]->m_pItemList[cItemID]->m_wCurLifeSpan, NULL, NULL);
+
+#ifdef TAIWANLOG
+			if (m_pClientList[iClientH]->m_pItemList[cItemID]->m_cName != NULL) 
+			_bItemLog(DEF_ITEMLOG_REPAIR,iClientH,m_pClientList[iClientH]->m_pItemList[cItemID]->m_cName,NULL) ;
+#endif 
 			
 			iGoldWeight = SetItemCount(iClientH, "Gold", dwGoldCount - sPrice );
 			
@@ -29394,7 +34638,7 @@ int CGame::iCalcTotalWeight(int iClientH)
 void CGame::CheckAndNotifyPlayerConnection(int iClientH, char * pMsg, DWORD dwSize)
 {
  char   seps[] = "= \t\n";
- char   * token, * cp, cName[11], cBuff[256];
+ char   * token, * cp, cName[11], cBuff[256], cTemp[120];
  class  CStrTok * pStrTok;
  register int i;
  WORD * wp;
@@ -29402,6 +34646,7 @@ void CGame::CheckAndNotifyPlayerConnection(int iClientH, char * pMsg, DWORD dwSi
 	if (m_pClientList[iClientH] == NULL) return;
 	if (dwSize <= 0) return;
 
+	ZeroMemory(cTemp, sizeof(cTemp));
 	ZeroMemory(cName, sizeof(cName));
 	ZeroMemory(cBuff, sizeof(cBuff));
 	memcpy(cBuff, pMsg, dwSize);
@@ -29423,8 +34668,25 @@ void CGame::CheckAndNotifyPlayerConnection(int iClientH, char * pMsg, DWORD dwSi
 	for (i = 1; i < DEF_MAXCLIENTS; i++) 
 	if ((m_pClientList[i] != NULL) && (memcmp(cName, m_pClientList[i]->m_cCharName, 10) == 0)) {
 		// 같은 이름을 가진 캐릭터를 찾았다. 
+		// 01-12-10 접속 위치 확인 
 
-		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PLAYERONGAME, NULL, NULL, NULL, m_pClientList[i]->m_cCharName);
+		// v2.14 /fi 기능 추가 
+		if (m_pClientList[iClientH]->m_iAdminUserLevel > 0) {
+		// v2.14 /fi 기능 
+			cp = (char * ) cTemp ;
+			memcpy(cp, m_pClientList[i]->m_cMapName, 10) ;
+			cp += 10 ;
+			
+			wp = (WORD *)cp;
+			*wp =(WORD) m_pClientList[i]->m_sX;
+			cp += 2;
+
+			wp = (WORD *)cp;
+			*wp = (WORD) m_pClientList[i]->m_sY;
+			cp += 2;
+		}
+
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PLAYERONGAME, NULL, NULL, NULL, m_pClientList[i]->m_cCharName, NULL, NULL, NULL, NULL, NULL, NULL, cTemp);
 
 		delete pStrTok;
 		return;
@@ -29449,7 +34711,12 @@ void CGame::CheckAndNotifyPlayerConnection(int iClientH, char * pMsg, DWORD dwSi
 	memcpy(cp, cName, 10);
 	cp += 10;
 
-	bStockMsgToGateServer(cBuff, 15);
+	memcpy(cp, m_pClientList[iClientH]->m_cCharName, 10);
+	cp += 10;
+
+
+	// v2.17 2002-7-15 다른 서버로 접속 여부를 물을때 자신의 캐릭명도 보낸다. /fi버그 수정을 위해 
+	bStockMsgToGateServer(cBuff, 25);
 
 	delete pStrTok;
 }
@@ -29459,8 +34726,9 @@ void CGame::CheckAndNotifyPlayerConnection(int iClientH, char * pMsg, DWORD dwSi
 void CGame::ToggleWhisperPlayer(int iClientH, char * pMsg, DWORD dwMsgSize)
 {
  char   seps[] = "= \t\n";
- char   * token, cName[11], cBuff[256];
+ char   * cp, * token, cName[11], cBuff[256];
  class  CStrTok * pStrTok;
+ WORD   * wp;
  register int i;
 
 	if (m_pClientList[iClientH] == NULL) return;
@@ -29477,32 +34745,63 @@ void CGame::ToggleWhisperPlayer(int iClientH, char * pMsg, DWORD dwMsgSize)
 	if (token == NULL) {
 		// 귓속말 상대가 지정되지 않았다. 귓속말 모드를 해제한다. 
 		m_pClientList[iClientH]->m_iWhisperPlayerIndex = -1;
+		ZeroMemory(m_pClientList[iClientH]->m_cWhisperPlayerName, sizeof(m_pClientList[iClientH]->m_cWhisperPlayerName));
 		// 귓속말 상태가 해제되었음을 통보. 
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_WHISPERMODEOFF, NULL, NULL, NULL, cName);
+		m_pClientList[iClientH]->m_bIsCheckingWhisperPlayer = FALSE;
+		ZeroMemory(m_pClientList[iClientH]->m_cWhisperPlayerName, sizeof(m_pClientList[iClientH]->m_cWhisperPlayerName));
 	}
 	else {
 		if (strlen(token) > 10)	
 			 memcpy(cName, token, 10);
 		else memcpy(cName, token, strlen(token));
-		
+			
+		m_pClientList[iClientH]->m_iWhisperPlayerIndex = -1;
 		for (i = 1; i < DEF_MAXCLIENTS; i++) 
 		if ((m_pClientList[i] != NULL) && (memcmp(m_pClientList[i]->m_cCharName, cName, 10) == 0)) {
-			// 같은 이름을 가진 플레이어를 찾았다. 
-			// 자기 자신이라면 할당하지 않는다.
+			// 같은 이름을 가진 플레이어를 찾았다. // 자기 자신이라면 할당하지 않는다.
 			if (i == iClientH) {
 				delete pStrTok;
 				return;
 			}
 			//인덱스를 할당 
 			m_pClientList[iClientH]->m_iWhisperPlayerIndex = i;
-		   	// 귓속말 상태가 설정되었음을 통보 
-			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_WHISPERMODEON, NULL, NULL, NULL, cName);
-			delete pStrTok;
-			return;
+			ZeroMemory(m_pClientList[iClientH]->m_cWhisperPlayerName, sizeof(m_pClientList[iClientH]->m_cWhisperPlayerName));
+			strcpy(m_pClientList[iClientH]->m_cWhisperPlayerName, cName);
+			break;
 		}
 		
-		// 같은 이름을 가진 플레이어가 없다.
-		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PLAYERNOTONGAME, NULL, NULL, NULL, cName);
+		// v2.12 다른 서버에 있는 캐릭터에게 메시지를 보내기 위함 Index가 10000이면 다른 서버에 보내는 메시지다. 
+		if (m_pClientList[iClientH]->m_iWhisperPlayerIndex == -1) {
+			// 현재 서버에 없다. 다른 서버에 있는지 검사해야 한다.
+			ZeroMemory(cBuff, sizeof(cBuff));
+			cp = (char *)cBuff;
+			*cp = GSM_REQUEST_FINDCHARACTER;
+			cp++;
+
+			wp = (WORD *)cp;
+			*wp = m_wServerID_GSS;
+			cp += 2;
+
+			wp = (WORD *)cp;
+			*wp = iClientH;
+			cp += 2;
+
+			memcpy(cp, cName, 10);
+			cp += 10;
+
+			memcpy(cp, m_pClientList[iClientH]->m_cCharName, 10);
+			cp += 10;
+
+			bStockMsgToGateServer(cBuff, 25);
+			m_pClientList[iClientH]->m_bIsCheckingWhisperPlayer = TRUE;
+			
+			ZeroMemory(m_pClientList[iClientH]->m_cWhisperPlayerName, sizeof(m_pClientList[iClientH]->m_cWhisperPlayerName));
+			strcpy(m_pClientList[iClientH]->m_cWhisperPlayerName, cName);
+		}
+		else SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_WHISPERMODEON, NULL, NULL, NULL, m_pClientList[iClientH]->m_cWhisperPlayerName);
+		delete pStrTok;
+		return;
 	}
  
 	delete pStrTok;
@@ -29560,7 +34859,8 @@ void CGame::GetPlayerProfile(int iClientH, char * pMsg, DWORD dwMsgSize)
 		if ((m_pClientList[i] != NULL) && (memcmp(m_pClientList[i]->m_cCharName, cName, 10) == 0)) {
 		
 			ZeroMemory(cBuff2, sizeof(cBuff2));
-			wsprintf(cBuff2, "%s님의 프로필: %s", cName, m_pClientList[i]->m_cProfile);
+			//v2.19 2002-12-18 profile이 않나오는 버그 수정 
+			wsprintf(cBuff2, "%s Profile:%s", cName, m_pClientList[i]->m_cProfile); // v2.04
 			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PLAYERPROFILE, NULL, NULL, NULL, cBuff2);
 
 			delete pStrTok;
@@ -29950,7 +35250,7 @@ void CGame::___RestorePlayerCharacteristics(int iClientH)
 void CGame::CalcTotalItemEffect(int iClientH, int iEquipItemID, BOOL bNotify)
 {
  register short sItemIndex;
- int  i, iArrowIndex, iPrevSAType;
+ int  i, iArrowIndex, iPrevSAType, iTemp;
  char cEquipPos;
  double dV1, dV2, dV3;
  DWORD  dwSWEType, dwSWEValue;
@@ -29978,14 +35278,7 @@ void CGame::CalcTotalItemEffect(int iClientH, int iEquipItemID, BOOL bNotify)
 	m_pClientList[iClientH]->m_cAttackBonus_L      = 0;
 
 	m_pClientList[iClientH]->m_iHitRatio = 0;
-	//m_pClientList[iClientH]->m_iHitRatio_ItemEffect_SM = 0;
-	//m_pClientList[iClientH]->m_iHitRatio_ItemEffect_L  = 0;
-
 	m_pClientList[iClientH]->m_iDefenseRatio = m_pClientList[iClientH]->m_iDex * 2;
-
-	//m_pClientList[iClientH]->m_iHitRatio_ItemEffect_SM = 0;
-	//m_pClientList[iClientH]->m_iHitRatio_ItemEffect_L  = 0;
-			
 	m_pClientList[iClientH]->m_iDamageAbsorption_Shield = 0;
 	
 	for (i = 0; i < DEF_MAXITEMEQUIPPOS; i++)
@@ -30022,12 +35315,17 @@ void CGame::CalcTotalItemEffect(int iClientH, int iEquipItemID, BOOL bNotify)
 	m_pClientList[iClientH]->m_iAddAR = m_pClientList[iClientH]->m_iAddPR = m_pClientList[iClientH]->m_iAddDR = 0;
 	m_pClientList[iClientH]->m_iAddMR = m_pClientList[iClientH]->m_iAddAbsPD = m_pClientList[iClientH]->m_iAddAbsMD = 0;
 	m_pClientList[iClientH]->m_iAddCD = m_pClientList[iClientH]->m_iAddExp = m_pClientList[iClientH]->m_iAddGold = 0;	
+	// v2.20 2002-12-28 3주년 기념반지 버그 수정  
+	m_pClientList[iClientH]->m_iHPStatic_stock = 0;
 	
 	iPrevSAType = m_pClientList[iClientH]->m_iSpecialAbilityType;
 
 	m_pClientList[iClientH]->m_iSpecialAbilityType     = 0;
 	m_pClientList[iClientH]->m_iSpecialAbilityLastSec  = 0;
 	m_pClientList[iClientH]->m_iSpecialAbilityEquipPos = 0;
+
+	m_pClientList[iClientH]->m_iAddTransMana = 0;
+	m_pClientList[iClientH]->m_iAddChargeCritical = 0;
 	
 	m_pClientList[iClientH]->m_iAlterItemDropIndex = -1;
 	// 착용하지 않아도 효과가 있는 아이템.
@@ -30056,6 +35354,12 @@ void CGame::CalcTotalItemEffect(int iClientH, int iEquipItemID, BOOL bNotify)
 			// 마법 데미지 절감 아이템. 인덱스를 저장한다.
 			m_pClientList[iClientH]->m_iMagicDamageSaveItemIndex = sItemIndex;
 			break;
+		// v2.181 2002-10-25 3주년 이벤트 반지 효과 추가 
+		// v2.19 2002-10-25 3주년 이벤트 반지 효과 추가 버그 수정 
+		// v2.20 2002-12-28 3주년 기념반지 버그 수정 
+		case DEF_ITEMEFFECTTYPE_HP:
+			m_pClientList[iClientH]->m_iHPStatic_stock += m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectValue4 ;
+			break; 
 		
 		case DEF_ITEMEFFECTTYPE_ATTACK_SPECABLTY:
 		case DEF_ITEMEFFECTTYPE_ATTACK_DEFENSE:
@@ -30069,6 +35373,16 @@ void CGame::CalcTotalItemEffect(int iClientH, int iEquipItemID, BOOL bNotify)
 			m_pClientList[iClientH]->m_cAttackDiceThrow_L  = m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectValue4;
 			m_pClientList[iClientH]->m_cAttackDiceRange_L  = m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectValue5;
 			m_pClientList[iClientH]->m_cAttackBonus_L      = m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectValue6;
+
+			// v2.05 무기의 특성치 추가 
+			iTemp = (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_dwAttribute & 0xF0000000) >> 28;
+			//testcode
+			//wsprintf(G_cTxt, "Add Damage: %d", iTemp);
+			//PutLogList(G_cTxt);
+
+			// 고정 대미지 추가
+			m_pClientList[iClientH]->m_iAddPhysicalDamage += iTemp;
+			m_pClientList[iClientH]->m_iAddMagicalDamage  += iTemp;
 						
 			// 공격무기의 해당 스킬만큼의 명중률을 더한다. 
 			m_pClientList[iClientH]->m_iHitRatio += m_pClientList[iClientH]->m_cSkillMastery[ m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sRelatedSkill ]; 
@@ -30190,6 +35504,11 @@ void CGame::CalcTotalItemEffect(int iClientH, int iEquipItemID, BOOL bNotify)
 				case 11: m_pClientList[iClientH]->m_iAddExp   += (int)dwSWEValue*10; break;
 				case 12: m_pClientList[iClientH]->m_iAddGold  += (int)dwSWEValue*10; break;
 				}
+
+				// v2.04 특성치 제한을 붙임.
+				switch (dwSWEType) {
+				case 9: if (m_pClientList[iClientH]->m_iAddAbsMD > 80) m_pClientList[iClientH]->m_iAddAbsMD = 80; break;
+				}
 			}
 
 			// 일반 공격 이외의 효과를 설정.
@@ -30307,12 +35626,21 @@ void CGame::CalcTotalItemEffect(int iClientH, int iEquipItemID, BOOL bNotify)
 			}
 			else {
 				iArrowIndex = m_pClientList[iClientH]->m_cArrowIndex;
+				/*
 				m_pClientList[iClientH]->m_cAttackDiceThrow_SM = m_pClientList[iClientH]->m_pItemList[iArrowIndex]->m_sItemEffectValue1;
 				m_pClientList[iClientH]->m_cAttackDiceRange_SM = m_pClientList[iClientH]->m_pItemList[iArrowIndex]->m_sItemEffectValue2;
 				m_pClientList[iClientH]->m_cAttackBonus_SM     = m_pClientList[iClientH]->m_pItemList[iArrowIndex]->m_sItemEffectValue3;
 				m_pClientList[iClientH]->m_cAttackDiceThrow_L  = m_pClientList[iClientH]->m_pItemList[iArrowIndex]->m_sItemEffectValue4;
 				m_pClientList[iClientH]->m_cAttackDiceRange_L  = m_pClientList[iClientH]->m_pItemList[iArrowIndex]->m_sItemEffectValue5;
 				m_pClientList[iClientH]->m_cAttackBonus_L      = m_pClientList[iClientH]->m_pItemList[iArrowIndex]->m_sItemEffectValue6;
+				*/
+				// v2.12 활의 타격치는 화살이 아니라 활 자체로 바뀐다.
+				m_pClientList[iClientH]->m_cAttackDiceThrow_SM = m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectValue1;
+				m_pClientList[iClientH]->m_cAttackDiceRange_SM = m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectValue2;
+				m_pClientList[iClientH]->m_cAttackBonus_SM     = m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectValue3;
+				m_pClientList[iClientH]->m_cAttackDiceThrow_L  = m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectValue4;
+				m_pClientList[iClientH]->m_cAttackDiceRange_L  = m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectValue5;
+				m_pClientList[iClientH]->m_cAttackBonus_L      = m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectValue6;
 			}
 			
 			// 공격무기의 해당 스킬만큼의 명중률을 더한다. 
@@ -30358,7 +35686,7 @@ void CGame::CalcTotalItemEffect(int iClientH, int iEquipItemID, BOOL bNotify)
 				
 				// 희귀 아이템 효과 종류: 
 				// 0-None 1-필살기대미지추가 2-중독효과 3-정의의 4-저주의 
-				// 5-민첩의 6-가벼운 7-예리한 8-강화된 9-고대문명의
+				// 5-민첩의 6-가벼운 7-예리한 8-강화된 9-고대문명의 10-마법성공의 11-마나변환의 12-필살충전의
 			
 				switch (dwSWEType) {
 				case 7: // 예리한 
@@ -30369,6 +35697,17 @@ void CGame::CalcTotalItemEffect(int iClientH, int iEquipItemID, BOOL bNotify)
 				case 9: // 고대문명의
 					m_pClientList[iClientH]->m_cAttackDiceRange_SM += 2;
 					m_pClientList[iClientH]->m_cAttackDiceRange_L  += 2;
+					break;
+
+				// v2.04 
+				case 11: // 마나 변환의 
+					m_pClientList[iClientH]->m_iAddTransMana += dwSWEValue;
+					if (m_pClientList[iClientH]->m_iAddTransMana > 13) m_pClientList[iClientH]->m_iAddTransMana = 13;
+					break;
+
+				case 12: // 필살 충전의 
+					m_pClientList[iClientH]->m_iAddChargeCritical += dwSWEValue;
+					if (m_pClientList[iClientH]->m_iAddChargeCritical > 20) m_pClientList[iClientH]->m_iAddChargeCritical = 20;
 					break;
 				}
 			}
@@ -30397,6 +35736,11 @@ void CGame::CalcTotalItemEffect(int iClientH, int iEquipItemID, BOOL bNotify)
 				case 10: m_pClientList[iClientH]->m_iAddCD    += (int)dwSWEValue; break;
 				case 11: m_pClientList[iClientH]->m_iAddExp   += (int)dwSWEValue*10; break;
 				case 12: m_pClientList[iClientH]->m_iAddGold  += (int)dwSWEValue*10; break;
+				}
+
+				// v2.04 특성치 제한을 붙임.
+				switch (dwSWEType) {
+				case 9: if (m_pClientList[iClientH]->m_iAddAbsMD > 80) m_pClientList[iClientH]->m_iAddAbsMD = 80; break; // 마법 대미지 흡수 최대 80%
 				}
 			}
 
@@ -30559,7 +35903,7 @@ BOOL CGame::_bGetIsPlayerHostile(int iClientH, int sOwnerH)
 	// 자기 자신에 대한 공격은 범죄라 볼 수 없다. 
 	if (iClientH == sOwnerH) return TRUE;
 
-	if (m_pClientList[iClientH]->m_cSide == 0) {
+	if (m_pClientList[iClientH]->m_cSide == DEF_NETURAL) {
 		// 공격자는 여행자이다.
 		// 상대방이 범죄자이면 적성이며 그 이외에는 아니다. 
 		if (m_pClientList[sOwnerH]->m_iPKCount != 0) 
@@ -30733,18 +36077,30 @@ void CGame::CheckDayOrNightMode()
 void CGame::ShutUpPlayer(int iClientH, char * pMsg, DWORD dwMsgSize)
 {
  char   seps[] = "= \t\n";
- char   * token, cName[11], cBuff[256];
+ char   * token, cName[11], cBuff[256],* cp;
+ WORD * wp ;
  class  CStrTok * pStrTok;
  register int i, iTime;
 
 	if (m_pClientList[iClientH] == NULL) return;
 	if ((dwMsgSize)	<= 0) return;
 
+	// v2.18 2002-10-15 GM 패스워드를 치지 않으면 동작하지 않는다. 
+#ifndef DEF_TESTSERVER	
+	if (m_pClientList[iClientH]->m_bIsAdminCommandEnabled == FALSE) return;
+#endif
+
+#ifdef	DEF_TAIWAN
 	if (m_pClientList[iClientH]->m_iAdminUserLevel < 1) {
+#else
+	if (m_pClientList[iClientH]->m_iAdminUserLevel < 2) {
+#endif
+	
 		// Admin user level이 낮아서 이 기능을 사용할 수 없다.
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ADMINUSERLEVELLOW, NULL, NULL, NULL, NULL);
 		return;
 	}
+
 
 	ZeroMemory(cName, sizeof(cName));
 	ZeroMemory(cBuff, sizeof(cBuff));
@@ -30771,20 +36127,61 @@ void CGame::ShutUpPlayer(int iClientH, char * pMsg, DWORD dwMsgSize)
 		for (i = 1; i < DEF_MAXCLIENTS; i++) 
 		if ((m_pClientList[i] != NULL) && (memcmp(m_pClientList[i]->m_cCharName, cName, 10) == 0)) {
 			
-			m_pClientList[i]->m_iTimeLeft_ShutUp = iTime; // 1이 3초다. 20이면 1분 
-			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PLAYERSHUTUP, iTime*3, NULL, NULL, cName);
-			SendNotifyMsg(NULL, i, DEF_NOTIFY_PLAYERSHUTUP, iTime*3, NULL, NULL, cName);
+			// v2.14 셧업시간을 분으로 수정
+			m_pClientList[i]->m_iTimeLeft_ShutUp = iTime*20; // 1이 3초다. 20이면 1분 
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PLAYERSHUTUP, iTime, NULL, NULL, cName);
+			SendNotifyMsg(NULL, i, DEF_NOTIFY_PLAYERSHUTUP, iTime, NULL, NULL, cName);
 
 			// Admin Log
-			wsprintf(G_cTxt, "Admin Order(%s): Shutup (%s %d)", m_pClientList[iClientH]->m_cCharName, 
-				     m_pClientList[i]->m_cCharName, iTime*3);
-			PutAdminLogFileList(G_cTxt);
+			// v2.14 성후니 수정 
+			wsprintf(G_cTxt, "GM Order(%s): Shutup PC(%s) (%d)Min", m_pClientList[iClientH]->m_cCharName, 
+				     m_pClientList[i]->m_cCharName, iTime);
+
+#ifdef DEF_TAIWANLOG
+			_bItemLog(DEF_ITEMLOG_SHUTUP,i,m_pClientList[iClientH]->m_cCharName,NULL) ;
+
+			// Admin Log
+			// v2.14 성후니 수정 
+			wsprintf(G_cTxt, "GM Order(%s): Shutup PC(%s) (%d)Min", m_pClientList[iClientH]->m_cCharName, 
+				     m_pClientList[i]->m_cCharName, iTime);
+
+			bSendMsgToLS(MSGID_GAMEMASTERLOG, iClientH, NULL,G_cTxt);
+#endif
 
 			delete pStrTok;
 			return;
 		}
-		// 현재 접속중이 아니다.
-		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PLAYERNOTONGAME, NULL, NULL, NULL, cName);
+
+		// v2.12 다른 서버에 있는 캐릭터에게 메시지를 보내기 위함 
+		// 현재 서버에 없다. 다른 서버에 있는지 검사해야 한다.
+		ZeroMemory(cBuff, sizeof(cBuff));
+		cp = (char *)cBuff;
+		*cp = GSM_REQUEST_SHUTUPPLAYER;
+		cp++;
+
+		wp = (WORD *)cp;
+		*wp = m_wServerID_GSS;
+		cp += 2;
+
+		wp = (WORD *)cp;
+		*wp = iClientH;
+		cp += 2;
+
+		memcpy(cp, cName, 10);
+		cp += 10;
+
+		wp = (WORD *)cp;
+		*wp = iTime ;
+		cp += 2;
+
+		memcpy(cp, m_pClientList[iClientH]->m_cCharName, 10);
+		cp += 10;
+
+		bStockMsgToGateServer(cBuff, 27);
+
+		delete pStrTok;
+		return;
+
 	}
 
 	delete pStrTok;
@@ -30808,7 +36205,7 @@ void CGame::SetPlayerReputation(int iClientH, char * pMsg, char cValue, DWORD dw
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CANNOTRATING, m_pClientList[iClientH]->m_iTimeLeft_Rating, NULL, NULL, NULL);
 		return;
 	}
-	else if (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) {
+	else if ( m_pClientList[iClientH]->m_cSide == DEF_NETURAL ) { // 2002-11-15
 		// 소속 마을이 없는 사람은 평판을 내릴 수 없다.
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CANNOTRATING, 0, NULL, NULL, NULL);
 		return;	
@@ -30982,8 +36379,11 @@ void CGame::CalcExpStock(int iClientH)
 	if (m_pClientList[iClientH] == NULL) return;
 	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE) return;
 	if (m_pClientList[iClientH]->m_iExpStock <= 0) return;
-	if (m_pClientList[iClientH]->m_iLevel >= m_iPlayerMaxLevel) return;
-		
+	
+	// !!!!
+	// v2.12 2002-2-6 지존도 현재 경험치가 최대 레벨 경험치보다 적으면 경험치를 얻을수 있게 변경 .. v2.15 삭제. 지존도 경험치 얻는다.
+	//if ((m_pClientList[iClientH]->m_iLevel >= m_iPlayerMaxLevel) && (m_pClientList[iClientH]->m_iExp >= m_iLevelExpTable[m_iPlayerMaxLevel])) return;
+			
 	// 포상과 페널티가 없는 맵 위에 서 있다면 경험치는 올라가지 않는다.
 	if (m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cType == DEF_MAPTYPE_NOPENALTY_NOREWARD) {
 		m_pClientList[iClientH]->m_iExpStock = 0;
@@ -31002,8 +36402,20 @@ void CGame::CalcExpStock(int iClientH)
 	// 레벨이 올랐는지를 검사한다.
 	bIsLevelUp = bCheckLevelUp(iClientH);
 
-	if ((bIsLevelUp == TRUE) && (m_pClientList[iClientH]->m_iLevel <= 20)) {
-		// 초보용 Gold 지급. 레벨 1~20까지 6000 Gold 지급.
+	// v2.03 변경 9/1
+	if ((bIsLevelUp == TRUE) && (m_pClientList[iClientH]->m_iLevel <= 5)) {
+		// 초보용 Gold 지급. 레벨 1~5까지 100 Gold 지급.
+		pItem = new class CItem;
+		if (_bInitItemAttr(pItem, "Gold") == FALSE) {
+			delete pItem;
+			return;
+		}
+		else pItem->m_dwCount = (DWORD)100;
+		bAddItem(iClientH, pItem, NULL);
+	}
+	// v2.03 변경 9/1
+	if ((bIsLevelUp == TRUE) && (m_pClientList[iClientH]->m_iLevel > 5 ) &&  (m_pClientList[iClientH]->m_iLevel <= 20) ) {
+		// 초보용 Gold 지급. 레벨 5~20까지 300 Gold 지급.
 		pItem = new class CItem;
 		if (_bInitItemAttr(pItem, "Gold") == FALSE) {
 			delete pItem;
@@ -31012,6 +36424,7 @@ void CGame::CalcExpStock(int iClientH)
 		else pItem->m_dwCount = (DWORD)300;
 		bAddItem(iClientH, pItem, NULL);
 	}
+
 }
 
 void CGame::___RestorePlayerRating(int iClientH)
@@ -31049,6 +36462,10 @@ void CGame::AdminOrder_CallGuard(int iClientH, char * pData, DWORD dwMsgSize)
 		return;
 	}
 
+	// v2.18 2002-10-15 GM 패스워드를 치지 않으면 동작하지 않는다. 
+#ifndef DEF_TESTSERVER	
+	if (m_pClientList[iClientH]->m_bIsAdminCommandEnabled == FALSE) return;
+#endif
 	ZeroMemory(cName, sizeof(cName));
 	ZeroMemory(cNpcWaypoint, sizeof(cNpcWaypoint));
 	ZeroMemory(cTargetName, sizeof(cTargetName));
@@ -31094,6 +36511,10 @@ void CGame::AdminOrder_CallGuard(int iClientH, char * pData, DWORD dwMsgSize)
 					m_pMapList[ m_pClientList[i]->m_cMapIndex ]->SetNamingValueEmpty(iNamingValue);
 				} 
 				else {
+
+				wsprintf(G_cTxt, "GM Order(%s): Guard Attack PC(%s)",m_pClientList[iClientH]->m_cCharName, m_pClientList[i]->m_cCharName);
+				bSendMsgToLS(MSGID_GAMEMASTERLOG, iClientH, NULL,G_cTxt);
+
 					// 가드를 생성시켰다. 공격 목표를 할당한다.
 					bSetNpcAttackMode(cName, i, DEF_OWNERTYPE_PLAYER, TRUE);
 				}
@@ -31124,6 +36545,11 @@ void CGame::AdminOrder_SummonDemon(int iClientH)
 		return;
 	}
 
+	// v2.18 2002-10-15 GM 패스워드를 치지 않으면 동작하지 않는다. 
+#ifndef DEF_TESTSERVER	
+	if (m_pClientList[iClientH]->m_bIsAdminCommandEnabled == FALSE) return;
+#endif
+
 	iNamingValue = m_pMapList[ m_pClientList[iClientH]->m_cMapIndex ]->iGetEmptyNamingValue();
 	if (iNamingValue == -1) {
 		// 더이상 이 맵에 NPC를 만들수 없다. 이름을 할당할 수 없기 때문.
@@ -31148,9 +36574,10 @@ void CGame::AdminOrder_SummonDemon(int iClientH)
 			m_pMapList[ m_pClientList[iClientH]->m_cMapIndex ]->SetNamingValueEmpty(iNamingValue);
 		} 
 		else {
-			// Admin Log
-			wsprintf(G_cTxt, "Admin Order(%s): Summon Demon", m_pClientList[iClientH]->m_cCharName);
-			PutAdminLogFileList(G_cTxt);
+			// v2.4 GM Log
+			wsprintf(G_cTxt, "GM Order(%s): Summon Demon", m_pClientList[iClientH]->m_cCharName);
+			bSendMsgToLS(MSGID_GAMEMASTERLOG, iClientH, NULL,G_cTxt);
+
 		}
 	}
 
@@ -31160,7 +36587,7 @@ void CGame::AdminOrder_SummonDemon(int iClientH)
 void CGame::AdminOrder_ReserveFightzone(int iClientH, char * pData, DWORD dwMsgSize)
 {
  char   seps[] = "= \t\n";
- char   * token, cTargetName[11], cBuff[256];
+ char   * token, cBuff[256];
  class  CStrTok * pStrTok;
  int iNum ;
 
@@ -31197,18 +36624,18 @@ void CGame::AdminOrder_ReserveFightzone(int iClientH, char * pData, DWORD dwMsgS
 	iNum = atoi(token) - 1;
 			
 	if ( m_iFightZoneReserve[iNum] != -1) {
-		// Admin Log
-		wsprintf(G_cTxt, "Admin Order(%s):  %d FightzoneReserved", m_pClientList[iClientH]->m_cCharName, iNum );
-		PutAdminLogFileList(G_cTxt);
+		// v2.14 GM Log
+		wsprintf(G_cTxt, "GM Order(%s): FightzoneNumber(%d) FightzoneReserved", m_pClientList[iClientH]->m_cCharName, iNum );
+		bSendMsgToLS(MSGID_GAMEMASTERLOG, iClientH, NULL,G_cTxt);
 		
 		m_iFightZoneReserve[iNum] = - 1 ;        // 운영자가 예약한 사투장은 -1 값이 들어간다.
 												 // 이제부터 계속 다른 유저는 예약이 불가능하다.
 		// 운영자가 사투장 예약에 성공하는 경우 
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_FIGHTZONERESERVE, iNum+1, NULL, NULL, NULL);
 		
-	}  else {	// 운영자가 예약한 사투장을 다시 예약하면 예약이 취소된다.
-		wsprintf(G_cTxt, "Admin Order(%s):  %d Cancel FightzoneReserved", m_pClientList[iClientH]->m_cCharName, iNum );
-		PutAdminLogFileList(G_cTxt);
+	}  else {	// v2.14 GM Log 운영자가 예약한 사투장을 다시 예약하면 예약이 취소된다.
+		wsprintf(G_cTxt, "GM Order(%s): FightzoneNumber(%d) Cancel FightzoneReserved", m_pClientList[iClientH]->m_cCharName, iNum );
+		bSendMsgToLS(MSGID_GAMEMASTERLOG, iClientH, NULL,G_cTxt);
 
 		m_iFightZoneReserve[iNum] = 0 ;       
 		// 운영자가 사투장 예약을 취소하는 경우       -3 값을 넘겨준다.
@@ -31230,14 +36657,16 @@ void CGame::AdminOrder_CloseConn(int iClientH, char * pData, DWORD dwMsgSize)
 	if (m_pClientList[iClientH] == NULL) return;
 	if ((dwMsgSize)	<= 0) return;
 
-	/*
-	//v1.42 길드전용 임시 코드 
-	if ((memcmp(m_pClientList[iClientH]->m_cMapName, "fightzone", 9) == 0) && (m_pClientList[iClientH]->m_iSkillSSN[59] == 1)) {
-		goto AOCC_PASS;
-	}
-	*/
+	// v2.18 2002-10-15 GM 패스워드를 치지 않으면 동작하지 않는다. 
+#ifndef DEF_TESTSERVER	
+	if (m_pClientList[iClientH]->m_bIsAdminCommandEnabled == FALSE) return;
+#endif
 
+#ifdef DEF_TIAWAN
+	if (m_pClientList[iClientH]->m_iAdminUserLevel < 3) {
+#else
 	if (m_pClientList[iClientH]->m_iAdminUserLevel < 2) {
+#endif
 		// Admin user level이 낮아서 이 기능을 사용할 수 없다.
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ADMINUSERLEVELLOW, NULL, NULL, NULL, NULL);
 		return;
@@ -31262,12 +36691,21 @@ void CGame::AdminOrder_CloseConn(int iClientH, char * pData, DWORD dwMsgSize)
 			// 목표 캐릭터를 찾았다. 강제로 접속을 끊는다.	
 			if (m_pClientList[i]->m_bIsInitComplete == TRUE) {
 				// v1.22 강제 접속 종료된 클라이언트는 블리딩 아일랜드로 텔레포트된다.
+				// v2.14 Admin Level 낮은 GM은 높은 GM 을 강퇴시킬수 없다. 
+				if (m_pClientList[iClientH]->m_iAdminUserLevel < m_pClientList[i]->m_iAdminUserLevel) {
+					SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ADMINUSERLEVELLOW, NULL, NULL, NULL, NULL);
+					delete pStrTok;
+					return ;
+				}
+
+				wsprintf(G_cTxt, "GM Order(%s): Close Connection PC(%s)",m_pClientList[iClientH]->m_cCharName, m_pClientList[i]->m_cCharName);
+
+				bSendMsgToLS(MSGID_GAMEMASTERLOG, iClientH, NULL,G_cTxt);
+#ifdef DEF_TAIWANLOG
+				_bItemLog(DEF_ITEMLOG_CLOSECONN,i, m_pClientList[iClientH]->m_cCharName,NULL);
+#endif
 				DeleteClient(i, TRUE, TRUE, TRUE, TRUE);
 			}
-
-			// Admin Log
-			wsprintf(G_cTxt, "Admin Order(%s): Close Conn", m_pClientList[iClientH]->m_cCharName);
-			PutAdminLogFileList(G_cTxt);
 
 			delete pStrTok;
 			return;
@@ -31326,7 +36764,11 @@ void CGame::UserCommand_BanGuildsman(int iClientH, char * pData, DWORD dwMsgSize
 			}
 			// 길드 정보 화일에서 탈퇴한 길드원의 이름을 삭제한다.
 			bSendMsgToLS(MSGID_REQUEST_UPDATEGUILDINFO_DELGUILDSMAN, i);
-		
+
+#ifdef DEF_TAIWANLOG
+			_bItemLog(DEF_ITEMLOG_BANGUILD,i,(char *)NULL,NULL) ;
+#endif
+
 			// 다른 길드원들에게 길드원의 탈퇴를 알린다.
 			SendGuildMsg(i, DEF_NOTIFY_DISMISSGUILDSMAN, NULL, NULL, NULL);
 	
@@ -31344,6 +36786,7 @@ void CGame::UserCommand_BanGuildsman(int iClientH, char * pData, DWORD dwMsgSize
 		
 			// 특성이 바뀌므로 외양을 새로 보낸다. 
 			SendEventToNearClient_TypeA(i, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTNULLACTION, NULL, NULL, NULL);
+			SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_CLEARGUILDNAME, m_pClientList[i]->m_cMapIndex,m_pClientList[i]->m_sX, m_pClientList[i]->m_sY,0, 0, 0);
 		
 			delete pStrTok;
 			return;
@@ -31547,10 +36990,11 @@ void CGame::FishProcessor()
 void CGame::AdminOrder_CreateFish(int iClientH, char * pData, DWORD dwMsgSize)
 {
  char   seps[] = "= \t\n";
- char   * token, cBuff[256], cItemName[21];
+ char   * token, cBuff[256] ;
  class  CStrTok * pStrTok;
  class  CItem   * pItem;
  register int tX, tY, iType;
+ int iItemID = 0 ;
 
 	if (m_pClientList[iClientH] == NULL) return;
 	if ((dwMsgSize)	<= 0) return;
@@ -31591,12 +37035,19 @@ void CGame::AdminOrder_CreateFish(int iClientH, char * pData, DWORD dwMsgSize)
 			delete pStrTok;
 			return;
 		}
-		ZeroMemory(cItemName, sizeof(cItemName));
-		strcpy(cItemName, "물고기");
-		if (_bInitItemAttr(pItem, cItemName) == TRUE) {
+		// v2.17 2002-7-31 아이템을 아이템 고유번호로 생성할 수 있게 한다.
+		iItemID = 100 ;
+
+		if (_bInitItemAttr(pItem, iItemID) == TRUE) {
    			iCreateFish(m_pClientList[iClientH]->m_cMapIndex, tX, tY, iType, pItem, 1, 60000*20);
+			// v2.17 2002-8-5 메모리 누수 발견하여 수정함
+			delete pItem;
+			pItem = NULL ;
 		}
-		else delete pItem;
+		else {
+			delete pItem;
+			pItem = NULL ;
+		}
    	}
 
 	delete pStrTok;
@@ -31606,7 +37057,7 @@ void CGame::AdminOrder_CreateFish(int iClientH, char * pData, DWORD dwMsgSize)
 void CGame::AdminOrder_Teleport(int iClientH, char * pData, DWORD dwMsgSize)
 {
  char   seps[] = "= \t\n";
- char   * token, cBuff[256], cMapName[256];
+ char   * token, cBuff[256], cMapName[256] ;
  class  CStrTok * pStrTok;
  register int dX, dY;
  BOOL   bFlag;
@@ -31616,7 +37067,11 @@ void CGame::AdminOrder_Teleport(int iClientH, char * pData, DWORD dwMsgSize)
 	if (m_pClientList[iClientH] == NULL) return;
 	if ((dwMsgSize)	<= 0) return;
 
-	if (m_pClientList[iClientH]->m_iAdminUserLevel < 2) {
+	// v2.13 옵저버 모드이면 텔레포트 않되게 수정 
+	if (m_pClientList[iClientH]->m_bIsObserverMode == TRUE) return ;
+
+	// v2.13 운영자 레벨 조절
+	if (m_pClientList[iClientH]->m_iAdminUserLevel < 1) {
 		// Admin user level이 낮아서 이 기능을 사용할 수 없다.
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ADMINUSERLEVELLOW, NULL, NULL, NULL, NULL);
 		return;
@@ -31644,6 +37099,8 @@ void CGame::AdminOrder_Teleport(int iClientH, char * pData, DWORD dwMsgSize)
 		dY = atoi(token);
 	}
 
+
+
 	bFlag = FALSE;
 	if (strcmp("arefarm", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("elvfarm", cMapName) == 0) bFlag = TRUE;
@@ -31651,31 +37108,35 @@ void CGame::AdminOrder_Teleport(int iClientH, char * pData, DWORD dwMsgSize)
 	if (strcmp("aresdend1", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("cath_1", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("wrhus_1", cMapName) == 0) bFlag = TRUE;
+	if (strcmp("bsmith_1", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("gshop_1", cMapName) == 0) bFlag = TRUE;
+	if (strcmp("wrhus_1f", cMapName) == 0) bFlag = TRUE;
+	if (strcmp("bsmith_1f", cMapName) == 0) bFlag = TRUE;
+	if (strcmp("gshop_1f", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("gldhall_1", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("cityhall_1", cMapName) == 0) bFlag = TRUE;
-	if (strcmp("bsmith_1", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("wzdtwr_1", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("huntzone2", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("huntzone4", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("areuni", cMapName) == 0) bFlag = TRUE;
-	if (strcmp("aremidr", cMapName) == 0) bFlag = TRUE;
-	if (strcmp("aremidl", cMapName) == 0) bFlag = TRUE;
+	if (strcmp("resurr1", cMapName) == 0) bFlag = TRUE;
+	if (strcmp("resurr2", cMapName) == 0) bFlag = TRUE;
 	
 	if (strcmp("elvine", cMapName) == 0)      bFlag = TRUE;
 	if (strcmp("elvined1", cMapName) == 0)    bFlag = TRUE;
 	if (strcmp("cath_2", cMapName) == 0)      bFlag = TRUE;
 	if (strcmp("wrhus_2", cMapName) == 0)     bFlag = TRUE;
 	if (strcmp("gshop_2", cMapName) == 0)     bFlag = TRUE;
+	if (strcmp("bsmith_2", cMapName) == 0) bFlag = TRUE;
+	if (strcmp("wrhus_2f", cMapName) == 0)     bFlag = TRUE;
+	if (strcmp("gshop_2f", cMapName) == 0)     bFlag = TRUE;
+	if (strcmp("bsmith_2f", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("gldhall_2", cMapName) == 0)   bFlag = TRUE;
 	if (strcmp("cityhall_2", cMapName) == 0) bFlag = TRUE;
-	if (strcmp("bsmith_2", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("wzdtwr_2", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("huntzone1", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("huntzone3", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("elvuni", cMapName) == 0) bFlag = TRUE;
-	if (strcmp("elvmidr", cMapName) == 0) bFlag = TRUE;
-	if (strcmp("elvmidl", cMapName) == 0) bFlag = TRUE;
 	
 	if (strcmp("dglv2", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("dglv3", cMapName) == 0) bFlag = TRUE;
@@ -31683,6 +37144,9 @@ void CGame::AdminOrder_Teleport(int iClientH, char * pData, DWORD dwMsgSize)
 	
 	if (strcmp("bisle", cMapName) == 0)   bFlag = TRUE;
 	if (strcmp("default", cMapName) == 0) bFlag = TRUE;
+
+	if (strcmp("arejail", cMapName) == 0) bFlag = TRUE;
+	if (strcmp("elvjail", cMapName) == 0) bFlag = TRUE;
 	
 	if (strcmp("fightzone1", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("fightzone2", cMapName) == 0) bFlag = TRUE;
@@ -31713,8 +37177,21 @@ void CGame::AdminOrder_Teleport(int iClientH, char * pData, DWORD dwMsgSize)
 	if (strcmp("arewrhus", cMapName) == 0) bFlag = TRUE;
 	if (strcmp("elvwrhus", cMapName) == 0) bFlag = TRUE;
 
-	if (bFlag == TRUE)
-		RequestTeleportHandler(iClientH, "2   ", cMapName, dX, dY);
+	if (strcmp("toh1", cMapName) == 0) bFlag = TRUE;
+	if (strcmp("toh2", cMapName) == 0) bFlag = TRUE;
+	if (strcmp("toh3", cMapName) == 0) bFlag = TRUE;
+
+	if (strcmp("2ndmiddle", cMapName) == 0) bFlag = TRUE;
+	if (strcmp("icebound", cMapName) == 0) bFlag = TRUE;
+
+	if (bFlag == FALSE) { delete pStrTok ; return; }
+
+	if ((dX == - 1) && (dY == -1))
+			wsprintf(G_cTxt, "GM Order(%s): teleport MapName(%s)",m_pClientList[iClientH]->m_cCharName, cMapName);
+	else wsprintf(G_cTxt, "GM Order(%s): teleport MapName(%s)(%d %d)",m_pClientList[iClientH]->m_cCharName, cMapName,dX,dY);
+	bSendMsgToLS(MSGID_GAMEMASTERLOG, iClientH, NULL,G_cTxt);
+
+	RequestTeleportHandler(iClientH, "2   ", cMapName, dX, dY);
    	
 	delete pStrTok;
 	return;
@@ -31739,7 +37216,7 @@ void CGame::ReqGetFishThisTimeHandler(int iClientH)
 		// 이 물고기를 낚는데 성공하였다!
 		
 		// 경험치 증가 
-		m_pClientList[iClientH]->m_iExpStock += iDice(m_pFish[m_pClientList[iClientH]->m_iAllocatedFish]->m_iDifficulty, 5);
+		GetExp(iClientH, iDice(m_pFish[m_pClientList[iClientH]->m_iAllocatedFish]->m_iDifficulty, 6)); //m_pClientList[iClientH]->m_iExpStock += iDice(m_pFish[m_pClientList[iClientH]->m_iAllocatedFish]->m_iDifficulty, 5);
 		// 스킬 증가 
 		CalculateSSN_SkillIndex(iClientH, 1, m_pFish[m_pClientList[iClientH]->m_iAllocatedFish]->m_iDifficulty);
 
@@ -31777,14 +37254,14 @@ void CGame::ReqGetFishThisTimeHandler(int iClientH)
 
 void CGame::FishGenerator()
 {
- register int i, iP, tX, tY, iRet;
- char  cItemName[21];
- short sDifficulty;
- DWORD dwLastTime;
- class CItem * pItem;
+	class CItem * pItem;
+	register int i, iP, tX, tY, iRet;
+	int iItemID = 0 ; 
+	short sDifficulty;
+	DWORD dwLastTime;
 
 	for (i = 0; i < DEF_MAXMAPS; i++) {
-		if ((iDice(1,10) == 5) && (m_pMapList[i] != NULL) && 
+		if ((iDice(1,4) == 1) && (m_pMapList[i] != NULL) && 
 			(m_pMapList[i]->m_iCurFish < m_pMapList[i]->m_iMaxFish)) {
 	
 			iP = iDice(1, m_pMapList[i]->m_iTotalFishPoint) - 1;
@@ -31795,79 +37272,80 @@ void CGame::FishGenerator()
 
 			pItem = new class CItem;
 			if (pItem == NULL) break;
-						
+		
 			// 만들 물고기 종류와 난이도, 지속 시간을 결정한다.
-			ZeroMemory(cItemName, sizeof(cItemName));
+
 			switch (iDice(1,9)) {
-			case 1:	strcpy(cItemName, "적색잉어"); sDifficulty = iDice(1,10) + 20; break;
-			case 2:	strcpy(cItemName, "녹색잉어"); sDifficulty = iDice(1,5)  + 10; break;
-			case 3:	strcpy(cItemName, "금색잉어"); sDifficulty = iDice(1,10) + 1;  break;
-			case 4:	strcpy(cItemName, "붕어"); sDifficulty = 1;  break;	
-			case 5:	strcpy(cItemName, "청색돔"); sDifficulty = iDice(1,15) + 1;  break;
-			case 6:	strcpy(cItemName, "적색돔"); sDifficulty = iDice(1,18) + 1;  break;
-			case 7:	strcpy(cItemName, "연어"); sDifficulty = iDice(1,12) + 1;  break;
-			case 8:	strcpy(cItemName, "숭어"); sDifficulty = iDice(1,10) + 1;  break;
+			case 1:	iItemID = 570 ; sDifficulty = iDice(1,10) +  5; break;	// 적색잉어 
+			case 2:	iItemID = 571 ; sDifficulty = iDice(1,5) + 15;  break;	// 녹색잉어 
+			case 3:	iItemID = 572 ; sDifficulty = iDice(1,10) + 20; break;	// 금색 잉어 
+			case 4:	iItemID = 573 ; sDifficulty = 1;  break;				// 붕어
+			case 5:	iItemID = 574 ; sDifficulty = iDice(1,15) + 1;  break;  // 청색돔
+			case 6:	iItemID = 576 ; sDifficulty = iDice(1,18) + 1;  break;  // 적색돔
+			case 7:	iItemID = 575 ; sDifficulty = iDice(1,12) + 1;  break;	// 연어
+			case 8:	iItemID = 577 ; sDifficulty = iDice(1,10) + 1;  break;	// 숭어 
 			case 9:
 				// 가끔 가다 낚을 수 있는 특수 아이템 
 				switch (iDice(1,150)) {
 				case 1:
 				case 2:
 				case 3:
-					strcpy(cItemName, "강력녹색시약"); 
-					sDifficulty = iDice(5,4) + 30;
+					iItemID = 390;  // 강력녹색시약 
+					sDifficulty = iDice(4,4) + 20;
 					break;
 
 				case 10:
 				case 11:
-					strcpy(cItemName, "초강력녹색시약"); 
-					sDifficulty = iDice(5,4) + 50;
+					iItemID = 391;  // 초강력녹색시약 
+					sDifficulty = iDice(4,4) + 40;
 					break;
 
 				case 20:
-					strcpy(cItemName, "단검+2"); 
-					sDifficulty = iDice(5,4) + 30;
+					iItemID = 5;  // 단검+2 
+					sDifficulty = iDice(4,4) + 5;
 					break;
 
 				case 30:
-					strcpy(cItemName, "롱소드+2"); 
-					sDifficulty = iDice(5,4) + 40;
+					iItemID = 19;  // 롱-소드+2 
+					sDifficulty = iDice(4,4) + 10;
 					break;
 
 				case 40:
-					strcpy(cItemName, "시미타+2"); 
-					sDifficulty = iDice(5,4) + 50;
+					iItemID = 27;  // 시미타+2 
+					sDifficulty = iDice(4,4) + 15;
 					break;
 
 				case 50:
-					strcpy(cItemName, "레이피어+2"); 
-					sDifficulty = iDice(5,4) + 60;
+					iItemID = 36;  // 레이피어+2 
+					sDifficulty = iDice(4,4) + 35;
 					break;
 
 				case 60:
-					strcpy(cItemName, "플램버그+2"); 
-					sDifficulty = iDice(5,4) + 60;
+					iItemID = 56;  // 플램버그+2 
+					sDifficulty = iDice(4,4) + 40;
 					break;
 
 				case 70:
-					strcpy(cItemName, "워액스+2"); 
-					sDifficulty = iDice(5,4) + 50;
+					iItemID = 73;  // 워-액스+2 
+					sDifficulty = iDice(4,4) + 30;
 					break;
 
 				case 90:
-					strcpy(cItemName, "루비"); 
-					sDifficulty = iDice(5,4) + 40;
+					iItemID = 351;  // 루비 
+					sDifficulty = iDice(4,4) + 30;
 					break;
 
 				case 95:
-					strcpy(cItemName, "다이아몬드"); 
-					sDifficulty = iDice(5,4) + 40;
+					iItemID = 350;  // 다이아몬드
+					sDifficulty = iDice(4,4) + 30;
 					break;
 				}
 				break;
 			}
+
 			dwLastTime  = (60000 * 10) + (iDice(1,3) - 1)*(60000 * 10);
 		
-			if (_bInitItemAttr(pItem, cItemName) == TRUE) {
+			if (_bInitItemAttr(pItem, iItemID) == TRUE) {
    				iRet = iCreateFish(i, tX, tY, 1, pItem, sDifficulty, dwLastTime);
 			}
 			else {
@@ -31926,12 +37404,25 @@ void CGame::WhetherProcessor()
 			}
 			else {
 				// 조건에 따라 날씨를 작동시키던가 말던가 결정한다. 
-				if (iDice(1,150) == 50) {
+				// 2002-7-4 비올 확률을 낮춘다.
+				if (iDice(1,300) == 13) {
 					// 일단 간단한 조건으로 작동 시작 
-					m_pMapList[i]->m_cWhetherStatus = iDice(1,3); // 4~6 : Snow
+#if defined(DEF_WINTER)
+					m_pMapList[i]->m_cWhetherStatus = iDice(1,3) + 3; // 1~3 비 4~6 : Snow
+#else
+					m_pMapList[i]->m_cWhetherStatus = iDice(1,3); // 1~3 비 4~6 : Snow
+#endif
 					m_pMapList[i]->m_dwWhetherStartTime = dwTime;
 					m_pMapList[i]->m_dwWhetherLastTime  = 60000*3 + 60000*iDice(1,7);
 				}
+			}
+
+			// icebound 맵에서는 항상 눈이 내린다.
+			if (m_pMapList[i]->m_bIsFixedSnowMode == TRUE)
+			{
+				m_pMapList[i]->m_cWhetherStatus = iDice(1,3) + 3;
+				m_pMapList[i]->m_dwWhetherStartTime = dwTime;
+				m_pMapList[i]->m_dwWhetherLastTime  = 60000*3 + 60000*iDice(1,7);
 			}
 			
 			if (cPrevMode != m_pMapList[i]->m_cWhetherStatus) {
@@ -31941,10 +37432,6 @@ void CGame::WhetherProcessor()
 					SendNotifyMsg(NULL, j, DEF_NOTIFY_WHETHERCHANGE, m_pMapList[i]->m_cWhetherStatus, NULL, NULL, NULL);	
 			}
 		
-			if ((m_pMapList[i]->m_cWhetherStatus == 3) && (iDice(1, 50) == 1) && (strcmp(m_pMapList[i]->m_cName, "middleland") == 0)) {
-				// 비가 매우 많이 오는 경우 20초마다 50분의 1 확률로 미들랜드에 번개가 쳐서 깃발을 없애버린다.
-				_DeleteRandomOccupyFlag(i);
-			}
 		}
 	}
 }
@@ -31953,8 +37440,9 @@ void CGame::WhetherProcessor()
 void CGame::FightzoneReserveProcessor()
 {
  register int i;
-	
-	PutLogList("CAN FIGHTZONE RESERVE!!");
+
+// v2.02 로그 삭제 
+//	PutLogList("CAN FIGHTZONE RESERVE!!");
 			
 	// 예약된 사투장들을 초기화 시킨다.  10개의 사투장의 입장을 허락한다.
 	for (i=0 ; i < DEF_MAXFIGHTZONE ; i++ ) {
@@ -32021,22 +37509,21 @@ int CGame::iGetPlayerRelationship(int iClientH, int iOpponentH)
 
 	if (m_pClientList[iClientH]->m_iPKCount != 0) {
 		// 본인이 범죄자이하면 상대방이 마을이 같은 경우 위협. 다르면 적 
-		if ((memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iOpponentH]->m_cLocation, 10) == 0) &&
-			(memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) != 0) && (memcmp(m_pClientList[iOpponentH]->m_cLocation, "NONE", 4) != 0)) {
+		if ((m_pClientList[iClientH]->m_cSide == m_pClientList[iOpponentH]->m_cSide) &&
+			(m_pClientList[iClientH]->m_cSide != DEF_NETURAL) && (m_pClientList[iOpponentH]->m_cSide != DEF_NETURAL))
 			 iRet = 7; // 위협 
-		}
 		else iRet = 2; // 적   
 	}
 	else if (m_pClientList[iOpponentH]->m_iPKCount != 0) {
 		// 상대방이 범죄자이하면
-		if ((memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iOpponentH]->m_cLocation, 10) == 0) &&
-			(memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) != 0)) 
+		if ((m_pClientList[iClientH]->m_cSide == m_pClientList[iOpponentH]->m_cSide) &&
+				(m_pClientList[iClientH]->m_cSide != DEF_NETURAL) && (m_pClientList[iOpponentH]->m_cSide != DEF_NETURAL))
 			 iRet = 6; // 마을이 같으면 PK
 		else iRet = 2; // 다르면 그냥 적 
 	}
 	else {
 		if (m_pClientList[iClientH]->m_cSide != m_pClientList[iOpponentH]->m_cSide) {
-			if ((m_pClientList[iClientH]->m_cSide != 0) && (m_pClientList[iOpponentH]->m_cSide != 0)) {
+			if ((m_pClientList[iClientH]->m_cSide != DEF_NETURAL) && (m_pClientList[iOpponentH]->m_cSide != DEF_NETURAL)) {
 				// 둘 다 0(Traveler)이 아니면 적이다.
 				iRet = 2;
 			}
@@ -32054,7 +37541,7 @@ int CGame::iGetPlayerRelationship(int iClientH, int iOpponentH)
 				else iRet = 3;	// 같은 길드원
 			}
 			else 
-			if ((memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iOpponentH]->m_cLocation, 10) == 0) &&
+			if ((m_pClientList[iClientH]->m_cSide == m_pClientList[iOpponentH]->m_cSide) &&
 				(memcmp(m_pClientList[iClientH]->m_cGuildName, "NONE", 4) != 0) &&
 				(memcmp(m_pClientList[iOpponentH]->m_cGuildName, "NONE", 4) != 0) &&
 				(memcmp(m_pClientList[iClientH]->m_cGuildName, m_pClientList[iOpponentH]->m_cGuildName, 20) != 0)) {
@@ -32069,28 +37556,32 @@ int CGame::iGetPlayerRelationship(int iClientH, int iOpponentH)
 }
 
 
-int CGame::iGetPlayerABSStatus(int iWhatH, int iRecvH)
+// 2002-11-14
+/* int CGame::iGetPlayerABSStatus(int iWhatH, int iRecvH)
 {
 	// 절대적인 캐릭터의 소속을 얻는다. 
-	/*
-		0: 무소속 
 
-		1: 아레스덴 소속
-		2: 아레스덴 범죄자
-		3: 아레스덴 같은 길드원
-		4: 아레스덴 다른 길드원
-		5: 아레스덴 같은 길드마스터  
-		6: 아레스덴 다른 길드마스터
+//		0: 무소속 
 
-		8:  엘바인 소속
-		9:  엘바인 범죄자
-		10: 엘바인 같은 길드원
-		11: 엘바인 다른 길드원
-		12: 엘바인 같은 길드마스터  
-		13: 엘바인 다른 길드마스터
+//		1: 아레스덴 소속
+//		2: 아레스덴 범죄자
+//		3: 아레스덴 같은 길드원
+//		4: 아레스덴 다른 길드원
+//		5: 아레스덴 같은 길드마스터  
+//		6: 아레스덴 다른 길드마스터
 
-		15: 무소속 범죄자 
-	*/
+//		8:  엘바인 소속
+//		9:  엘바인 범죄자
+//		10: 엘바인 같은 길드원
+//		11: 엘바인 다른 길드원
+//		12: 엘바인 같은 길드마스터  
+//		13: 엘바인 다른 길드마스터
+
+//		15: 무소속 범죄자 
+
+
+
+	
 
 	if (m_pClientList[iWhatH] == NULL) return 0;
 	if (m_pClientList[iRecvH] == NULL) return 0;
@@ -32187,24 +37678,123 @@ int CGame::iGetPlayerABSStatus(int iWhatH, int iRecvH)
 	}
 
 	return 0;
+
+
+}
+*/
+// v2.19 2002-12-2  사투장에서는 다른 길드는 적으로 판단해야 한다.
+int CGame::iGetPlayerABSStatus(int iWhatH, int iRecvH)
+{
+	// 2002-11-14 사냥꾼 모드 추가
+	// 2002-11-14 변형됨
+	// 4개의 bit에 따라 의미를 부여한다.
+	//
+	// |1|2|3|4|
+	//
+	// 1 : 범죄자 유(1) / 무(0)
+	// 2 : 시민(1) / 중립(0)
+	// 3 : 아레스덴(1) / 엘바인(0)
+	// 4 : 사냥꾼(1) / 일반(0)
+
+	if (m_pClientList[iWhatH] == NULL) return 0;
+	if (m_pClientList[iRecvH] == NULL) return 0;
+
+	int	rtn=0x0000;
+
+	// v2.19 2002-12-2  사투장에서는 다른 길드는 적으로 판단해야 한다.
+	if (m_pMapList[m_pClientList[iRecvH]->m_cMapIndex]->m_bIsFightZone == TRUE) {
+		if ((m_pClientList[iWhatH]->m_iGuildRank != -1)&& (m_pClientList[iRecvH]->m_iGuildRank != -1)) 
+		{
+			if (memcmp(m_pClientList[iWhatH]->m_cGuildName, m_pClientList[iRecvH]->m_cGuildName, 20) != 0) 
+			{ 
+				rtn  = 0x0001 << 3;
+			}
+		}
+	} 
+		
+	if ( m_pClientList[iWhatH]->m_iPKCount != 0 )
+		rtn  = 0x0001 << 3;
+
+
+	// 시민 / 중립
+	if( m_pClientList[iWhatH]->m_cSide != DEF_NETURAL )
+		rtn |= 0x0001 << 2;
+
+	// 마을
+	if( m_pClientList[iWhatH]->m_cSide == DEF_ARESDEN  )
+		rtn |= 0x0001 << 1;
+
+	// 사냥꾼 / 일반
+	if ( m_pClientList[iWhatH]->m_bIsHunter == TRUE )
+		rtn |= 0x0001;
+
+	return rtn;
+}
+/*
+
+int CGame::iGetPlayerABSStatus(int iWhatH)
+{
+	// 2002-11-14 사냥꾼 모드 추가
+	// 2002-11-14 변형됨
+	// 4개의 bit에 따라 의미를 부여한다.
+	//
+	// |1|2|3|4|
+	//
+	// 1 : 범죄자 유(1) / 무(0)
+	// 2 : 시민(1) / 중립(0)
+	// 3 : 아레스덴(1) / 엘바인(0)
+	// 4 : 사냥꾼(1) / 일반(0)
+
+	if (m_pClientList[iWhatH] == NULL) return 0;
+
+	int	rtn=0x0000;
+
+	// 범죄자
+	if ( m_pClientList[iWhatH]->m_iPKCount != 0 )
+		rtn  = 0x0001 << 3;
+
+	// 시민 / 중립
+	if( m_pClientList[iWhatH]->m_cSide != DEF_NETURAL )
+		rtn |= 0x0001 << 2;
+
+	// 마을
+	if( m_pClientList[iWhatH]->m_cSide == DEF_ARESDEN  )
+		rtn |= 0x0001 << 1;
+
+	// 사냥꾼 / 일반
+	if ( m_pClientList[iWhatH]->m_bIsHunter == TRUE )
+		rtn |= 0x0001;
+
+	return rtn;
 }
 
-
+*/
 int CGame::iGetNpcRelationship(int iWhatH, int iRecvH)
 {
- int iRet;
-
 	if (m_pClientList[iRecvH] == NULL) return 0;
 	if (m_pNpcList[iWhatH] == NULL) return 0;
 
+	int rtn = 0x0000;
+
 	switch (m_pNpcList[iWhatH]->m_cSide) {
-	case 0:  return 0;
-	case 10: return 15;
-	case 1:  return 1;
-	case 2:  return 8;
+	case 0:	// 중립
+		break;
+
+	case 10: // 모두를 공격하는 NPC
+		rtn |= 0x0001 << 3;
+		break;
+
+	case 1:	// aresden 소속 (경비병, 상점들의 주인들)
+		rtn |= 0x0001 << 2;
+		rtn |= 0x0001 << 1;
+		break;
+
+	case 2:	// elvine 소속 (경비병, 상점들의 주인들)
+		rtn |= 0x0001 << 2;
+		break;
 	}
 
-	return 0;
+	return rtn;
 }
 
 
@@ -32243,6 +37833,7 @@ int CGame::iGetNpcRelationship(int iClientH, int iOpponentH)
 }
 */
 
+// 2002-11-15 재작성
 int CGame::iGetPlayerRelationship_SendEvent(int iClientH, int iOpponentH)
 {
  int iRet;
@@ -32259,15 +37850,15 @@ int CGame::iGetPlayerRelationship_SendEvent(int iClientH, int iOpponentH)
 
 	if (m_pClientList[iClientH]->m_iPKCount != 0) {
 		// 내가 범죄자이하면 상대방에게는 마을이 다를 경우 적, 아니면 PK로 인식된다.
-		if ((memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iOpponentH]->m_cLocation, 10) != 0) &&
-			(memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) != 0) && (memcmp(m_pClientList[iOpponentH]->m_cLocation, "NONE", 4) != 0)) 
+		if ((m_pClientList[iClientH]->m_cSide != m_pClientList[iOpponentH]->m_cSide) &&
+			(m_pClientList[iClientH]->m_cSide != DEF_NETURAL) && (m_pClientList[iOpponentH]->m_cSide != DEF_NETURAL))
 			 iRet = 2; // 적 
 		else iRet = 6; // PK 
 	}
 	else if (m_pClientList[iOpponentH]->m_iPKCount != 0) {
 		// 내가 무고하고 상대방이 범죄자이하면 상대방에게 마을이 다를 경우 적, 아니면 위협으로 인식된다.
-		if ((memcmp(m_pClientList[iClientH]->m_cLocation, m_pClientList[iOpponentH]->m_cLocation, 10) != 0) &&
-			(memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) != 0) && (memcmp(m_pClientList[iOpponentH]->m_cLocation, "NONE", 4) != 0)) 
+		if ((m_pClientList[iClientH]->m_cSide != m_pClientList[iOpponentH]->m_cSide) &&
+			(m_pClientList[iClientH]->m_cSide != DEF_NETURAL) && (m_pClientList[iOpponentH]->m_cSide != DEF_NETURAL)) 
 			 iRet = 2; // 적
 		else {
 			iRet = 7; // 위협
@@ -32277,7 +37868,9 @@ int CGame::iGetPlayerRelationship_SendEvent(int iClientH, int iOpponentH)
 		// 상대방도 나도 범죄자가 아니다. 
 		if (m_pClientList[iClientH]->m_cSide != m_pClientList[iOpponentH]->m_cSide) {
 			// 나의 편과 상대방의 편이 다르다. 
-			if ((m_pClientList[iClientH]->m_cSide != 0) && (m_pClientList[iOpponentH]->m_cSide != 0)) {
+			if ((m_pClientList[iClientH]->m_cSide != DEF_NETURAL) && (m_pClientList[iOpponentH]->m_cSide != DEF_NETURAL)
+				&& ((m_pClientList[iClientH]->m_bIsHunter != TRUE)) 
+				) {
 				// 나도 중립이 아니고 상대방도 중립이 아니라면 0(Traveler)이 아니면 적으로 인식된다.
 				iRet = 2;
 			}
@@ -32289,7 +37882,7 @@ int CGame::iGetPlayerRelationship_SendEvent(int iClientH, int iOpponentH)
 		else {
 			// 같은편. 둘다 중립이거나 같은 마을 소속. 길드원여부를 판단.
 			if ((m_pClientList[iClientH]->m_cSide == m_pClientList[iOpponentH]->m_cSide) && 
-				(m_pClientList[iClientH]->m_cSide == 0)) {
+				(m_pClientList[iClientH]->m_cSide == DEF_NETURAL)) {
 				iRet = 0; // 둘다 중립이므로 중립.
 			}
 			else			
@@ -32401,11 +37994,12 @@ void CGame::SpecialEventHandler()
 	// 특별한 이벤트를 생성한다. 
 	dwTime = timeGetTime();
 
-	if ((dwTime - m_dwSpecialEventTime) < DEF_SPECIALEVENTTIME) return;
+	// v2.17 몹 이벤트 시간이 5분으로 단축 되었으므로 데몬나올 학률도 감소 시킴 
+	if ((dwTime - m_dwSpecialEventTime) < DEF_MOBEVENTTIME) return;
 	m_dwSpecialEventTime  = dwTime;
 	m_bIsSpecialEventTime = TRUE;
 	
-	switch (iDice(1,180)) {
+	switch (iDice(1,350)) {
 	case 98: m_cSpecialEventType = 2; break; // 데몬 혹은 유니콘이 나올 가능성은 30분에 1번 1/30
 	default: m_cSpecialEventType = 1; break;
 	}
@@ -32505,6 +38099,9 @@ void CGame::ForceDisconnectAccount(char *pAccountName, WORD wCount)
 {
  register int i;
 
+	// v2.15 가끔 강제 접속 카운트가 30000 이상 되는 경우 막기위해 의심 루틴 체크 추가 
+	if (wCount > 10 ) wCount = 10 ;
+
 	// 중복된 계정을 갖고있는 캐릭터를 삭제한다. 
 	for (i = 1; i < DEF_MAXCLIENTS; i++)
 	if ((m_pClientList[i] != NULL) && (memcmp(m_pClientList[i]->m_cAccountName, pAccountName, 10) == 0)) {
@@ -32559,7 +38156,8 @@ void CGame::AdminOrder_SetInvi(int iClientH, char *pData, DWORD dwMsgSize)
 	if (m_pClientList[iClientH] == NULL) return;
 	if ((dwMsgSize)	<= 0) return;
 
-	if (m_pClientList[iClientH]->m_iAdminUserLevel < 2) {
+	// v2.13 운영자 레벨 조절
+	if (m_pClientList[iClientH]->m_iAdminUserLevel < 1) {
 		// Admin user level이 낮아서 이 기능을 사용할 수 없다.
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ADMINUSERLEVELLOW, NULL, NULL, NULL, NULL);
 		return;
@@ -32644,6 +38242,17 @@ void CGame::_CheckAttackType(int iClientH, short *spType)
 		if (m_pClientList[iClientH]->m_cArrowIndex == -1)      *spType = 0;
 		// 활 공격인데 장착한 무기가 활이 아니다. 일반 공격으로 전환.
 		if (wType < 40) *spType = 1;
+		break;
+	case 26: 
+		// v2.16 2002-5-27 해머 필살기 
+		if (m_pClientList[iClientH]->m_iSuperAttackLeft <= 0)  *spType = 1;
+		if (m_pClientList[iClientH]->m_cSkillMastery[14] < 100) *spType = 1;
+		break;
+
+	case 27: 
+		// v2.16 2002-5-27 지팡이 필살기 
+		if (m_pClientList[iClientH]->m_iSuperAttackLeft <= 0)  *spType = 1;
+		if (m_pClientList[iClientH]->m_cSkillMastery[21] < 100) *spType = 1;
 		break;
 	}
 }
@@ -32822,12 +38431,30 @@ RCPH_LOOPBREAK:;
 	iSkillLevel -= iDifficulty;
 	if (iSkillLevel <= 0) iSkillLevel = 1;
 
+#if defined(DEF_TESTSERVER)
+	iSkillLevel = 100;
+#else
+	// 2002-09-11 #1 연금 스킬 100일때 확률 5% 증가
+	if( m_pClientList[iClientH]->m_cSkillMastery[12] == 100 )
+		iSkillLevel += 5;
+#endif
+
 	iResult = iDice(1,100);
 	if (iResult > iSkillLevel) {
 		// 스킬 실패 
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PORTIONFAIL, NULL, NULL, NULL, cPortionName);
 		return;
 	}
+
+	// v2.17 2002-7-21 연금술에 레벨 제한 추가 
+	/*
+	if ((m_pClientList[iClientH]->m_iLevel < 20) && (iSkillLevel > 80 )) {
+		// 스킬 실패 
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PORTIONFAIL, NULL, NULL, NULL, cPortionName);
+		return;
+	}
+	*/
+
 
 	// 모든 조건이 만족되어 포션을 만들 수 있다. 스킬카운트도 증가 
 	CalculateSSN_SkillIndex(iClientH, 12, 1);
@@ -32850,7 +38477,7 @@ RCPH_LOOPBREAK:;
 
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PORTIONSUCCESS, NULL, NULL, NULL, cPortionName);
 		// v1.41 소량의 경험치 증가 
-		m_pClientList[iClientH]->m_iExpStock += iDice(1, (iDifficulty/3));
+		GetExp(iClientH, iDice(2, (iDifficulty/3))); //m_pClientList[iClientH]->m_iExpStock += iDice(1, (iDifficulty/3));
 
 		if ((_bInitItemAttr(pItem, cPortionName) == TRUE)) {
 			// 포션 아이템이 만들어졌다. 플레이어의 아이템 리스트에 등록한다. 만약 공간이 없거나 
@@ -33001,7 +38628,7 @@ BOOL CGame::_bDecodePortionConfigFileContents(char *pData, DWORD dwMsgSize)
 				case 1:
 					// 포션 번호 
 					if (_bGetIsStringIsNumber(token) == FALSE) {
-						PutLogList("(!!!) CRITICAL ERROR! PORTION configuration file error - Wrong Data format(1).");
+						PutLogList("(!!!) CRITICAL ERROR! POTION configuration file error - Wrong Data format(1).");
 						delete pContents;
 						delete pStrTok;
 						return FALSE;
@@ -33009,7 +38636,7 @@ BOOL CGame::_bDecodePortionConfigFileContents(char *pData, DWORD dwMsgSize)
 					
 					if (m_pPortionConfigList[atoi(token)] != NULL) {
 						// 이미 할당된 번호가 있다. 에러이다.
-						PutLogList("(!!!) CRITICAL ERROR! PORTION configuration file error - Duplicate portion number.");
+						PutLogList("(!!!) CRITICAL ERROR! POTION configuration file error - Duplicate portion number.");
 						delete pContents;
 						delete pStrTok;
 						return FALSE;
@@ -33083,7 +38710,7 @@ BOOL CGame::_bDecodePortionConfigFileContents(char *pData, DWORD dwMsgSize)
 			}
 		}
 		else {
-			if (memcmp(token, "portion", 5) == 0) {
+			if (memcmp(token, "potion", 5) == 0) {
 				cReadModeA = 1;
 				cReadModeB = 1;
 			}
@@ -33096,11 +38723,11 @@ BOOL CGame::_bDecodePortionConfigFileContents(char *pData, DWORD dwMsgSize)
 	delete pContents;
 
 	if ((cReadModeA != 0) || (cReadModeB != 0)) {
-		PutLogList("(!!!) CRITICAL ERROR! PORTION configuration file contents error!");
+		PutLogList("(!!!) CRITICAL ERROR! POTION configuration file contents error!");
 		return FALSE;
 	}
 
-	wsprintf(cTxt, "(!) PORTION(Total:%d) configuration - success!", iPortionConfigListIndex);
+	wsprintf(cTxt, "(!) POTION(Total:%d) configuration - success!", iPortionConfigListIndex);
 	PutLogList(cTxt);
 
 	return TRUE;
@@ -33171,7 +38798,8 @@ void CGame::MineralGenerator()
  register int i, iP, tX, tY, iRet;
  
 	for (i = 0; i < DEF_MAXMAPS; i++) {
-		if ((iDice(1,4) == 1) && (m_pMapList[i] != NULL) && 
+		// v2.12 2002-2-6 미네럴 생성 루틴 변경 ..
+		if ((iDice(1,6) == 1) && (m_pMapList[i] != NULL) && 
 			(m_pMapList[i]->m_bMineralGenerator == TRUE) && 
 			(m_pMapList[i]->m_iCurMineral < m_pMapList[i]->m_iMaxMineral)) {
 	
@@ -33254,11 +38882,20 @@ void CGame::_CheckMiningAction(int iClientH, int dX, int dY)
  short sType;
  DWORD dwRegisterTime;
  int   iDynamicIndex, iSkillLevel, iResult;
- char  cMineralName[21];
+ int   iMineralID ; 
  class CItem * pItem;
  WORD  wWeaponType;
 	
 	if (m_pClientList[iClientH] == NULL)  return;
+
+	// v2.17 2002-6-29 광물 캘때 투명 모드였다면 마법 Casting시에 해제된다.
+	if ( (m_pClientList[iClientH]->m_sStatus & 0x10) != 0 )	{
+		SetInvisibilityFlag(iClientH, DEF_OWNERTYPE_PLAYER, FALSE);
+		
+		bRemoveFromDelayEventList(iClientH, DEF_OWNERTYPE_PLAYER, DEF_MAGICTYPE_INVISIBILITY);
+		m_pClientList[ iClientH ]->m_cMagicEffectStatus[ DEF_MAGICTYPE_INVISIBILITY ] = NULL;
+	}
+
 
 	m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->bGetDynamicObject(dX, dY, &sType, &dwRegisterTime, &iDynamicIndex);
 	
@@ -33290,19 +38927,18 @@ void CGame::_CheckMiningAction(int iClientH, int dX, int dY)
 			CalculateSSN_SkillIndex(iClientH, 0, 1);
 						
 			// 플레이어의 발 밑에 광물을 떨어뜨린다.
-			ZeroMemory(cMineralName, sizeof(cMineralName));
 			switch (m_pMineral[m_pDynamicObjectList[iDynamicIndex]->m_iV1]->m_cType) {
 			case 1: 
 				switch (iDice(1,4)) {
 				case 1: 
 				case 2: 
 				case 3:	
-					strcpy(cMineralName, "석탄"); 
-					m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
+					iMineralID = 355 ;  // 석탄 
+					GetExp(iClientH, iDice(2, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
 					break;
 				case 4:	
-					strcpy(cMineralName, "철광석"); 
-					m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
+					iMineralID = 357 ;  // 철광석
+					GetExp(iClientH, iDice(2, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
 					break;
 				}
 				break;
@@ -33310,43 +38946,43 @@ void CGame::_CheckMiningAction(int iClientH, int dX, int dY)
 				switch (iDice(1,4)) {
 				case 1: 
 				case 2: 
-					strcpy(cMineralName, "석탄"); 
-					m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
+					iMineralID = 355 ;  // 석탄 
+					GetExp(iClientH, iDice(2, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
 					break;
 				case 3:	
 				case 4:	
-					strcpy(cMineralName, "철광석"); 
-					m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
+					iMineralID = 357 ;  // 철광석
+					GetExp(iClientH, iDice(2, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
 					break;
 				}
 				break;
 			case 3:
 				switch (iDice(1,6)) {
 				case 1: 
-					strcpy(cMineralName, "석탄"); 
-					m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
+					iMineralID = 355 ;  // 석탄 
+					GetExp(iClientH, iDice(2, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
 					break;
 				case 2: 
 				case 3:	
 				case 4:	
 				case 5:
-					strcpy(cMineralName, "철광석"); 
-					m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
+					iMineralID = 357 ;  // 철광석
+					GetExp(iClientH, iDice(2, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
 					break;
 				case 6:
 					if (iDice(1,8) == 3) {
 						if (iDice(1,2) == 1) {
-							 strcpy(cMineralName, "은덩이"); 
-							 m_pClientList[iClientH]->m_iExpStock += iDice(1,4);
+							 iMineralID = 356 ;  // 은덩이
+							 GetExp(iClientH, iDice(2, 4)); //m_pClientList[iClientH]->m_iExpStock += iDice(1,4);
 						}
 						else {
-							strcpy(cMineralName, "철광석"); 
-							m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
+							iMineralID = 357 ;  // 철광석
+							GetExp(iClientH, iDice(2, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
 						}
 					}
 					else {
-						strcpy(cMineralName, "철광석"); 
-						m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
+						iMineralID = 357 ;  // 철광석
+						GetExp(iClientH, iDice(2, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
 					}
 					break;
 				}
@@ -33354,36 +38990,36 @@ void CGame::_CheckMiningAction(int iClientH, int dX, int dY)
 			case 4: 
 				switch (iDice(1,6)) {
 				case 1: 
-					strcpy(cMineralName, "석탄"); 
-					m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
+					iMineralID = 355 ;  // 석탄 
+					GetExp(iClientH, iDice(2, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
 					break;
 				case 2: 
 				case 3:	
 				case 4:	
 				case 5:
-					strcpy(cMineralName, "철광석"); 
-					m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
+					iMineralID = 357 ;  // 철광석
+					GetExp(iClientH, iDice(2, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
 					break;
 				case 6:
 					if (iDice(1,8) == 3) {
 						if (iDice(1,4) == 3) {
 							if (iDice(1,4) == 3) {
-								strcpy(cMineralName, "미스릴"); 
-								m_pClientList[iClientH]->m_iExpStock += iDice(1,15);
+								iMineralID = 508 ;  // 미스릴
+								GetExp(iClientH, iDice(2, 15)); //m_pClientList[iClientH]->m_iExpStock += iDice(1,15);
 							}
 							else {
-								strcpy(cMineralName, "금덩이"); 
-								m_pClientList[iClientH]->m_iExpStock += iDice(1,5);
+								iMineralID =  356;  // 금덩이
+								GetExp(iClientH, iDice(2, 5)); //m_pClientList[iClientH]->m_iExpStock += iDice(1,5);
 							}
 						}
 						else {
-							strcpy(cMineralName, "은덩이"); 
-							m_pClientList[iClientH]->m_iExpStock += iDice(1,4);
+							iMineralID = 356 ;  // 은덩이
+							GetExp(iClientH, iDice(2, 4)); //m_pClientList[iClientH]->m_iExpStock += iDice(1,4);
 						}
 					}
 					else {
-						strcpy(cMineralName, "철광석"); 
-						m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
+						iMineralID = 357 ;  // 철광석
+						GetExp(iClientH, iDice(2, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(1,3);
 					}
 					break;
 				}
@@ -33391,12 +39027,12 @@ void CGame::_CheckMiningAction(int iClientH, int dX, int dY)
 			case 5: 
 				switch (iDice(1,18)) {
 				case 3:
-					strcpy(cMineralName, "싸파이어"); 
-					m_pClientList[iClientH]->m_iExpStock += iDice(2,3);
+					iMineralID =  352;  // 싸파이어
+					GetExp(iClientH, iDice(3, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(2,3);
 					break;
 				default:
-					strcpy(cMineralName, "수정"); 
-					m_pClientList[iClientH]->m_iExpStock += iDice(2,3);
+					iMineralID =  358;  // 수정
+					GetExp(iClientH, iDice(3, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(2,3);
 					break;
 				}
 				break;
@@ -33404,53 +39040,53 @@ void CGame::_CheckMiningAction(int iClientH, int dX, int dY)
 				switch (iDice(1,5)) {
 				case 1: 
 					if (iDice(1,6) == 3) {
-						strcpy(cMineralName, "에머랄드"); 
-						m_pClientList[iClientH]->m_iExpStock += iDice(2,4);
+						iMineralID =  353;  // 에머랄드
+						GetExp(iClientH, iDice(3, 4)); //m_pClientList[iClientH]->m_iExpStock += iDice(2,4);
 					}
 					else {
-						strcpy(cMineralName, "수정"); 
-						m_pClientList[iClientH]->m_iExpStock += iDice(2,3);
+						iMineralID =  358;  // 수정
+						GetExp(iClientH, iDice(3, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(2,3);
 					}
 					break;
 				case 2: 
 					if (iDice(1,6) == 3) {
-						strcpy(cMineralName, "싸파이어"); 
-						m_pClientList[iClientH]->m_iExpStock += iDice(2,4);
+						iMineralID =  352;  // 싸파이어
+						GetExp(iClientH, iDice(3, 4)); //m_pClientList[iClientH]->m_iExpStock += iDice(2,4);
 					}
 					else {
-						strcpy(cMineralName, "수정"); 
-						m_pClientList[iClientH]->m_iExpStock += iDice(2,3);
+						iMineralID =  358;  // 수정
+						GetExp(iClientH, iDice(3, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(2,3);
 					}
 					break;
 				case 3: 
 					if (iDice(1,6) == 3) {
-						strcpy(cMineralName, "루비"); 
-						m_pClientList[iClientH]->m_iExpStock += iDice(2,4);
+						iMineralID =  351;  // 루비
+						GetExp(iClientH, iDice(3, 4)); //m_pClientList[iClientH]->m_iExpStock += iDice(2,4);
 					}
 					else {
-						strcpy(cMineralName, "수정"); 
-						m_pClientList[iClientH]->m_iExpStock += iDice(2,3);
+						iMineralID =  358;  // 수정
+						GetExp(iClientH, iDice(3, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(2,3);
 					}
 					break;
 				case 4: 
-					strcpy(cMineralName, "수정"); 
-					m_pClientList[iClientH]->m_iExpStock += iDice(2,3);
+					iMineralID =  358;  // 수정
+					GetExp(iClientH, iDice(3, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(2,3);
 					break;
 				case 5: 
 					if (iDice(1,12) == 3) {
-						strcpy(cMineralName, "다이아몬드"); 
-						m_pClientList[iClientH]->m_iExpStock += iDice(2,5);
+						iMineralID =  350;  // 다이아몬드
+						GetExp(iClientH, iDice(3, 5)); //m_pClientList[iClientH]->m_iExpStock += iDice(2,5);
 					}
 					else {
-						strcpy(cMineralName, "수정"); 
-						m_pClientList[iClientH]->m_iExpStock += iDice(2,3);
+						iMineralID =  358;  // 수정
+						GetExp(iClientH, iDice(3, 3)); //m_pClientList[iClientH]->m_iExpStock += iDice(2,3);
 					}
 				}
 				break;
 			}
 			
 			pItem = new class CItem;
-			if (_bInitItemAttr(pItem, cMineralName) == FALSE) {
+			if (_bInitItemAttr(pItem, iMineralID) == FALSE) {
 				delete pItem;
 			}
 			else {
@@ -33538,6 +39174,10 @@ void CGame::NpcTalkHandler(int iClientH, int iWho)
 		break;
 
 	case 32: // 유니콘
+		break;
+	case 67:
+	case 68:
+	case 69: // 도우미 NPC
 		break;
 
 	case 21: // 경비 
@@ -33689,9 +39329,17 @@ int CGame::_iGetWeaponSkillType(int iClientH)
 			 return 9; // 펜싱검
 		else return 8; // 장검 
 	}
-	else if ((wWeaponType >= 20) && (wWeaponType < 40)) {
+	else if ((wWeaponType >= 20) && (wWeaponType < 30)) {
 		// 도끼류 
 		return 10;
+	}
+	else if ((wWeaponType >= 30) && (wWeaponType < 35)) {
+		// v2.16 2002-5-27 해머 
+		return 14; // 해머 
+	}
+	else if ((wWeaponType >= 35) && (wWeaponType < 40)) {
+		// v2.16 2002-5-27 지팡이류 추가 
+		return 21;
 	}
 	else if (wWeaponType >= 40) {
 		// 활류  
@@ -33705,10 +39353,10 @@ int CGame::_iGetWeaponSkillType(int iClientH)
 // 콤보 공격 보너스 테이블
 //                             1 2 3 
 static int ___iCAB5[]  = {0,0, 0,1,2};
-static int ___iCAB6[]  = {0,0, 0,1,2};
+static int ___iCAB6[]  = {0,0, 0,0,0};
 static int ___iCAB7[]  = {0,0, 1,2,3};
-static int ___iCAB8[]  = {0,0, 0,1,2};
-static int ___iCAB9[]  = {0,0, 2,4,6};
+static int ___iCAB8[]  = {0,0, 1,3,5};
+static int ___iCAB9[]  = {0,0, 2,4,8};
 static int ___iCAB10[] = {0,0, 1,2,3};
 
 int CGame::iGetComboAttackBonus(int iSkill, int iComboCount)
@@ -33731,13 +39379,20 @@ int CGame::iGetComboAttackBonus(int iSkill, int iComboCount)
 	case 9: // 펜싱 공격 
 		return ___iCAB9[iComboCount];
 		break;
-	case 10: // 도끼공격 
+	case 10: // 도끼 공격 
+		return ___iCAB10[iComboCount];
+		break;
+	case 14: // v2.16 해머 공격 
+		return ___iCAB6[iComboCount];
+		break;
+	case 21: // v2.16 지팡이 공격 
 		return ___iCAB10[iComboCount];
 		break;
 	}
 
 	return 0;
 }
+
 
 void CGame::SetDownSkillIndexHandler(int iClientH, int iSkillIndex)
 {
@@ -33818,6 +39473,20 @@ BOOL CGame::_bDepleteDestTypeItemUseEffect(int iClientH, int dX, int dY, short s
 			}
 		}	
 		break;
+	case DEF_ITEMEFFECTTYPE_ITEMFARM:	//v2.19 2002-12-16 농사 스킬 관련
+		bRet = __bSetAgricultureItem(m_pClientList[iClientH]->m_cMapIndex, dX, dY,                                 // 
+			                         m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectValue1,		//
+									 m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_sItemEffectValue2,		//
+				 				     iClientH); // 설치자 
+		if (bRet == TRUE) {
+			// 농작물 씨뿌리기 시작 
+		}
+		else {
+			// 농작물 씨뿌리기 실패			
+		}
+		return bRet;
+		break;
+
 
 	default:
 		break;
@@ -34229,6 +39898,8 @@ void CGame::SetSummonMobAction(int iClientH, int iMode, DWORD dwMsgSize, char *p
  class  CStrTok * pStrTok;
 
 	if (m_pClientList[iClientH] == NULL) return;
+	// v2.1 중립은 몹공격 명령을 할 수 없다.
+	if (m_pClientList[iClientH]->m_cSide == 0) return;
 
 	switch (iMode) {
 	case 0: // Free 모드
@@ -34264,12 +39935,19 @@ void CGame::SetSummonMobAction(int iClientH, int iMode, DWORD dwMsgSize, char *p
 			if (strlen(token) > 10) 
 				 memcpy(cTargetName, token, 10);
 			else memcpy(cTargetName, token, strlen(token));
-	 				
+
+			// 2002.8.17 장진호 수정
 			for (i = 1; i < DEF_MAXCLIENTS; i++) 
-			if ((m_pClientList[i] != NULL) && (memcmp(m_pClientList[i]->m_cCharName, cTargetName, 10) == 0)) {
-				// 목표 캐릭터를 찾았다. 인덱스 저장 
-				iTargetIndex = i;
-				goto SSMA_SKIPSEARCH;
+			{
+				// if ((m_pClientList[i] != NULL) && (memcmp(m_pClientList[i]->m_cCharName, cTargetName, 10) == 0)) { // original
+				if ((m_pClientList[i] != NULL) &&
+					(memcmp(m_pClientList[i]->m_cCharName, cTargetName, 10) == 0) &&
+					(strcmp(m_pClientList[iClientH]->m_cMapName, m_pClientList[i]->m_cMapName) == 0 ) ) // adamas(map이 같아야 한다.)
+				{
+					// 목표 캐릭터를 찾았다. 인덱스 저장 
+					iTargetIndex = i;
+					goto SSMA_SKIPSEARCH;
+				}
 			}
 		}
 
@@ -34411,7 +40089,7 @@ void CGame::GetOccupyFlagHandler(int iClientH)
 				*cp = (char)(pItem->m_dwAttribute & 0x00000001); // Custom-Item인지의 여부 
 				cp++;
 				*/
-											
+
 				if (iEraseReq == 1) delete pItem;
 				
 				// 아이템 정보 전송 
@@ -34466,7 +40144,7 @@ void CGame::GetOccupyFlagHandler(int iClientH)
 // v1.4311-3 추가  함수 입장권을 주는 함수   GetFightzoneTicketHandler 
 void CGame::GetFightzoneTicketHandler(int iClientH)
 {
- int   i, iNum, iRet, iEraseReq, iMonth, iDay, iHour;
+ int   iRet, iEraseReq, iMonth, iDay, iHour;
  char  * cp, cData[256], cItemName[21];
  class CItem * pItem;
  DWORD * dwp;
@@ -34485,9 +40163,10 @@ void CGame::GetFightzoneTicketHandler(int iClientH)
 
 	ZeroMemory(cItemName, sizeof(cItemName));
 
+
 	if (m_pClientList[iClientH]->m_iFightzoneNumber == 1) 
-		strcpy(cItemName,"전투장입장권") ;
-	else  wsprintf(cItemName,"전투장입장권(%d)",m_pClientList[iClientH]->m_iFightzoneNumber ) ;
+		strcpy(cItemName,DEF_ITEMNAME_ARENATICKET) ;
+	else  wsprintf(cItemName,DEF_ITEMNAME_ARENATICKET2,m_pClientList[iClientH]->m_iFightzoneNumber ) ;
 
 	pItem = new class CItem;
 	if (_bInitItemAttr(pItem, cItemName) == FALSE) {
@@ -34512,10 +40191,7 @@ void CGame::GetFightzoneTicketHandler(int iClientH)
 		pItem->m_sTouchEffectValue2 = iDay ;
 		pItem->m_sTouchEffectValue3 = iHour ;
 		
-		
-		wsprintf(G_cTxt, "(*) Get FIGHTZONETICKET : Char(%s) TICKENUMBER (%d)(%d)(%d)", m_pClientList[iClientH]->m_cCharName, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3	);		
-		PutLogFileList(G_cTxt);
-		PutLogList(G_cTxt);
+		_bItemLog(DEF_ITEMLOG_GET, iClientH, (int) -1, pItem);
 
 		ZeroMemory(cData, sizeof(cData));
 
@@ -34579,7 +40255,12 @@ void CGame::GetFightzoneTicketHandler(int iClientH)
 		*dwp = pItem->m_dwAttribute;
 		cp += 4;
 													
-		if (iEraseReq == 1) delete pItem;
+		if (iEraseReq == 1) 
+		{
+			delete pItem;
+			pItem = NULL ;
+		}
+
 				
 		// 아이템 정보 전송 
 		iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, 53);
@@ -34600,6 +40281,7 @@ void CGame::GetFightzoneTicketHandler(int iClientH)
 	else {
 		// 공간이 부족해 아이템을 얻을 수 없다.
 		delete pItem;
+		pItem = NULL ;
 
 		// 소지품 총 중량 재 계산 
 		iCalcTotalWeight(iClientH);
@@ -34774,8 +40456,8 @@ BOOL CGame::_bDecodeOccupyFlagSaveFileContents(char * pData, DWORD dwMsgSize)
 
 void CGame::GetHeroMantleHandler(int iClientH)
 {
- int   i, iNum, iRet, iEraseReq;
- char  * cp, cData[256], cItemName[21];
+ int   i, iNum, iRet, iEraseReq, iItemID;
+ char  * cp, cData[256] ;
  class CItem * pItem;
  DWORD * dwp;
  short * sp;
@@ -34783,12 +40465,11 @@ void CGame::GetHeroMantleHandler(int iClientH)
 
 	if (m_pClientList[iClientH] == NULL) return;
 	if (m_pClientList[iClientH]->m_iEnemyKillCount < 300) return;
-	if (m_pClientList[iClientH]->m_cSide == 0) return;
+	if (m_pClientList[iClientH]->m_cSide == DEF_NETURAL) return;
 
-	ZeroMemory(cItemName, sizeof(cItemName));
 	switch (m_pClientList[iClientH]->m_cSide) {
-	case 1: strcpy(cItemName, "아레스덴-영웅의-망토"); break;
-	case 2: strcpy(cItemName, "엘바인-영웅의-망토");   break;
+	case 1: iItemID = 400; break; // 아레스덴 영웅 망토 
+	case 2: iItemID = 401; break; // 엘바인 영웅 망토 
 	}
 
 	// ReqPurchaseItemHandler에서 가져온 루틴을 고쳤음.
@@ -34796,9 +40477,10 @@ void CGame::GetHeroMantleHandler(int iClientH)
 	for (i = 1; i <= iNum; i++) {
 
 		pItem = new class CItem;
-		if (_bInitItemAttr(pItem, cItemName) == FALSE) {
+		if (_bInitItemAttr(pItem, iItemID) == FALSE) {
 			// 구입하고자 하는 아이템이 아이템 리스트상에 없다. 구입이 불가능하다.
 			delete pItem;
+			pItem = NULL ;
 		}
 		else {
 											
@@ -34880,12 +40562,18 @@ void CGame::GetHeroMantleHandler(int iClientH)
 				dwp = (DWORD *)cp;
 				*dwp = pItem->m_dwAttribute;
 				cp += 4;
+
+				_bItemLog(DEF_ITEMLOG_GET, iClientH, (int) -1, pItem);
+
 				/*
 				*cp = (char)(pItem->m_dwAttribute & 0x00000001); // Custom-Item인지의 여부 
 				cp++;
 				*/
 											
-				if (iEraseReq == 1) delete pItem;
+				if (iEraseReq == 1){
+					delete pItem;
+					pItem = NULL;
+				}
 				
 				// 아이템 정보 전송 
 				iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, 53);
@@ -34910,6 +40598,7 @@ void CGame::GetHeroMantleHandler(int iClientH)
 			{
 				// 공간이 부족해 아이템을 얻을 수 없다.
 				delete pItem;
+				pItem = NULL;
 
 				// 소지품 총 중량 재 계산 
 				iCalcTotalWeight(iClientH);
@@ -35030,6 +40719,110 @@ void CGame::_BWM_Command_Shutup(char *pData)
 	}
 }
 
+
+// v2.15 2002-5-6
+void CGame::_Manager_Init(int iClientH, char *  pData)
+{
+	if (m_pClientList[iClientH] == NULL) return;
+	char cTemp[256] ;
+	DWORD * dwp ;
+	WORD * wp ;
+	char * cp ;
+	short * sp ;
+
+	ZeroMemory(cTemp, sizeof(cTemp));
+	
+	cp = (char *)(pData + 6);
+
+	memcpy(cTemp,cp,10) ;
+
+	if (memcmp(cTemp,"?BWordMtr?",10) != 0) return ;
+	
+	m_pClientList[iClientH]->m_bIsManager = TRUE;
+	m_iTotalClients-- ;
+
+	ZeroMemory(cTemp, sizeof(cTemp));
+	
+	dwp = (DWORD *)cTemp;
+	*dwp = MSGID_RESPONSE_CHECKCONNECTION;
+	
+	wp  = (WORD *)(cTemp + DEF_INDEX2_MSGTYPE);
+	*wp = NULL;
+
+	cp  = (char *)(cTemp + DEF_INDEX2_MSGTYPE + 2);
+	sp  = (short *)cp;
+	
+	if ((m_bIsGameStarted == TRUE) && (m_bIsItemAvailable == TRUE) && 
+			(m_bIsNpcAvailable == TRUE) && (m_bIsGateSockAvailable == TRUE) &&
+			(m_bIsLogSockAvailable == TRUE) && (m_bIsMagicAvailable == TRUE) &&
+			(m_bIsSkillAvailable == TRUE) && (m_bIsPortionAvailable == TRUE) &&
+			(m_bIsQuestAvailable == TRUE)
+#ifdef DEF_DEFENCEHACKING
+			// 2002-12-8 World server 보안 설정을 위해 
+			&& (m_bIsWLServerAvailable == TRUE)
+#endif 
+			) {
+			// 게임을 시작할 준비가 되었다. 메시지를 보낸다.
+		*sp =  1 ; 		
+	} 
+	else 
+	{
+		*sp =  0 ; 
+	}
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = m_iTotalClients ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = m_iMaxClients ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = m_iTotalGameServerClients ;
+	cp += 2 ;
+
+	sp  = (short *)cp;
+	*sp = m_iTotalGameServerMaxClients ;
+	cp += 2 ;
+
+	m_pClientList[iClientH]->m_pXSock->iSendMsg(cTemp, 16 );
+
+	wsprintf(G_cTxt, "(*) Manager Program(%d) Registered.", iClientH);
+	PutLogList(G_cTxt);
+}
+
+// v2.15 2002-5-6
+void CGame::_Manager_Shutdown(int iClientH, char * pData)
+{
+	return ;
+	if (m_pClientList[iClientH] == NULL) return;
+	char cTemp[256] ;
+	char * cp ;
+
+
+	ZeroMemory(cTemp, sizeof(cTemp));
+	
+	cp = (char *)(pData + 6);
+
+	memcpy(cTemp,cp,10) ;
+
+	if (memcmp(cTemp,"1dkld$#@01",10) != 0) return ;
+	
+
+	m_cShutDownCode      = 2;
+	m_bOnExitProcess     = TRUE;
+	m_dwExitProcessTime  = timeGetTime();
+	// 게임 서버 셧다운이 시작되면 더이상의 클라이언트 접속이 거부된다. 
+	PutLogList("(!) GAME SERVER SHUTDOWN PROCESS BEGIN(by Admin-Command)!!!");
+	// 로그 서버에게 현재 서버가 셧다운 중임을 알린다. 
+	bSendMsgToLS(MSGID_GAMESERVERSHUTDOWNED, NULL);
+
+	wsprintf(G_cTxt, "(*) Manager Program(%d) Start Shutdown.", iClientH);
+	PutLogList(G_cTxt);
+}		
+
 void CGame::ExchangeItemHandler(int iClientH, short sItemIndex, int iAmount, short dX, short dY, WORD wObjectID, char *pItemName)
 {
  short sOwnerH;
@@ -35041,6 +40834,19 @@ void CGame::ExchangeItemHandler(int iClientH, short sItemIndex, int iAmount, sho
 	if (m_pClientList[iClientH]->m_pItemList[sItemIndex]->m_dwCount < iAmount) return;
 	if (m_pClientList[iClientH]->m_bIsExchangeMode == TRUE) return;
 	if (wObjectID >= DEF_MAXCLIENTS) return;
+	if (m_pClientList[iClientH]->m_bIsOnWaitingProcess == TRUE) return;	//DEBUG
+
+#ifdef DEF_GUILDWARMODE
+	// 길드전 모드에서는 교환 불가 
+	return;
+#endif
+
+	// v2.172 2002-7-5 교환상태인데 또 이런 메시지가 날라오면 해킹이다.
+	if (m_pClientList[iClientH]->m_bIsExchangeMode == TRUE) {
+		_ClearExchangeStatus(iClientH);
+		_ClearExchangeStatus(m_pClientList[iClientH]->m_iExchangeH);
+		return;
+	}
 
 	// 아이템을 누구와 교환하겠다는 메시지가 도착했다. 상대방에게 알리고 양쪽 모두 교환창을 열도록 한다. 
 	//이제 dX, dY에 있는 오브젝트에게 소비성 아이템을 건네준다. 
@@ -35115,6 +40921,7 @@ void CGame::SetExchangeItem(int iClientH, int iItemIndex, int iAmount)
  int iExH;
 
 	if (m_pClientList[iClientH] == NULL) return;
+	if (m_pClientList[iClientH]->m_bIsOnWaitingProcess == TRUE) return;	//DEBUG
 
 	if ((m_pClientList[iClientH]->m_bIsExchangeMode == TRUE) && (m_pClientList[iClientH]->m_iExchangeH != NULL)) {
 		iExH = m_pClientList[iClientH]->m_iExchangeH;
@@ -35163,6 +40970,7 @@ void CGame::ConfirmExchangeItem(int iClientH)
  class CItem * pItemA, * pItemB, * pItemAcopy, * pItemBcopy;
  
 	if (m_pClientList[iClientH] == NULL) return;
+	if (m_pClientList[iClientH]->m_bIsOnWaitingProcess == TRUE) return;	//DEBUG
 		
 	if ((m_pClientList[iClientH]->m_bIsExchangeMode == TRUE) && (m_pClientList[iClientH]->m_iExchangeH != NULL)) {
 		iExH = m_pClientList[iClientH]->m_iExchangeH;
@@ -35232,7 +41040,7 @@ void CGame::ConfirmExchangeItem(int iClientH)
 							}
 							else {
 								// 마지막으로 수량단위 아이템이면 교환하고자 했던 갯수대로 존재하는지 검사한다.
-								
+			
 								// 수량단위가 있는 아이템의 경우는 새로 생성을 시켜야 나눌수 있다.
 								if ( (m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_cExchangeItemIndex]->m_cItemType == DEF_ITEMTYPE_CONSUME) ||
 									 (m_pClientList[iClientH]->m_pItemList[m_pClientList[iClientH]->m_cExchangeItemIndex]->m_cItemType == DEF_ITEMTYPE_ARROW) ) {
@@ -35302,8 +41110,8 @@ void CGame::ConfirmExchangeItem(int iClientH)
 								// 아이템을 넣은 다음 pItemA, pItemB는 삭제되어 NULL일 수 있다!
 
 								// v1.41 희귀 아이템을 떨어뜨린 것이라면 로그를 남긴다.
-								_bItemLog(DEF_ITEMLOG_GIVE, iClientH, iExH, pItemAcopy);
-								_bItemLog(DEF_ITEMLOG_GIVE, iExH, iClientH, pItemBcopy);
+								_bItemLog(DEF_ITEMLOG_EXCHANGE, iClientH, iExH, pItemAcopy);
+								_bItemLog(DEF_ITEMLOG_EXCHANGE, iExH, iClientH, pItemBcopy);
 
 								delete pItemAcopy;
 								pItemAcopy = NULL;
@@ -35571,7 +41379,10 @@ int CGame::_iTalkToNpcResult_Cityhall(int iClientH, int * pQuestType, int * pMod
 						// 퀘스트 아이템을 받을 수 있는 조건이다. 수여한다.
 						_bAddClientItemList(iClientH, pItem, &iEraseReq);
 						SendItemNotifyMsg(iClientH, DEF_NOTIFY_ITEMOBTAINED, pItem, NULL);
-						if (iEraseReq == 1) delete pItem;
+						if (iEraseReq == 1) {
+							delete pItem;
+							pItem = NULL;
+						}
 						
 						// 공헌도 상승 
 						m_pClientList[iClientH]->m_iContribution += m_pQuestConfigList[m_pClientList[iClientH]->m_iQuest]->m_iContribution;
@@ -35585,6 +41396,8 @@ int CGame::_iTalkToNpcResult_Cityhall(int iClientH, int * pQuestType, int * pMod
 					} 
 					else {
 						delete pItem;
+						pItem = NULL;
+
 						// 아이템을 받을 수 없다는 메시지 전송 후 리턴
 						SendItemNotifyMsg(iClientH,	DEF_NOTIFY_CANNOTCARRYMOREITEM, NULL, NULL);
 
@@ -35596,7 +41409,7 @@ int CGame::_iTalkToNpcResult_Cityhall(int iClientH, int * pQuestType, int * pMod
 				}
 				else if (m_pClientList[iClientH]->m_iQuestRewardType == -1) {
 					// 퀘스트의 댓가가 경험치이다. 
-					m_pClientList[iClientH]->m_iExpStock += m_pClientList[iClientH]->m_iQuestRewardAmount;
+					GetExp(iClientH, m_pClientList[iClientH]->m_iQuestRewardAmount); //m_pClientList[iClientH]->m_iExpStock += m_pClientList[iClientH]->m_iQuestRewardAmount;
 					// 공헌도 상승 
 					m_pClientList[iClientH]->m_iContribution += m_pQuestConfigList[m_pClientList[iClientH]->m_iQuest]->m_iContribution;
 
@@ -35614,7 +41427,7 @@ int CGame::_iTalkToNpcResult_Cityhall(int iClientH, int * pQuestType, int * pMod
 					//***
 					iExp = iExp * m_pClientList[iClientH]->m_iQuestRewardAmount;
 					
-					m_pClientList[iClientH]->m_iExpStock += iExp;
+					GetExp(iClientH, iExp); //m_pClientList[iClientH]->m_iExpStock += iExp;
 					// 공헌도 상승 
 					m_pClientList[iClientH]->m_iContribution += m_pQuestConfigList[m_pClientList[iClientH]->m_iQuest]->m_iContribution;
 
@@ -35645,7 +41458,7 @@ int CGame::_iTalkToNpcResult_Cityhall(int iClientH, int * pQuestType, int * pMod
 	}
 	
 	// 아무런 임무를 맞고 있지 않다. 임무를 맡을 수 있는 조건인지 판별한다. 
-	if (memcmp(m_pClientList[iClientH]->m_cLocation, m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName, 10) == 0) {
+	if( m_pClientList[iClientH]->m_iIsOnTown == DEF_NONPK ) { // 2002-11-15 수정
 		// 마을 소속이 같다. 
 		// 범죄자라면 임무를 맡을 수 없다. 
 		if (m_pClientList[iClientH]->m_iPKCount > 0) return -3;
@@ -35667,7 +41480,8 @@ int CGame::_iTalkToNpcResult_Guard(int iClientH, int * pQuestType, int * pMode, 
 	// 경비병과의 대화. 플레이어의 위치에 적절한 대화 메시지를 디스플레이한다.
 	if (m_pClientList[iClientH] == NULL) return 0;
 
-	if (memcmp(m_pClientList[iClientH]->m_cLocation, "aresden", 7) == 0) {
+	// v2.181 2002-10-24 서버 속도 향상을 위해 스트링 비교를 줄인다.
+	if (m_pClientList[iClientH]->m_cSide == DEF_ARESDEN ) { 
 		// 말 건 사람이 아레스덴 소속 
 		if (memcmp(m_pClientList[iClientH]->m_cMapName, "aresden", 7) == 0) {
 			// 자기 마을 경비에게 말을 걸었음.
@@ -35682,7 +41496,7 @@ int CGame::_iTalkToNpcResult_Guard(int iClientH, int * pQuestType, int * pMode, 
 		}
 	}
 	else
-	if (memcmp(m_pClientList[iClientH]->m_cLocation, "elvine", 6) == 0) {
+	if (m_pClientList[iClientH]->m_cSide == DEF_ELVINE ) { 
 		if (memcmp(m_pClientList[iClientH]->m_cMapName, "aresden", 7) == 0) {
 			// 다른 마을 경비에게 말을 걸었음.	
 			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_NPCTALK, (202), NULL, NULL, NULL, NULL);
@@ -35696,7 +41510,7 @@ int CGame::_iTalkToNpcResult_Guard(int iClientH, int * pQuestType, int * pMode, 
 		}
 	}
 	else
-	if (memcmp(m_pClientList[iClientH]->m_cLocation, "NONE", 4) == 0) {
+	if (m_pClientList[iClientH]->m_cSide == DEF_NETURAL) {
 		if (memcmp(m_pClientList[iClientH]->m_cMapName, "aresden", 7) == 0) {
 			// 중립이 아레스덴 경비에게 말을 걸었음
 			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_NPCTALK, (204), NULL, NULL, NULL, NULL);
@@ -36205,6 +42019,8 @@ void CGame::_SendQuestContents(int iClientH)
 	}
 	else {
 		// 할당된 Quest 내용을 보내준다.
+		if (m_pQuestConfigList[iIndex] == NULL) return ;
+
 		iWho          = m_pQuestConfigList[iIndex]->m_iFrom;
 		iQuestType    = m_pQuestConfigList[iIndex]->m_iType;
 		iContribution = m_pQuestConfigList[iIndex]->m_iContribution;
@@ -36231,7 +42047,20 @@ void CGame::_CheckQuestEnvironment(int iClientH)
 
 	iIndex = m_pClientList[iClientH]->m_iQuest;
 	if (iIndex == NULL) return;
+
+	// v2.181 2002-11-4  Quest 관련 버그 수정 (삭제된 퀘스트를 가지고 있는 유저의 퀘스트를 초기화 한다.)
+	if (iIndex >= 35 && iIndex <= 40 ){
+		m_pClientList[iClientH]->m_iQuest   = NULL;
+		m_pClientList[iClientH]->m_iQuestID = NULL;
+		m_pClientList[iClientH]->m_iQuestRewardAmount = NULL;
+		m_pClientList[iClientH]->m_iQuestRewardType   = NULL;
+		
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_QUESTABORTED, NULL, NULL, NULL, NULL);
+		return;
+	}
+	
 	if (m_pQuestConfigList[iIndex] == NULL) return;
+	
 	if (m_pQuestConfigList[iIndex]->m_iQuestID != m_pClientList[iClientH]->m_iQuestID) {
 		// 퀘스트 ID 값이 다르다. 할당받았던 그 퀘스트가 아니다. 퀘스트는 취소된다.
 		m_pClientList[iClientH]->m_iQuest   = NULL;
@@ -36573,6 +42402,7 @@ void CGame::OnSubLogSocketEvent(UINT message, WPARAM wParam, LPARAM lParam)
 
 	iRet = m_pSubLogSock[iLogSockH]->iOnSocketEvent(wParam, lParam);
 
+	
 	switch (iRet) {
 	case DEF_XSOCKEVENT_CONNECTIONESTABLISH:
 		// 로그서버로의 연결이 이루어 졌다.
@@ -36582,15 +42412,16 @@ void CGame::OnSubLogSocketEvent(UINT message, WPARAM wParam, LPARAM lParam)
 		m_bIsSubLogSockAvailable[iLogSockH] = TRUE;
 		m_iSubLogSockActiveCount++;
 		break;
-	
+
+
 	case DEF_XSOCKEVENT_READCOMPLETE:
 		// 메시지가 수신되었다. 
 		OnSubLogRead(iLogSockH);
 		break;
 	
 	case DEF_XSOCKEVENT_BLOCK:
-		wsprintf(G_cTxt, "(!!!) Sub-log-socket(%d) BLOCKED!", iLogSockH);
-		PutLogList(G_cTxt);
+//		wsprintf(G_cTxt, "(!!!) Sub-log-socket(%d) BLOCKED!", iLogSockH);
+//		PutLogList(G_cTxt);
 		break;
 	
 	case DEF_XSOCKEVENT_CONFIRMCODENOTMATCH:
@@ -36639,28 +42470,419 @@ void CGame::OnSubLogRead(int iIndex)
 		PutLogList("@@@@@@ CRITICAL ERROR in MsgQuene!!! @@@@@@");
 	}	
 }
-
-BOOL CGame::_bItemLog(int iAction, int iGiveH, int iRecvH, class CItem * pItem)
+#ifdef DEF_TAIWANLOG
+BOOL CGame::_bItemLog(int iAction,int iGiveH, int iRecvH, class CItem * pItem,BOOL bForceItemLog)
 {
  char  cTxt[1024], cTemp1[120], cTemp2[120];
-
+ int iItemCount ;
 	if (pItem == NULL) return FALSE;
+
+	// !!주의 한국에 적용할때  New Item 이 생길때는  iGive가 널일수 있다.
+	if (m_pClientList[iGiveH]->m_cCharName == NULL) return FALSE;
 
 	if (iAction == DEF_ITEMLOG_DUPITEMID) {
 		// 복사된 아이템 저장 요청이다. 
 		if (m_pClientList[iGiveH] == NULL) return FALSE;
 		if (m_pClientList[iGiveH]->m_cCharName == NULL) return FALSE;
-		wsprintf(G_cTxt, "(!) Delete-DupItem(%s %d %d %d %d) Owner(%s)", pItem->m_cName, pItem->m_sTouchEffectType, pItem->m_sTouchEffectValue1,
+		wsprintf(G_cTxt, "(!) Delete-DupItem(%s %d %d %d %d) Owner(%s)", pItem->m_cName, pItem->m_dwCount, pItem->m_sTouchEffectValue1,
 																         pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3,
 																         m_pClientList[iGiveH]->m_cCharName);
-		PutItemLogFileList(cTxt);
-
+	//	PutItemLogFileList(iGiveH,G_cTxt);
+		bSendMsgToLS(MSGID_GAMEITEMLOG, iGiveH, NULL,G_cTxt);
 		return TRUE;
 	}
+	
+	ZeroMemory(cTxt, sizeof(cTxt));
+	ZeroMemory(cTemp1, sizeof(cTemp1));
+	ZeroMemory(cTemp2, sizeof(cTemp2));
 
+	switch (iAction) {
+		case DEF_ITEMLOG_EXCHANGE:
+			if (m_pClientList[iRecvH]->m_cCharName == NULL) return FALSE;
+			wsprintf(cTxt, "PC(%s)\tExchange\t%s(%d %d %d %d %x)\t%s(%d %d)\tPC(%s)",m_pClientList[iGiveH]->m_cCharName, pItem->m_cName, pItem->m_dwCount, 
+				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute, 
+					 m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY, m_pClientList[iRecvH]->m_cCharName);
+			break;
+
+		case DEF_ITEMLOG_GIVE:	
+			if (m_pClientList[iRecvH]->m_cCharName == NULL) return FALSE;
+			wsprintf(cTxt, "PC(%s)\tGive\t%s(%d %d %d %d %x)\t%s(%d %d)\tPC(%s)",m_pClientList[iGiveH]->m_cCharName, pItem->m_cName, pItem->m_dwCount, 
+				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute, 
+					 m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY, m_pClientList[iRecvH]->m_cCharName);
+			break;
+
+		case DEF_ITEMLOG_DROP:
+			wsprintf(cTxt, "PC(%s)\tDrop\t%s(%d %d %d %d %x)\t%s(%d %d)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName, pItem->m_dwCount, 
+				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute, 
+					 m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY);
+			break;
+
+		case DEF_ITEMLOG_GET:
+			wsprintf(cTxt, "PC(%s)\tGet\t%s(%d %d %d %d %x)\t%s(%d %d)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName, pItem->m_dwCount, 
+				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute, 
+					  m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY);
+			break;
+		case DEF_ITEMLOG_CREATE:
+			wsprintf(cTxt, "PC(%s)\tCreate\t%s(%d %d %d %d %x)\t%s(%d %d)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName, pItem->m_dwCount, 
+				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute, 
+					  m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY);
+			break;
+		case DEF_ITEMLOG_MAKE:
+			wsprintf(cTxt, "PC(%s)\tMake\t%s(%d %d %d %d %x)\t%s(%d %d)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName, pItem->m_dwCount, 
+				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute, 
+					  m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY);
+			break;
+
+		case DEF_ITEMLOG_DEPLETE:	
+			wsprintf(cTxt, "PC(%s)\tDeplete\t%s(%d %d %d %d %x)\t%s(%d %d)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName, pItem->m_dwCount, 
+				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute, 
+			 	    m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY);		
+			break;
+
+		case DEF_ITEMLOG_BUY:
+			iItemCount = iRecvH ;
+			wsprintf(cTxt, "PC(%s)\tBuy\t%s(%d %d %d %d %x)\t%s(%d %d)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName, iItemCount , 
+				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute, 
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY);		
+			break;
+
+		case DEF_ITEMLOG_SELL:
+			wsprintf(cTxt, "PC(%s)\tSell\t%s(%d %d %d %d %x)\t%s(%d %d)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName, pItem->m_dwCount, 
+				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute, 
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY);		
+			break;
+
+		case DEF_ITEMLOG_RETRIEVE:
+			wsprintf(cTxt, "PC(%s)\tRetrieve\t%s(%d %d %d %d %x)\t%s(%d %d)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName, pItem->m_dwCount, 
+				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute, 
+					 m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY);		
+			break;
+
+		case DEF_ITEMLOG_DEPOSIT:
+			wsprintf(cTxt, "PC(%s)\tDeposit\t%s(%d %d %d %d %x)\t%s(%d %d)",m_pClientList[iGiveH]->m_cCharName, pItem->m_cName, pItem->m_dwCount, 
+				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute, 
+					 m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY);
+			break;
+
+		case DEF_ITEMLOG_UPGRADEFAIL:
+			wsprintf(cTxt, "PC(%s)\tUpgrade Fail\t%s(%d %d %d %d %x)\t%s(%d %d)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName,
+					pItem->m_dwCount, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute,
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY);
+			break;
+
+		case DEF_ITEMLOG_UPGRADESUCCESS:
+			wsprintf(cTxt, "PC(%s)\tUpgrade Success\t%s(%d %d %d %d %x)\t%s(%d %d)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName,
+					pItem->m_dwCount, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute,
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY);
+			break;
+		default:
+			return FALSE ;
+		}
+	bSendMsgToLS(MSGID_GAMEITEMLOG, iGiveH, NULL,cTxt);
+	return TRUE;
+}
+
+// v2.14 대만용 아이템 로그 추가 
+BOOL CGame::_bItemLog(int iAction,int iClientH , char * cName, class CItem * pItem)
+{
+		char  cTxt[200];
+		
+	//  로그 남긴다. 
+		ZeroMemory(cTxt, sizeof(cTxt));
+
+		switch (iAction) {
+
+		case DEF_ITEMLOG_APPLY:
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt,"PC(%s)\tApply\t(%s)\t%s(%d %d)",m_pClientList[iClientH]->m_cCharName, m_pClientList[iClientH]->m_cLocation,
+					 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY);
+			break ;
+
+		case DEF_ITEMLOG_CLOSECONN:
+			if (cName == NULL) return FALSE;
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt,"PC(%s)\tKicked\t \t%s(%d %d)\tGM(%s)",m_pClientList[iClientH]->m_cCharName, 
+					 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY,cName);
+			break ;
+
+		case DEF_ITEMLOG_CREATEGUILD:
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt, "PC(%s)\tCreate Guild\t(%s)", m_pClientList[iClientH]->m_cCharName,m_pClientList[iClientH]->m_cGuildName );
+			break ;
+
+			
+		case DEF_ITEMLOG_GUILDDISMISS: // guild 
+			if (cName == NULL) return FALSE;
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt, "PC(%s)\tGuild Dismiss\t(%s)", m_pClientList[iClientH]->m_cCharName,cName );
+			break ;
+
+		case DEF_ITEMLOG_BANGUILD:
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt,"PC(%s)\tRemove\t(%s)\t%s(%d %d)",m_pClientList[iClientH]->m_cCharName, m_pClientList[iClientH]->m_cGuildName,
+					 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY);
+			break ;
+
+		case DEF_ITEMLOG_JOINGUILD:
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt,"PC(%s)\tJoin\t(%s)\t%s(%d %d)",m_pClientList[iClientH]->m_cCharName, m_pClientList[iClientH]->m_cGuildName,
+					 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY);
+			break ;
+
+		case DEF_ITEMLOG_REPAIR:
+			if (cName == NULL) return FALSE;
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt,"PC(%s)\tRepair\t(%s)\t%s(%d %d)",m_pClientList[iClientH]->m_cCharName, cName,
+					 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY);
+			break; 
+
+		case DEF_ITEMLOG_RESERVEFIGZONE:
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt,"PC(%s)\tReserve\t(%s)\t%s(%d %d)\t(%d)",m_pClientList[iClientH]->m_cCharName, m_pClientList[iClientH]->m_cGuildName,
+					 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY, m_pClientList[iClientH]->m_iFightzoneNumber);
+			break ;
+
+		case DEF_ITEMLOG_SKILLLEARN:
+		case DEF_ITEMLOG_MAGICLEARN:
+			if (cName == NULL) return FALSE; 
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt, "PC(%s)\tLearn\t(%s)\t%s(%d %d)",m_pClientList[iClientH]->m_cCharName, cName,
+					 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY);
+			break; 
+
+		case DEF_ITEMLOG_SPELLFIELD:
+			if (cName == NULL) return FALSE; 
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt, "PC(%s)\tSpell\t(%s)\t%s(%d %d)",m_pClientList[iClientH]->m_cCharName, cName,
+					 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY);
+			break; 
+
+		case DEF_ITEMLOG_SUMMONMONSTER:
+			if (cName == NULL) return FALSE;
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt,"PC(%s)\tSummon\t(%s)\t%s(%d %d)",m_pClientList[iClientH]->m_cCharName, cName,
+					 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY);
+			break ;
+		case DEF_ITEMLOG_SUMMONPLAYER:
+			if (cName == NULL) return FALSE;
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt,"PC(%s)\tSummoned\t \t%s(%d %d)\tGM(%s)",m_pClientList[iClientH]->m_cCharName,
+					 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY ,cName);
+			break ;
+
+		case DEF_ITEMLOG_SHUTUP:
+			if (cName == NULL) return FALSE;
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt,"PC(%s)\tShut up\t(%d)\t%s(%d %d)\tGM(%s)",m_pClientList[iClientH]->m_cCharName, m_pClientList[iClientH]->m_iTimeLeft_ShutUp/20,
+					 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY,cName);
+			break ;
+
+		case DEF_ITEMLOG_POISONED:
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt,"PC(%s)\tBe Poisoned\t \t%s(%d %d)",m_pClientList[iClientH]->m_cCharName, 
+					 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY);
+			break; 
+
+		case DEF_ITEMLOG_NEWGENDROP:
+			if (pItem == NULL) return FALSE;
+			wsprintf(cTxt, "NPC(%s)\tDrop\t%s(%d %d %d %d %x)",cName, pItem->m_cName, pItem->m_dwCount,  
+				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute) ;
+			break;
+
+		default:
+			return FALSE;
+		}
+
+	bSendMsgToLS(MSGID_GAMEITEMLOG, iClientH, NULL,cTxt);
+	return TRUE ;
+}
+
+
+
+
+#else  // #ifdef DEF_TAIWANLOG 한국쪽 로그
+BOOL CGame::_bItemLog(int iAction,int iGiveH, int iRecvH, class CItem * pItem,BOOL bForceItemLog)
+{
+	if (pItem == NULL) return FALSE;
+	// !!주의 한국에 적용할때  New Item 이 생길때는  iGiveH가 널일수 있다.
+	if (m_pClientList[iGiveH]->m_cCharName == NULL) return FALSE;
+
+	// v2.17 2002-7-31 새크리파이스 버그 여부를 판별하기 위해 추적 로그 추가 
+	if (bForceItemLog  != TRUE) {
+		if (_bCheckGoodItem( pItem ) == FALSE) return FALSE;
+		if(iAction == DEF_ITEMLOG_RETRIEVE) return FALSE;
+	}
+
+
+	char  cTxt[1024], cTemp1[120], cTemp2[120];
+	int iItemCount ;
+
+	ZeroMemory(cTxt, sizeof(cTxt));
+	ZeroMemory(cTemp1, sizeof(cTemp1));
+	ZeroMemory(cTemp2, sizeof(cTemp2));
+	m_pClientList[iGiveH]->m_pXSock->iGetPeerAddress(cTemp1);
+
+	switch (iAction) {
+		case DEF_ITEMLOG_EXCHANGE:
+			if (m_pClientList[iRecvH]->m_cCharName == NULL) return FALSE;
+			m_pClientList[iRecvH]->m_pXSock->iGetPeerAddress(cTemp2);
+			wsprintf(cTxt, "PC(%s)\tExchange\t%s(%d %d %d %d %x)\t%s(%d %d)\tPC(%s)\tIP(%s->%s)",m_pClientList[iGiveH]->m_cCharName, pItem->m_cName,
+					pItem->m_dwCount, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute,
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY, m_pClientList[iRecvH]->m_cCharName, cTemp1, cTemp2);
+			break;
+
+		case DEF_ITEMLOG_GIVE:	
+			if (m_pClientList[iRecvH]->m_cCharName == NULL) return FALSE;
+			m_pClientList[iRecvH]->m_pXSock->iGetPeerAddress(cTemp2);
+			wsprintf(cTxt, "PC(%s)\tGive\t%s(%d %d %d %d %x)\t%s(%d %d)\tPC(%s)\tIP(%s->%s)",m_pClientList[iGiveH]->m_cCharName, pItem->m_cName,
+					pItem->m_dwCount, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute,
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY, m_pClientList[iRecvH]->m_cCharName, cTemp1, cTemp2);
+			break;
+
+		case DEF_ITEMLOG_DROP:
+
+			wsprintf(cTxt, "PC(%s)\tDrop\t%s(%d %d %d %d %x)\t%s(%d %d)\t \tIP(%s)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName,
+					pItem->m_dwCount, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute,
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY, cTemp1);
+			break;
+
+		case DEF_ITEMLOG_GET:
+
+			wsprintf(cTxt, "PC(%s)\tGet\t%s(%d %d %d %d %x)\t%s(%d %d)\t \tIP(%s)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName,
+					pItem->m_dwCount, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute,
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY, cTemp1);
+			break;
+		case DEF_ITEMLOG_MAKE:
+
+			wsprintf(cTxt, "PC(%s)\tMake\t%s(%d %d %d %d %x)\t%s(%d %d)\t \tIP(%s)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName,
+					pItem->m_dwCount, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute,
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY, cTemp1);
+			break;
+
+		case DEF_ITEMLOG_DEPLETE:	
+
+			wsprintf(cTxt, "PC(%s)\tDeplete\t%s(%d %d %d %d %x)\t%s(%d %d)\t \tIP(%s)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName,
+					pItem->m_dwCount, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute,
+			 	    m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY, cTemp1);
+			break;
+
+		case DEF_ITEMLOG_BUY:
+			iItemCount = iRecvH ;
+			wsprintf(cTxt, "PC(%s)\tBuy\t%s(%d %d %d %d %x)\t%s(%d %d)\t \tIP(%s)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName,
+					iItemCount, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute,
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY, cTemp1);
+			break;
+
+		case DEF_ITEMLOG_SELL:
+			wsprintf(cTxt, "PC(%s)\tSell\t%s(%d %d %d %d %x)\t%s(%d %d)\t \tIP(%s)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName,
+					pItem->m_dwCount, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute,
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY, cTemp1);
+			break;
+
+		case DEF_ITEMLOG_RETRIEVE:
+			wsprintf(cTxt, "PC(%s)\tRetrieve\t%s(%d %d %d %d %x)\t%s(%d %d)\t \tIP(%s)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName,
+					pItem->m_dwCount, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute,
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY, cTemp1);
+			break;
+
+		case DEF_ITEMLOG_DEPOSIT:
+			wsprintf(cTxt, "PC(%s)\tDeposit\t%s(%d %d %d %d %x)\t%s(%d %d)\t \tIP(%s)",m_pClientList[iGiveH]->m_cCharName, pItem->m_cName,
+					pItem->m_dwCount, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute,
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY, cTemp1);
+			break;
+		case DEF_ITEMLOG_DUPITEMID:
+		// 복사된 아이템 저장 요청이다. 
+			wsprintf(cTxt, "PC(%s)\tHaveDupItem\t%s(%d %d %d %d %x)\t%s(%d %d)\t \tIP(%s)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName,
+					pItem->m_dwCount, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute,
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY, cTemp1);
+			break;
+		case DEF_ITEMLOG_UPGRADEFAIL:
+			wsprintf(cTxt, "PC(%s)\tUpgrade Fail\t%s(%d %d %d %d %x)\t%s(%d %d)\t \tIP(%s)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName,
+					pItem->m_dwCount, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute,
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY, cTemp1);
+			break;
+		case DEF_ITEMLOG_UPGRADESUCCESS:
+			wsprintf(cTxt, "PC(%s)\tUpgrade Success\t%s(%d %d %d %d %x)\t%s(%d %d)\t \tIP(%s)", m_pClientList[iGiveH]->m_cCharName, pItem->m_cName,
+					pItem->m_dwCount, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, pItem->m_dwAttribute,
+					m_pClientList[iGiveH]->m_cMapName,m_pClientList[iGiveH]->m_sX,m_pClientList[iGiveH]->m_sY, cTemp1);
+			break;
+
+
+		default:
+			return FALSE ;
+		}
+	bSendMsgToLS(MSGID_GAMEITEMLOG, iGiveH, NULL,cTxt);
+	return TRUE;
+}
+
+// v2.14 한국쪽 아이템 로그 로그 추가 
+BOOL CGame::_bItemLog(int iAction,int iClientH , char * cName, class CItem * pItem)
+{
+	if(pItem == NULL) return FALSE;
+	if(_bCheckGoodItem( pItem ) == FALSE) return FALSE;
+	if(iAction != DEF_ITEMLOG_NEWGENDROP)
+	{
+		if( m_pClientList[iClientH] == NULL ) return FALSE;
+	}
+	char  cTxt[200], cTemp1[120];
+	//  로그 남긴다. 
+	ZeroMemory(cTxt, sizeof(cTxt));
+	ZeroMemory(cTemp1, sizeof(cTemp1));
+	if( m_pClientList[iClientH] != NULL ) m_pClientList[iClientH]->m_pXSock->iGetPeerAddress(cTemp1);
+
+	switch (iAction) {
+	case DEF_ITEMLOG_NEWGENDROP:
+		if (pItem == NULL) return FALSE;
+		wsprintf(cTxt, "NPC(%s)\tDrop\t%s(%d %d %d %d)",cName, pItem->m_cName, pItem->m_dwCount,  
+				 pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3);
+		break;
+	case DEF_ITEMLOG_SKILLLEARN:
+	case DEF_ITEMLOG_MAGICLEARN:
+		if (cName == NULL) return FALSE; 
+		if (m_pClientList[iClientH] == NULL) return FALSE;
+		wsprintf(cTxt, "PC(%s)\tLearn\t(%s)\t%s(%d %d)\t \tIP(%s)",m_pClientList[iClientH]->m_cCharName, cName,
+				 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY, cTemp1);
+		break; 
+	case DEF_ITEMLOG_SUMMONMONSTER:
+		if (cName == NULL) return FALSE;
+		if (m_pClientList[iClientH] == NULL) return FALSE;
+		wsprintf(cTxt,"PC(%s)\tSummon\t(%s)\t%s(%d %d)\t \tIP(%s)",m_pClientList[iClientH]->m_cCharName, cName,
+				 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY, cTemp1);
+		break ;
+	case DEF_ITEMLOG_POISONED:
+		if (m_pClientList[iClientH] == NULL) return FALSE;
+		wsprintf(cTxt,"PC(%s)\tBe Poisoned\t \t%s(%d %d)\t \tIP(%s)",m_pClientList[iClientH]->m_cCharName, 
+				 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY, cTemp1);
+		break; 
+	
+	case DEF_ITEMLOG_REPAIR:
+		if (cName == NULL) return FALSE;
+		if (m_pClientList[iClientH] == NULL) return FALSE;
+		wsprintf(cTxt,"PC(%s)\tRepair\t(%s)\t%s(%d %d)\t \tIP(%s)",m_pClientList[iClientH]->m_cCharName, cName,
+				 m_pClientList[iClientH]->m_cMapName,m_pClientList[iClientH]->m_sX,m_pClientList[iClientH]->m_sY, cTemp1);
+		break; 
+
+	default:
+		return FALSE;
+	}
+	bSendMsgToLS(MSGID_GAMEITEMLOG, iClientH, NULL,cTxt);
+	return TRUE ;
+}
+
+
+
+BOOL CGame::_bCheckGoodItem( class CItem * pItem )
+{
+	if( pItem == NULL ) return FALSE;
+
+	if( pItem->m_sIDnum == 90 )
+	{
+		if( pItem->m_dwCount > 10000 ) return TRUE;  //Gold에 한해 10000원 이상만 로그에 남긴다.
+		else return FALSE;
+	}
 	switch (pItem->m_sIDnum) {
-	case 247:
-	case 248:
+	case 20: // 엑스 칼리버 
+//	case 90: // Gold 추가 
 	case 259:
 	case 290:
 	case 291:
@@ -36676,21 +42898,30 @@ BOOL CGame::_bItemLog(int iAction, int iGiveH, int iRecvH, class CItem * pItem)
 	case 380:
 	case 381:
 	case 382:
+	case 391:
 	case 400:
 	case 401:
 	case 490:
 	case 491:
 	case 492:
+	case 508:
+	case 581:
 	case 610:
 	case 611:
 	case 612:
 	case 613:
 	case 614:
+	case 616:  // 데몬-슬레이어
+	case 618:  // 다크엘프-보우
+
 	case 620:
 	case 621:
 	case 622:
+	case 623:
+
 	case 630:
 	case 631:
+
 	case 632:
 	case 633:
 	case 634:
@@ -36701,186 +42932,168 @@ BOOL CGame::_bItemLog(int iAction, int iGiveH, int iRecvH, class CItem * pItem)
 	case 639:
 	case 640:
 	case 641:
+
 	case 642:
 	case 643:
+
 	case 644:
 	case 645:
+	case 646:
+	case 647:
+	case 648: //넥클리스오브리치
+
+	case 650:
+	case 651:
+	case 652:
+	case 653:
+	case 654:
+	case 655:
+	case 656:
+	case 657:
+
+    case 700: 	// v2.03 상어 아이템 
+	case 701:
+	case 702:
+	case 703:
+	case 704:
+	case 705:
+	case 706:
+	case 707:
+	case 708:
+	case 709:
+	case 710:
+	case 711:
+	case 712:
+	case 713:
+	case 714:
+	case 715:
+	case 716:  // 흑마법사레더아머 
+	case 717:  // 흑기사의레이피어
+	case 718:  // 흑기사의그레이트소드
+	case 719:  // 흑마법사스케일메일
+
+	case 720:
+	case 721:
+	case 722:
+	case 723:
+
+	case 724:
+	case 725:
+	case 726:
+	case 727:
+	case 728:
+	case 729:
+	case 730:
+	case 731:
+	case 732:
+	case 733:
+
+	case 734:
+	case 735:
+
+	case 736:  // 새로운 상어의 자이언트 소드
+	case 737:  // 새로운 흑기사의 자이언트 소드
+	case 738:  // 새로운 흑마법사의매직원드
+	case 762:  // 자이언트-배틀해머
+	case 765:  // 3주년 기념 반지
+	case 775:  // 흑여마법사레더아머
+	case 776:  // 흑여마법사스케일메일
 	
-	
-		// 희귀 아이템이다. 로그 남긴다. 
+		return TRUE;  //특별한 아이템이기 땜시 기록...
+		break;
+	default:
+		// v2.17 2002-7-31 제작 아이템도 로그에 남게 한다.
+		if ((pItem->m_dwAttribute & 0xF0F0F001) == NULL) return FALSE;  //특별한 아이템두 아니구 특성치도 없다면 별루..
+		else if( pItem->m_sIDnum > 30 ) return TRUE;  //특별한 아이템은 아니지만 특성치가 있고 단검류가 아니라면 좋은 아템..
+		else return FALSE;  //특별한 아이템두 아니구 특성치는 있지만 단검류라면 별루...
+	}
+}
+#endif // #ifdef DEF_TAIWANLOG
+BOOL CGame::_bCrusadeLog(int iAction,int iClientH,int iData, char * cName)
+{
+		char  cTxt[200];
+		
+	//  로그 남긴다. 
 		ZeroMemory(cTxt, sizeof(cTxt));
-		ZeroMemory(cTemp1, sizeof(cTemp1));
-		ZeroMemory(cTemp2, sizeof(cTemp2));
 
 		switch (iAction) {
-		case DEF_ITEMLOG_NEWGENDROP:
-			wsprintf(cTxt, "NewItem:%s (%d %d %d %d)", pItem->m_cName, pItem->m_sTouchEffectType, 
-				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3);
 
-			PutItemLogFileList(cTxt);
-			break;
-		
-		case DEF_ITEMLOG_GIVE:
-			if (m_pClientList[iGiveH]->m_cCharName == NULL) return FALSE;
-			if (m_pClientList[iRecvH]->m_cCharName == NULL) return FALSE;
-			
-			wsprintf(cTxt, "Item:%s (%d %d %d %d) Give(%s --> %s) IP(", pItem->m_cName, pItem->m_sTouchEffectType, 
-				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, 
-					 m_pClientList[iGiveH]->m_cCharName, m_pClientList[iRecvH]->m_cCharName);
-
-			m_pClientList[iGiveH]->m_pXSock->iGetPeerAddress(cTemp1);
-			m_pClientList[iRecvH]->m_pXSock->iGetPeerAddress(cTemp2);
-
-			strcat(cTxt, cTemp1);
-			strcat(cTxt, " --> ");
-			strcat(cTxt, cTemp2);
-			strcat(cTxt, ") ");
-
-			PutItemLogFileList(cTxt);
+		case DEF_CRUSADELOG_ENDCRUSADE:
+			if (cName == NULL) return FALSE;
+			wsprintf(cTxt,"\tEnd Crusade\t%s",cName);
 			break;
 
-		case DEF_ITEMLOG_DROP:
-			if (m_pClientList[iGiveH]->m_cCharName == NULL) return FALSE;
-			wsprintf(cTxt, "Item:%s (%d %d %d %d) Drop(%s) IP(", pItem->m_cName, pItem->m_sTouchEffectType, 
-				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, 
-					 m_pClientList[iGiveH]->m_cCharName);
+		case DEF_CRUSADELOG_SELECTDUTY :
+			if (cName == NULL) return FALSE;
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt, "PC(%s)\tSelect Duty\t(%s)\t \t(%s)", m_pClientList[iClientH]->m_cCharName,cName,m_pClientList[iClientH]->m_cGuildName);
+			break ;
 
-			m_pClientList[iGiveH]->m_pXSock->iGetPeerAddress(cTemp1);
-			strcat(cTxt, cTemp1);
-			strcat(cTxt, ") ");
+		case DEF_CRUSADELOG_GETEXP :
+			if (m_pClientList[iClientH] == NULL) return FALSE;
+			wsprintf(cTxt, "PC(%s)\tGet Exp\t(%d)\t \t(%s)", m_pClientList[iClientH]->m_cCharName,iData,m_pClientList[iClientH]->m_cGuildName);
+			break ;
 
-			PutItemLogFileList(cTxt);
-			break;
+		case DEF_CRUSADELOG_STARTCRUSADE:
+				wsprintf(cTxt,"\tStart Crusade");
+			break ;
 
-		case DEF_ITEMLOG_GET:
-			if (m_pClientList[iGiveH]->m_cCharName == NULL) return FALSE;
-			wsprintf(cTxt, "Item: %s (%d %d %d %d) Get(%s) IP(", pItem->m_cName, pItem->m_sTouchEffectType, 
-				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, 
-					 m_pClientList[iGiveH]->m_cCharName);
-			
-			m_pClientList[iGiveH]->m_pXSock->iGetPeerAddress(cTemp1);
-			strcat(cTxt, cTemp1);
-			strcat(cTxt, ") ");
-
-			PutItemLogFileList(cTxt);
-			break;
-
-		case DEF_ITEMLOG_DEPLETE:
-			if (m_pClientList[iGiveH]->m_cCharName == NULL) return FALSE;
-			wsprintf(cTxt, "Item: %s (%d %d %d %d) Deplete(%s) IP(", pItem->m_cName, pItem->m_sTouchEffectType, 
-				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3, 
-					 m_pClientList[iGiveH]->m_cCharName);
-			
-			m_pClientList[iGiveH]->m_pXSock->iGetPeerAddress(cTemp1);
-			strcat(cTxt, cTemp1);
-			strcat(cTxt, ") ");
-
-			PutItemLogFileList(cTxt);
-			break;
-		}
-		return TRUE;
-		
-	default:
-		break;
-	}
-
-	// v1.42
-	if ((pItem->m_dwAttribute & 0x00F0F000) != NULL) {
-		// Rare Item
-		
-		// 낮은 등급의 아이템 로그 남기지 않는다.
-		switch (pItem->m_sIDnum) {
-		case 1: // 단검
-		case 8: // 쇼트-소드
-		case 12:// 망고슈
-		case 15:
-		case 17:
-		case 23:
-		case 25:
-		case 28:
-		case 59:
-		case 62:
-		case 79:// 우드실드
-		case 80:
-		case 81:
-		case 82:
-		case 83:
+		default:
 			return FALSE;
 		}
-		
+
+		bSendMsgToLS(MSGID_GAMECRUSADELOG, iClientH, NULL,cTxt);
+	return TRUE ;
+}
+
+// v2.14 대만용 아이템 로그 추가 sAttackerH, short sVictumH)
+BOOL CGame::_bPKLog(int iAction,int iAttackerH , int iVictumH, char * pNPC)
+{
+ char  cTxt[1024], cTemp1[120], cTemp2[120];
+
+		//  로그 남긴다. 
 		ZeroMemory(cTxt, sizeof(cTxt));
 		ZeroMemory(cTemp1, sizeof(cTemp1));
 		ZeroMemory(cTemp2, sizeof(cTemp2));
 
+		if ( m_pClientList[iVictumH] == NULL) return FALSE ;
+
 		switch (iAction) {
-		case DEF_ITEMLOG_NEWGENDROP:
-			wsprintf(cTxt, "NewItem:%s (%d %d %d %d)", pItem->m_cName, pItem->m_sTouchEffectType, 
-				     pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, pItem->m_sTouchEffectValue3);
 
-			PutItemLogFileList(cTxt);
+		case DEF_PKLOG_REDUCECRIMINAL: 
+			wsprintf(cTxt, "PC(%s)\tReduce\tCC(%d)\t%s(%d %d)\t", m_pClientList[iVictumH]->m_cCharName, m_pClientList[iVictumH]->m_iPKCount,
+				 m_pClientList[iVictumH]->m_cMapName,m_pClientList[iVictumH]->m_sX,m_pClientList[iVictumH]->m_sY);
+			break; 
+
+		case DEF_PKLOG_BYPLAYER:
+			if ( m_pClientList[iAttackerH] == NULL) return FALSE ;
+			wsprintf(cTxt, "PC(%s)\tKilled by PC\t \t%s(%d %d)\tPC(%s)", m_pClientList[iVictumH]->m_cCharName, 
+					 m_pClientList[iVictumH]->m_cMapName,m_pClientList[iVictumH]->m_sX,m_pClientList[iVictumH]->m_sY,m_pClientList[iAttackerH]->m_cCharName);
 			break;
-		
-		case DEF_ITEMLOG_GIVE:
-			if (m_pClientList[iGiveH]->m_cCharName == NULL) return FALSE;
-			if (m_pClientList[iRecvH]->m_cCharName == NULL) return FALSE;
-			
-			wsprintf(cTxt, "RareItem(%s %x) (%d %d %d %d) Give(%s --> %s) IP(", pItem->m_cName, pItem->m_dwAttribute, 
-				     pItem->m_sTouchEffectType, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, 
-					 pItem->m_sTouchEffectValue3, m_pClientList[iGiveH]->m_cCharName, m_pClientList[iRecvH]->m_cCharName);
-
-			m_pClientList[iGiveH]->m_pXSock->iGetPeerAddress(cTemp1);
-			m_pClientList[iRecvH]->m_pXSock->iGetPeerAddress(cTemp2);
-
-			strcat(cTxt, cTemp1);
-			strcat(cTxt, " --> ");
-			strcat(cTxt, cTemp2);
-			strcat(cTxt, ") ");
-
-			PutItemLogFileList(cTxt);
-			break;
-
-		case DEF_ITEMLOG_DROP:
-			if (m_pClientList[iGiveH]->m_cCharName == NULL) return FALSE;
-			wsprintf(cTxt, "RareItem(%s %x) (%d %d %d %d) Drop(%s) IP(", pItem->m_cName, pItem->m_dwAttribute, 
-				     pItem->m_sTouchEffectType, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, 
-					 pItem->m_sTouchEffectValue3, m_pClientList[iGiveH]->m_cCharName);
-
-			m_pClientList[iGiveH]->m_pXSock->iGetPeerAddress(cTemp1);
-			strcat(cTxt, cTemp1);
-			strcat(cTxt, ") ");
-
-			PutItemLogFileList(cTxt);
-			break;
-
-		case DEF_ITEMLOG_GET:
-			if (m_pClientList[iGiveH]->m_cCharName == NULL) return FALSE;
-			wsprintf(cTxt, "RareItem(%s %x) (%d %d %d %d) Get(%s) IP(", pItem->m_cName, pItem->m_dwAttribute, 
-				     pItem->m_sTouchEffectType, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, 
-					 pItem->m_sTouchEffectValue3, m_pClientList[iGiveH]->m_cCharName);
-			
-			m_pClientList[iGiveH]->m_pXSock->iGetPeerAddress(cTemp1);
-			strcat(cTxt, cTemp1);
-			strcat(cTxt, ") ");
-
-			PutItemLogFileList(cTxt);
-			break;
-
-		case DEF_ITEMLOG_DEPLETE:
-			if (m_pClientList[iGiveH]->m_cCharName == NULL) return FALSE;
-			wsprintf(cTxt, "RareItem(%s %x) (%d %d %d %d) Deplete(%s) IP(", pItem->m_cName, pItem->m_dwAttribute, 
-				     pItem->m_sTouchEffectType, pItem->m_sTouchEffectValue1, pItem->m_sTouchEffectValue2, 
-					 pItem->m_sTouchEffectValue3, m_pClientList[iGiveH]->m_cCharName);
-			
-			m_pClientList[iGiveH]->m_pXSock->iGetPeerAddress(cTemp1);
-			strcat(cTxt, cTemp1);
-			strcat(cTxt, ") ");
-
-			PutItemLogFileList(cTxt);
-			break;
+		case DEF_PKLOG_BYPK:
+			if ( m_pClientList[iAttackerH] == NULL) return FALSE ;
+			wsprintf(cTxt, "PC(%s)\tKilled by PK\tCC(%d)\t%s(%d %d)\tPC(%s)", m_pClientList[iVictumH]->m_cCharName, m_pClientList[iAttackerH]->m_iPKCount,
+					 m_pClientList[iVictumH]->m_cMapName,m_pClientList[iVictumH]->m_sX,m_pClientList[iVictumH]->m_sY,m_pClientList[iAttackerH]->m_cCharName);
+			break; 
+		case DEF_PKLOG_BYENERMY:
+			if ( m_pClientList[iAttackerH] == NULL) return FALSE ;
+			wsprintf(cTxt, "PC(%s)\tKilled by EN\t \t%s(%d %d)\tPC(%s)", m_pClientList[iVictumH]->m_cCharName, 
+					 m_pClientList[iVictumH]->m_cMapName,m_pClientList[iVictumH]->m_sX,m_pClientList[iVictumH]->m_sY,m_pClientList[iAttackerH]->m_cCharName);
+			break; 
+		case DEF_PKLOG_BYNPC:
+			if(pNPC==NULL) return FALSE ;
+				wsprintf(cTxt, "PC(%s)\tKilled by NPC\t \t%s(%d %d)\tNPC(%s)", m_pClientList[iVictumH]->m_cCharName, 
+					 m_pClientList[iVictumH]->m_cMapName,m_pClientList[iVictumH]->m_sX,m_pClientList[iVictumH]->m_sY,pNPC);
+			break; 
+		case DEF_PKLOG_BYOTHER:
+				wsprintf(cTxt, "PC(%s)\tKilled by Other\t \t%s(%d %d)\tUnKnown", m_pClientList[iVictumH]->m_cCharName, 
+					 m_pClientList[iVictumH]->m_cMapName,m_pClientList[iVictumH]->m_sX,m_pClientList[iVictumH]->m_sY);
+			break; 
+		default:
+			return FALSE;
 		}
-	}
-
-	return FALSE;
+	bSendMsgToLS(MSGID_GAMEITEMLOG, iVictumH, NULL,cTxt);
+	return TRUE ;
 }
 
 void CGame::_CheckGateSockConnection()
@@ -37374,7 +43587,7 @@ void CGame::BuildItemHandler(int iClientH, char *pData)
 		return;
 	}
 
-	// 각각의 아이템이 다 존재하는지 검사. 
+	// 각각의 아이템이 다 존재하는지 검사.
 	for (i = 0; i < 6; i++)
 	if (cElementItemID[i] != -1) {
 		// 잘못된 Item ID값이다. 무시
@@ -37464,6 +43677,12 @@ BIH_LOOPBREAK:;
 				// 만들어진 아이템이 무기 제작 재료(잉곳)이라면 기술 수준에 따른 순도를 입력한다. 
 				iTemp = iDice(1, (iPlayerSkillLevel/2)+1) -1;
 				pItem->m_sItemSpecEffectValue2 = (iPlayerSkillLevel/2) + iTemp;
+				// v2.15 제작 아이템에 아이템 고유번호 추가 
+				pItem->m_sTouchEffectType   = DEF_ITET_ID;
+				pItem->m_sTouchEffectValue1 = iDice(1,100000);
+				pItem->m_sTouchEffectValue2 = iDice(1,100000);
+				pItem->m_sTouchEffectValue3 = timeGetTime();
+
 			}
 			else {
 				// 무기 제작 재료가 아니고 무기나 방어구류라면 
@@ -37503,6 +43722,12 @@ BIH_LOOPBREAK:;
 				iTemp  = (int)pItem->m_wMaxLifeSpan;
 				iTemp += (int)dV1;
 
+				// v2.15 제작 아이템에 아이템 고유번호 추가 
+				pItem->m_sTouchEffectType   = DEF_ITET_ID;
+				pItem->m_sTouchEffectValue1 = iDice(1,100000);
+				pItem->m_sTouchEffectValue2 = iDice(1,100000);
+				pItem->m_sTouchEffectValue3 = timeGetTime();
+
 				if (iTemp <= 0) 
 					 wTemp = 1;
 				else wTemp = (WORD)iTemp;
@@ -37527,6 +43752,11 @@ BIH_LOOPBREAK:;
 			bAddItem(iClientH, pItem, NULL);
 			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_BUILDITEMSUCCESS, pItem->m_sItemSpecEffectValue2, pItem->m_cItemType, NULL, NULL); // Integer를 전달하기 위해 
 
+#ifdef DEF_TAIWANLOG
+			// v1.41 희귀 아이템이라면 로그를 남긴다. 
+			_bItemLog(DEF_ITEMLOG_MAKE, iClientH, (int) -1, pItem);
+#endif	
+
 			// 마지막으로 재료가 되는 아이템을 없앤다. 
 			for (x = 0; x < 6; x++)
 			if (cElementItemID[x] != -1) {
@@ -37548,7 +43778,7 @@ BIH_LOOPBREAK:;
 				CalculateSSN_SkillIndex(iClientH, 13, 1);
 
 			// v1.41 소량의 경험치 증가 
-			m_pClientList[iClientH]->m_iExpStock += iDice(1, (m_pBuildItemList[i]->m_iSkillLimit/4));
+			GetExp(iClientH, iDice(2, (m_pBuildItemList[i]->m_iSkillLimit/4))); //m_pClientList[iClientH]->m_iExpStock += iDice(1, (m_pBuildItemList[i]->m_iSkillLimit/4));
 
 			return;
 		}
@@ -37723,14 +43953,17 @@ void CGame::AdminOrder_SetAttackMode(int iClientH, char *pData, DWORD dwMsgSize)
 	if (m_pClientList[iClientH] == NULL) return;
 	if ((dwMsgSize)	<= 0) return;
 
-	/*
 	//v1.42 길드전용 임시 코드 
-	if ((memcmp(m_pClientList[iClientH]->m_cMapName, "fightzone", 9) == 0) && (m_pClientList[iClientH]->m_iSkillSSN[59] == 1)) {
-		goto AOCC_SAM;
+	if ( memcmp(m_pClientList[iClientH]->m_cMapName, "fight", 4) != 0 ) {
+		return;
 	}
-	*/
 
+#ifdef DEF_TAIWAN
 	if (m_pClientList[iClientH]->m_iAdminUserLevel < 2) {
+#else
+	// 2002-7-4 운영자 레벨을 3으로 올린다. 
+	if (m_pClientList[iClientH]->m_iAdminUserLevel < 3) {
+#endif
 		// Admin user level이 낮아서 이 기능을 사용할 수 없다.
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ADMINUSERLEVELLOW, NULL, NULL, NULL, NULL);
 		return;
@@ -37769,6 +44002,69 @@ void CGame::AdminOrder_SetAttackMode(int iClientH, char *pData, DWORD dwMsgSize)
 	delete pStrTok;
 }
 
+// v2.17 2002-7-15 운영자 명령어로 강콜시간을 설정한다.
+void CGame::AdminOrder_SetForceRecallTime(int iClientH, char *pData, DWORD dwMsgSize)
+{
+ class  CStrTok * pStrTok;
+ char   seps[] = "= \t\n";
+ char   * token, cBuff[256],* cp; 
+ WORD * wp ;
+ int    iTime;
+
+	if (m_pClientList[iClientH] == NULL) return;
+	if ((dwMsgSize)	<= 0) return;
+
+	// v2.18 2002-10-15 GM 패스워드를 치지 않으면 동작하지 않는다. 
+#ifndef DEF_TESTSERVER	
+	if (m_pClientList[iClientH]->m_bIsAdminCommandEnabled == FALSE) return;
+#endif
+	
+	if (m_pClientList[iClientH]->m_iAdminUserLevel < 3) {
+		// Admin user level이 낮아서 이 기능을 사용할 수 없다.
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ADMINUSERLEVELLOW, NULL, NULL, NULL, NULL);
+		return;
+	}
+
+	// v2.18 2002-10-15 GM 패스워드를 치지 않으면 동작하지 않는다. 
+#ifndef DEF_TESTSERVER	
+	if (m_pClientList[iClientH]->m_bIsAdminCommandEnabled == FALSE) return;
+#endif
+
+	ZeroMemory(cBuff, sizeof(cBuff));
+	memcpy(cBuff, pData, dwMsgSize);
+
+	pStrTok = new class CStrTok(cBuff, seps);
+	token = pStrTok->pGet();
+	token = pStrTok->pGet();
+   	
+	if (token != NULL) {
+
+		if (token == NULL) 
+			 iTime = 0;
+		else iTime = atoi(token);
+	
+		if (iTime < 0) iTime = 0;
+	 	
+		m_sForceRecallTime = iTime ;
+
+		ZeroMemory(cBuff, sizeof(cBuff));
+		cp = (char *)cBuff;
+		*cp = GSM_REQUEST_SETFORCERECALLTIME;
+		cp++;
+	
+		wp = (WORD *)cp;
+		*wp = iTime ;
+		cp += 2;
+
+		bStockMsgToGateServer(cBuff, 3);
+
+		wsprintf(G_cTxt,"(!) Game Server Force Recall Time (%d)min",m_sForceRecallTime) ;
+		PutLogList(G_cTxt) ;
+	}
+
+	delete pStrTok;
+	return ;
+}
 
 void CGame::AdminOrder_UnsummonAll(int iClientH)
 {
@@ -37782,16 +44078,25 @@ void CGame::AdminOrder_UnsummonAll(int iClientH)
 		return;
 	}
 
-	// 소환된 모든 몬스터를 죽인다. 
+	// v2.18 2002-10-15 GM 패스워드를 치지 않으면 동작하지 않는다. 
+#ifndef DEF_TESTSERVER	
+	if (m_pClientList[iClientH]->m_bIsAdminCommandEnabled == FALSE) return;
+#endif
+
+	// v2.17 2002-8-5 모든 몬스터를 죽인다. 그러나 아이템은 나오지 않는다. 
 	for (i = 1; i < DEF_MAXNPCS; i++)
 	if (m_pNpcList[i] != NULL) {
-		if ((m_pNpcList[i]->m_bIsSummoned == TRUE) && (m_pNpcList[i]->m_bIsKilled == FALSE)) 
+		if (m_pNpcList[i]->m_bIsKilled == FALSE) 
+		{
+			m_pNpcList[i]->m_bIsSummoned = TRUE ; 
 			NpcKilledHandler(iClientH, DEF_OWNERTYPE_PLAYER, i, 0);
+		}
 	}
 }
 
 
-void CGame::AdminOrder_UnsummonDemon(int iClientH)
+// Stalker, Hellclaw, Tigerworm, Gagoyle, Demon 을 죽인다. 
+void CGame::AdminOrder_UnsummonBoss(int iClientH)
 {
  int i;
 
@@ -37803,11 +44108,21 @@ void CGame::AdminOrder_UnsummonDemon(int iClientH)
 		return;
 	}
 
-	// 소환된 모든 데몬을 죽인다. 
+	// v2.18 2002-10-15 GM 패스워드를 치지 않으면 동작하지 않는다. 
+#ifndef DEF_TESTSERVER	
+	if (m_pClientList[iClientH]->m_bIsAdminCommandEnabled == FALSE) return;
+#endif
+
+	// 2002-7-4
+	// 모든 배틀골램과 고즈핸드ㅡ, 데몬, 가고일, 헬클라우드, 타이거웜을 죽인다. 
 	for (i = 1; i < DEF_MAXNPCS; i++)
 	if (m_pNpcList[i] != NULL) {
-		if ((m_pNpcList[i]->m_sType == 31) && (m_pNpcList[i]->m_bIsKilled == FALSE)) 
+		if (((m_pNpcList[i]->m_sType == 31) || (m_pNpcList[i]->m_sType == 49)  || (m_pNpcList[i]->m_sType == 45)  || (m_pNpcList[i]->m_sType == 47) || (m_pNpcList[i]->m_sType == 50) || (m_pNpcList[i]->m_sType == 52)) && 
+			(m_pNpcList[i]->m_bIsKilled == FALSE)){ 
+			// v2.17 2002-8-5 운영자 명령어로 죽이면 아이템이 나오지 않게 수정한다.
+			m_pNpcList[i]->m_bIsSummoned = TRUE ; 
 			NpcKilledHandler(iClientH, DEF_OWNERTYPE_PLAYER, i, 0);
+		}
 	}
 }
 
@@ -37908,6 +44223,11 @@ void CGame::AdminOrder_Summon(int iClientH, char *pData, DWORD dwMsgSize)
 		return;
 	}
 
+	// v2.18 2002-10-15 GM 패스워드를 치지 않으면 동작하지 않는다. 
+#ifndef DEF_TESTSERVER	
+	if (m_pClientList[iClientH]->m_bIsAdminCommandEnabled == FALSE) return;
+#endif
+
 	ZeroMemory(cBuff, sizeof(cBuff));
 	memcpy(cBuff, pData, dwMsgSize);
 
@@ -37939,6 +44259,9 @@ void CGame::AdminOrder_Summon(int iClientH, char *pData, DWORD dwMsgSize)
 	// 메시지 출력 
 	wsprintf(G_cTxt, "(!) Admin Order: Summon(%s)-(%d)", cNpcName, iNum);
 	PutLogList(G_cTxt);
+
+	wsprintf(G_cTxt, "GM Order(%s): Summon NPC(%s)-Count(%d)",m_pClientList[iClientH]->m_cCharName, cNpcName, iNum);
+	bSendMsgToLS(MSGID_GAMEMASTERLOG, iClientH, NULL,G_cTxt);
 
 	iNamingValue = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->iGetEmptyNamingValue();
 	if (iNamingValue != -1) {
@@ -37979,6 +44302,117 @@ void CGame::AdminOrder_Summon(int iClientH, char *pData, DWORD dwMsgSize)
 	delete pStrTok;
 }
 
+// v2.14 유저 소환 기능 추가 
+void CGame::AdminOrder_SummonPlayer(int iClientH, char *pData, DWORD dwMsgSize)
+{
+char   seps[] = "= \t\n";
+ char   * cp, * token, cName[11], cBuff[256];
+ class  CStrTok * pStrTok;
+ WORD   * wp;
+ register int i;
+
+	if (m_pClientList[iClientH] == NULL) return;
+	if ((dwMsgSize)	<= 0) return;
+
+	if (m_pClientList[iClientH]->m_iAdminUserLevel < 2) {
+		// Admin user level이 낮아서 이 기능을 사용할 수 없다.
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ADMINUSERLEVELLOW, NULL, NULL, NULL, NULL);
+		return;
+	}
+
+	// v2.18 2002-10-15 GM 패스워드를 치지 않으면 동작하지 않는다. 
+#ifndef DEF_TESTSERVER	
+	if (m_pClientList[iClientH]->m_bIsAdminCommandEnabled == FALSE) return;
+#endif
+
+	ZeroMemory(cName, sizeof(cName));
+	ZeroMemory(cBuff, sizeof(cBuff));
+	memcpy(cBuff, pData, dwMsgSize);
+
+	pStrTok = new class CStrTok(cBuff, seps);
+	token = pStrTok->pGet();
+	token = pStrTok->pGet();
+
+	if (token != NULL) {
+		if (strlen(token) > 10)	
+			 memcpy(cName, token, 10);
+		else memcpy(cName, token, strlen(token));
+
+		// 같은 서버에 있는 플레이어 중 
+		for (i = 1; i < DEF_MAXCLIENTS; i++) 
+		if ((m_pClientList[i] != NULL) && (memcmp(m_pClientList[i]->m_cCharName, cName, 10) == 0)) {
+			// 같은 이름을 가진 플레이어를 찾았다. 
+			// 자기 자신이라면 할당하지 않는다.
+			if (i == iClientH) {
+				delete pStrTok;
+				return;
+			}
+
+#ifdef DEF_TAIWANLOG
+			short sX = 0,sY = 0 ;
+			char cMapName[22] ; 
+
+			ZeroMemory(cMapName,sizeof(cMapName)) ;
+
+			sX = m_pClientList[i]->m_sX ;
+			sY = m_pClientList[i]->m_sY ;
+			strcpy(cMapName, m_pClientList[i]->m_cMapName) ;
+
+			m_pClientList[i]->m_sX = m_pClientList[iClientH]->m_sX;
+			m_pClientList[i]->m_sY = m_pClientList[iClientH]->m_sY;
+			strcpy(m_pClientList[i]->m_cMapName, m_pClientList[iClientH]->m_cMapName) ;
+
+			_bItemLog(DEF_ITEMLOG_SUMMONPLAYER, i, m_pClientList[iClientH]->m_cCharName,NULL) ;
+
+			m_pClientList[i]->m_sY = sY ; 
+			m_pClientList[i]->m_sX = sX ;
+
+			strcpy(m_pClientList[i]->m_cMapName,cMapName) ;
+
+#endif 
+
+			RequestTeleportHandler(i, "2   ", m_pClientList[iClientH]->m_cMapName ,m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY);
+			delete pStrTok;
+			return;
+		}
+
+
+		wsprintf(G_cTxt, "GM Order(%s): PC(%s) Summoned to (%s)",m_pClientList[iClientH]->m_cCharName, cName,m_pClientList[iClientH]->m_cMapName);
+		bSendMsgToLS(MSGID_GAMEMASTERLOG, iClientH, NULL,G_cTxt);
+
+
+		// v2.12 다른 서버에 있는 캐릭터에게 메시지를 보내기 위함 
+		// 현재 서버에 없다. 다른 서버에 있는지 검사해야 한다.
+		ZeroMemory(cBuff, sizeof(cBuff));
+		cp = (char *)cBuff;
+		*cp = GSM_REQUEST_SUMMONPLAYER;
+		cp++;
+
+		memcpy(cp, cName, 10);
+		cp += 10;
+
+		memcpy(cp, m_pClientList[iClientH]->m_cMapName, 10);
+		cp += 10;
+
+
+		wp = (WORD *)cp;
+		*wp = m_pClientList[iClientH]->m_sX ;
+		cp += 2;
+
+		wp = (WORD *)cp;
+		*wp = m_pClientList[iClientH]->m_sY;
+		cp += 2;
+
+
+		bStockMsgToGateServer(cBuff, 25);
+
+		delete pStrTok;
+		return;
+	}
+ 
+	delete pStrTok;
+}
+
 void CGame::CheckSpecialEvent(int iClientH)
 {
  class CItem * pItem;
@@ -37986,6 +44420,8 @@ void CGame::CheckSpecialEvent(int iClientH)
  int   iEraseReq;
 
 	if (m_pClientList[iClientH] == NULL) return;
+	// 2002-8-6 일주년 반지 더 이상 주지 않는다. 
+	return ;
 
 	//v1.42 이벤트 아이템을 준다. 2000.8.1일 1주년 반지 수여 
 	if (m_pClientList[iClientH]->m_iSpecialEventID == 200081) {
@@ -37996,13 +44432,15 @@ void CGame::CheckSpecialEvent(int iClientH)
 			return;
 		}
 
+
 		ZeroMemory(cItemName, sizeof(cItemName));
-		strcpy(cItemName, "1주년기념반지"); 
+		strcpy(cItemName, DEF_ITEMNAME_MEMORIALRING); 
 		
 		pItem = new class CItem;
 		if (_bInitItemAttr(pItem, cItemName) == FALSE) {
 			// 구입하고자 하는 아이템이 아이템 리스트상에 없다. 구입이 불가능하다.
 			delete pItem;
+			pItem = NULL;
 		}
 		else {
 			if (_bAddClientItemList(iClientH, pItem, &iEraseReq) == TRUE) {
@@ -38028,6 +44466,154 @@ void CGame::CheckSpecialEvent(int iClientH)
 }
 
 
+// 2002-10-24 3주년 이벤트 : 3주년 기념 반지 준다.
+void CGame::CheckSpecialEventThirdYear(int iClientH)
+{
+ class		CItem * pItem;
+ char		cItemName[21];
+ int		iEraseReq;
+ SYSTEMTIME SysTime;
+
+ int iRet;
+ short * sp, sOwnerH;
+ char  * cp, cOwnerType, cData[100];
+ DWORD * dwp;
+ WORD  * wp;
+
+
+	if (m_pClientList[iClientH] == NULL)
+		return;
+
+	// 시민권이 있는 사용자만 준다.
+	if ( m_pClientList[iClientH]->m_cSide == 0)
+		return;
+
+	// 2002-10-31 레벨 15이상만
+	if ( m_pClientList[iClientH]->m_iLevel < 15 )
+		return;
+
+#ifndef DEF_TESTSERVER
+	// 기간 : 2002-11-01 ~ 2002-11-30 (11월 한달간)
+	GetLocalTime(&SysTime);
+	if( SysTime.wYear != 2002 || SysTime.wMonth != 11 )
+		return;
+#endif
+	
+	// v1.181 2002-10-24 3주년 이벤트 : 3주년 기념반지 제공
+	if (m_pClientList[iClientH]->m_iSpecialEventID != 20021101) {
+		
+		ZeroMemory(cItemName, sizeof(cItemName));
+		strcpy(cItemName, DEF_ITEMNAME_MEMORIALRING3);
+		
+		pItem = new class CItem;
+		if (_bInitItemAttr(pItem, cItemName) == FALSE) {
+			// 아이템 리스트상에 없다.
+			delete pItem;
+			pItem = NULL;
+		}
+		else {
+			if (_bAddClientItemList(iClientH, pItem, &iEraseReq) == TRUE) {
+				// 에러 방지용 코드
+				if (m_pClientList[iClientH]->m_iCurWeightLoad < 0) m_pClientList[iClientH]->m_iCurWeightLoad = 0;
+				
+				// testcode 로그파일에 기록한다.
+				wsprintf(G_cTxt, "(*) Get 3주년기념반지 : Char(%s)", m_pClientList[iClientH]->m_cCharName);
+				PutLogFileList(G_cTxt);
+
+				// 아이템에 사용자 고유 번호를 입력한다. 다른 캐릭터는 이 아이템을 사용할 수가 없다.
+				pItem->m_sTouchEffectType = DEF_ITET_UNIQUE_OWNER;
+				pItem->m_sTouchEffectValue1 = m_pClientList[iClientH]->m_sCharIDnum1;
+				pItem->m_sTouchEffectValue2 = m_pClientList[iClientH]->m_sCharIDnum2;
+				pItem->m_sTouchEffectValue3 = m_pClientList[iClientH]->m_sCharIDnum3;
+				pItem->m_cItemColor         = 9;
+
+				// 아이템 받았으므로 클리어.
+				m_pClientList[iClientH]->m_iSpecialEventID = 20021101;
+
+				// v1.41 희귀 아이템이라면 로그를 남긴다.
+				_bItemLog(DEF_ITEMLOG_GET, iClientH, (int) -1, pItem);
+
+				// 클라이언트에 알린다.
+				ZeroMemory(cData, sizeof(cData));
+
+				dwp  = (DWORD *)(cData + DEF_INDEX4_MSGID);
+				*dwp = MSGID_NOTIFY;
+				wp   = (WORD *)(cData + DEF_INDEX2_MSGTYPE);
+				*wp  = DEF_NOTIFY_ITEMOBTAINED;
+				
+				cp = (char *)(cData + DEF_INDEX2_MSGTYPE + 2);
+
+				// 1개 획득했다. <- 여기서 1개란 카운트를 말하는 것이 아니다
+				*cp = 1;
+				cp++;
+
+				memcpy(cp, pItem->m_cName, 20);
+				cp += 20;
+
+				dwp  = (DWORD *)cp;
+				*dwp = pItem->m_dwCount;
+				cp += 4;
+
+				*cp = pItem->m_cItemType;
+				cp++;
+
+				*cp = pItem->m_cEquipPos;
+				cp++;
+
+				*cp = (char)0; // 얻은 아이템이므로 장착되지 않았다.
+				cp++;
+
+				sp  = (short *)cp;
+				*sp = pItem->m_sLevelLimit;
+				cp += 2;
+
+				*cp = pItem->m_cGenderLimit;
+				cp++;
+
+				wp = (WORD *)cp;
+				*wp = pItem->m_wCurLifeSpan;
+				cp += 2;
+				 
+				wp = (WORD *)cp;
+				*wp = pItem->m_wWeight;
+				cp += 2;
+
+				sp  = (short *)cp;
+				*sp = pItem->m_sSprite;
+				cp += 2;
+
+				sp  = (short *)cp;
+				*sp = pItem->m_sSpriteFrame;
+				cp += 2;
+
+				*cp = pItem->m_cItemColor; // v1.4
+				cp++;
+
+				*cp = (char)pItem->m_sItemSpecEffectValue2; // v1.41 
+				cp++;
+				
+				dwp = (DWORD *)cp;
+				*dwp = pItem->m_dwAttribute;
+				cp += 4;
+
+				// 아이템 정보 전송 
+				iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, 53);
+
+				switch (iRet) {
+				case DEF_XSOCKEVENT_QUENEFULL:
+				case DEF_XSOCKEVENT_SOCKETERROR:
+				case DEF_XSOCKEVENT_CRITICALERROR:
+				case DEF_XSOCKEVENT_SOCKETCLOSED:
+					// 메시지를 보낼때 에러가 발생했다면 제거한다.
+					DeleteClient(iClientH, TRUE, TRUE);
+					return;
+				}
+			}
+		}
+	}
+
+} // CheckSpecialEventThirdYear
+
 
 void CGame::AdminOrder_DisconnectAll(int iClientH, char *pData, DWORD dwMsgSize)
 {
@@ -38035,7 +44621,12 @@ void CGame::AdminOrder_DisconnectAll(int iClientH, char *pData, DWORD dwMsgSize)
 	if (m_pClientList[iClientH] == NULL) return;
 	if ((dwMsgSize)	<= 0) return;
 
-	if (m_pClientList[iClientH]->m_iAdminUserLevel < 2) {
+	// v2.18 2002-10-15 GM 패스워드를 치지 않으면 동작하지 않는다. 
+#ifndef DEF_TESTSERVER	
+	if (m_pClientList[iClientH]->m_bIsAdminCommandEnabled == FALSE) return;
+#endif
+
+	if (m_pClientList[iClientH]->m_iAdminUserLevel < 4) {
 		// Admin user level이 낮아서 이 기능을 사용할 수 없다.
 		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ADMINUSERLEVELLOW, NULL, NULL, NULL, NULL);
 		return;
@@ -38044,15 +44635,15 @@ void CGame::AdminOrder_DisconnectAll(int iClientH, char *pData, DWORD dwMsgSize)
 	_iForcePlayerDisconect(DEF_MAXCLIENTS);
 }
 
-
 void CGame::NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType)
 {
  class CItem * pItem;
- char  cColor, cItemName[21];
+ char  cColor, cItemName[21], cTemp[20];
  BOOL  bIsGold;
- int   iGenLevel, iResult, iDiceResult;
+ int   i, iGenLevel, iResult, iT1, iT2, iT3, iItemID = 0;
  DWORD dwType, dwValue;
  double dTmp1, dTmp2, dTmp3;
+ SYSTEMTIME SysTime,SysTime2;
 
 	if (m_pNpcList[iNpcH] == NULL) return;
 	if ((cAttackerType != DEF_OWNERTYPE_PLAYER) || (m_pNpcList[iNpcH]->m_bIsSummoned == TRUE)) return;
@@ -38063,14 +44654,40 @@ void CGame::NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType
 	switch (m_pNpcList[iNpcH]->m_sType) {
 	case 21: // Guard
 	case 34: // Dummy
+	case 66: // Wyvern
 		return;
 	}
 
-	if (iDice(1,10000) >= 6500) {
-		// 35% 확률로 아이템 나온다. (35/100)
-		if (iDice(1,10000) <= 6000) {
-			// 35% 중 60%는 Gold다.
-			// Gold: (35/100) * (60/100) = 21%
+	// adamas(2002-10-28) : 아이템 이벤트 형식 변경
+	if( NpcDeadItemGeneratorWithItemEvent(iNpcH, sAttackerH, cAttackerType) == TRUE)
+		return;
+
+	// v2.19 2002-11-17 파티하면 아이템 떨어질 확률이 10% 높아진다. 
+	// v2.20 2002-2-22 아이템 확률 증가 
+	int iItemprobability = 8500 ;
+	if ((m_pClientList[sAttackerH] != NULL) && (m_pClientList[sAttackerH]->m_iPartyStatus != DEF_PARTYSTATUS_PROCESSING))
+	{
+		iItemprobability -= 900 ;
+	}
+
+
+#ifdef DEF_TESTSERVER
+	iItemprobability -= 3000 ;
+#endif
+	
+#ifdef DEF_ITEMDROPRATINGUP
+	iItemprobability -= DEF_ITEMDROPRATINGUP;
+#endif
+
+	// 아이템이 나올 확률 약간 증가 시킴 
+	if (iDice(1,10000) >= iItemprobability) 
+	{
+		// 10% 확률로 아이템 나온다. (10/100)
+		if (iDice(1,10000) <= 6500) {
+			// 10% 중 50%는 Gold다.
+			// Gold: (10/100) * (50/100) = 5%
+			// v2.12 2002-2-6 성후니변경 12% -> 5%
+
 			strcpy(cItemName, "Gold");
 			// 아이템을 만들고 
 			pItem = new class CItem;
@@ -38078,8 +44695,10 @@ void CGame::NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType
 				delete pItem;
 				return;	
 			}
-			// NPC 사망시 Gold 발생량
-			pItem->m_dwCount = (DWORD)(iDice(1, m_pNpcList[iNpcH]->m_iExpDice * 2)); //(iDice(1, m_pNpcList[iNpcH]->m_iExpDice * 3) + m_pNpcList[iNpcH]->m_iExpDice);
+			// v2.03 925 NPC 사망시 Gold 발생량 조정됨
+			// v2.04 1116 NPC 사망시 Gold 발생량 두배로 조정
+			pItem->m_dwCount = (DWORD)(iDice(1, m_pNpcList[iNpcH]->m_iExpDice*2)) + m_pNpcList[iNpcH]->m_iExpDice ; 
+			//(iDice(1, m_pNpcList[iNpcH]->m_iExpDice * 3) + m_pNpcList[iNpcH]->m_iExpDice);
 
 			//v1.42 Gold 증가 
 			if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sAttackerH]->m_iAddGold != NULL)) {
@@ -38088,56 +44707,233 @@ void CGame::NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType
 				dTmp3 = (dTmp1/100.0f)*dTmp2;
 				pItem->m_dwCount += (int)dTmp3;
 			}
+
+#ifdef DEF_TESTSERVER
+			pItem->m_dwCount = (pItem->m_dwCount * 10);
+#endif
+
 		}
 		else {
-			// 35% 중 40%는 물약 혹은 희귀 아이템이다. 
+		// 20% 중 40%는 물약 혹은 희귀 아이템이다. 
 			if (iDice(1,10000) <= 9000) {
-				// 40%중 93%는 물약이다.
-				// 물약류: (35/100) * (40/100) * (90/100) = 12.6%
-				iResult = iDice(1,10000);
-				if ((iResult >= 1) && (iResult <= 4999))          dwValue = 1;
-				else if ((iResult >= 5000) && (iResult <= 7499))  dwValue = 2;
-				else if ((iResult >= 7500) && (iResult <= 8749))  dwValue = 3;
-				else if ((iResult >= 8750) && (iResult <= 9374))  dwValue = 4;
-				else if ((iResult >= 9375) && (iResult <= 9687))  dwValue = 5;
-				else if ((iResult >= 9688) && (iResult <= 9843))  dwValue = 6;
-				else if ((iResult >= 9844) && (iResult <= 9921))  dwValue = 7;
-				else if ((iResult >= 9922) && (iResult <= 10000)) dwValue = 8;
-							
+				// 40%중 90%는 물약이다.
+				// 물약류: (20/100) * (40/100) * (90/100) = 7.2%
+				// v2.04 성후니변경 12.6% -> 7.2%  작은 물약이 나오는 확률을 낮추는 대신 큰물약이 
+				// 나올 확률을 높인다. 전체 물약이 나올 확률이 낮아 졌으므로 초강이나 젬스톤의 나올 
+				// 확률은 높인다.
+				iResult = iDice(1,10000);  //v2.19 2002-12-9 루돌프 추가 관련
+				if ((iResult >= 1) && (iResult <= 3000))          dwValue = 1;   
+				else if ((iResult >= 3001) && (iResult <= 4000))  dwValue = 2;
+				else if ((iResult >= 4001) && (iResult <= 5500))  dwValue = 3;
+				else if ((iResult >= 5501) && (iResult <= 7000))  dwValue = 4;
+				else if ((iResult >= 7001) && (iResult <= 8500))  dwValue = 5;
+				else if ((iResult >= 8501) && (iResult <= 9100))  dwValue = 6;
+				else if ((iResult >= 9101) && (iResult <= 9900))  dwValue = 7;
+				else if ((iResult >= 9901) && (iResult <= 10000)) dwValue = 8;
+//				else if ((iResult >= 10001) && (iResult <= 12000)) dwValue = 9;	//v2.19 2002-12-9 루돌프 추가 관련
+				// v2.17 2002-7-31 아이템을 아이템 고유번호로 생성할 수 있게 한다.
 				switch (dwValue) {
-				case 1: 
-					switch (iDice(1,2)) {
-					case 1: strcpy(cItemName, "녹색시약");   break;
-					case 2: strcpy(cItemName, "붉은색시약"); break;
+				case 1: iItemID = 95 ;  break; // "녹색시약"
+				case 2: iItemID = 91 ;  break; // "붉은색시약"  
+				case 3: iItemID = 93 ;  break; // "푸른색시약"
+				case 4: iItemID = 96 ;  break; // "큰녹색시약"
+				case 5: iItemID = 92 ;  break; // "큰붉은색시약"
+				case 6: iItemID = 94 ;  break; // "큰푸른색시약"
+				case 7: // v2.172
+					if (iDice(1,3) == 1) 
+						iItemID = 390; // "강력녹색시약"
+					else iItemID = 95 ; // "녹색시약"
+					break; 
+				case 8:
+
+#ifdef DEF_CONSULTATION
+					switch (iDice(1,8)) {
+					case 1:
+					case 2: 
+					case 3:
+					case 4: 
+					case 5: // v2.172
+					case 6: // v2.172
+						if (iDice(1,50) == 1) 
+							iItemID = 391; // "초강력녹색시약"
+						else iItemID = 95 ; // "녹색시약"
+						break;
+						
+					case 7:
+					case 8: 
+						switch (iDice(1,8)) { // v2.172
+						case 1: iItemID = 391; // "초강력녹색시약"
+							break;
+							
+						case 2: if (iDice(1,200) == 1) 
+									iItemID = 652; // "적색소원구"
+							else iItemID = 651; // "녹색소원구"
+							break;
+						case 3: if (iDice(1,200) == 3) 
+									iItemID = 653; // "황색소원구"
+							else iItemID = 651; // "녹색소원구"
+							break;
+						case 4: if (iDice(1,300) == 5) 
+									iItemID = 654; // "청색소원구"
+							else iItemID = 391; // "초강력녹색시약"
+							break;
+						case 5: 
+							if (iDice(1,100000) == 11) 
+								iItemID = 655; // "진주색소원구"
+							else iItemID = 391; // "초강력녹색시약"
+							break; 
+						case 6:
+							if (iDice(1,50) == 3) 
+								iItemID = 656;  // "스톤오브제리마
+							else iItemID = 391; // "초강력녹색시약"
+							break;
+						case 7:
+							if (iDice(1,50) == 3) 
+								iItemID = 657;  // "스톤오브메리엔
+							else iItemID = 391; // "초강력녹색시약"
+							break;
+							
+						case 8:
+							iItemID = 95; // "녹색시약"
+							break;
+						}
+
+#else // #ifdef DEF_CONSULTATION
+					switch (iDice(1,8)) {
+					case 1:
+					case 2: iItemID = 650; // "스톤오브새크리파이스"
+						break;
+					case 3:
+					case 4: 
+					case 5: // v2.172
+					case 6: // v2.172
+						if (iDice(1,3) == 1) 
+							iItemID = 391; // "초강력녹색시약"
+						else iItemID = 95 ; // "녹색시약"
+						break;
+						
+					case 7:
+					case 8: 
+#ifdef DEF_BALLEVENT  // v2.19 2002-12-20 대만 소원구 이벤트 관련 설정 따로 함 
+						switch (iDice(1,8)) { // v2.172
+						case 1: if (iDice(1,50) == 11) 
+									iItemID = 651; // "녹색소원구"
+							else iItemID = 95; // "녹색시약"
+							break;
+							
+						case 2: if (iDice(1,50) == 13) 
+									iItemID = 652; // "적색소원구"
+							else iItemID = 95; // "녹색시약"
+							break;
+						case 3: if (iDice(1,50) == 13) 
+									iItemID = 653; // "황색소원구"
+							else iItemID = 95; // "녹색시약"
+							break;
+						case 4: if (iDice(1,50) == 33) 
+									iItemID = 654; // "청색소원구"
+							else iItemID = 95; // "녹색시약"
+							break;
+						case 5: 
+							if (iDice(1,50) == 11) 
+								iItemID = 655; // "진주색소원구"
+							else iItemID = 95; // "녹색시약"
+							break; 
+						case 6:
+							if (iDice(1,50) == 3) 
+								iItemID = 656;  // "스톤오브제리마
+							else iItemID = 391; // "초강력녹색시약"
+							break;
+						case 7:
+							if (iDice(1,50) == 3) 
+								iItemID = 657;  // "스톤오브메리엔
+							else iItemID = 391; // "초강력녹색시약"
+							break;
+						case 8:
+							iItemID = 95; // "녹색시약"
+							break;
+						}
+#else 
+						switch (iDice(1,8)) { // v2.172
+						case 1: 
+						case 2: 
+						case 3:
+						case 4:
+						case 5:
+							iItemID = 95; // "녹색시약"
+							break ;
+						case 6:
+							if (iDice(1,50) == 3) 
+								iItemID = 656;  // "스톤오브제리마
+							else iItemID = 391; // "초강력녹색시약"
+							break;
+						case 7:
+							if (iDice(1,50) == 3) 
+								iItemID = 657;  // "스톤오브메리엔
+							else iItemID = 391; // "초강력녹색시약"
+							break;
+						case 8:
+							break;
+						}
+
+#endif // #ifdef DEF_BALLEVENT						
+
+#endif // #ifdef DEF_CONSULTATION
 					}
-					break;
-				case 2: strcpy(cItemName, "붉은색시약"); break;
-				case 3: strcpy(cItemName, "푸른색시약"); break;
-				case 4: strcpy(cItemName, "큰녹색시약"); break;
-				case 5: strcpy(cItemName, "큰붉은색시약"); break;
-				case 6: strcpy(cItemName, "큰푸른색시약"); break;
-				case 7: strcpy(cItemName, "강력녹색시약"); break;
-				case 8: 
-					if (iDice(1,8) == 3) 
-						 strcpy(cItemName, "스톤오브새크리파이스"); 
-					else strcpy(cItemName, "초강력녹색시약"); 
-					break;
+//					case 9: //v2.19 2002-12-9 루돌프 추가 관련
+//#ifdef DEF_CHINESECANDYEVENT
+//						GetLocalTime(&SysTime2);
+//						if( SysTime2.wYear == 2002 && SysTime2.wMonth == 12 ) {
+//							if(m_pNpcList[iNpcH]->m_sType == 55 || m_pNpcList[iNpcH]->m_sType == 61)  {					
+//								switch( iDice(1, 3) ) {
+//								case 1: iItemID = 780; break; // 붉은색사탕 
+//								case 2: iItemID = 781; break; // 푸른색사탕
+//								case 3: iItemID = 782; break; // 녹색사탕
+//								}
+//							}
+//						}
+//						else
+//						{
+//						}
+//#else
+//						if(m_pNpcList[iNpcH]->m_sType == 55 || m_pNpcList[iNpcH]->m_sType == 61)  {					
+//							switch( iDice(1, 3) ) {
+//							case 1: iItemID = 780; break; // 붉은색사탕 
+//							case 2: iItemID = 781; break; // 푸른색사탕
+//							case 3: iItemID = 782; break; // 녹색사탕
+//							}
+//						}
+//#endif
+//						break;
+						
 				}
+	 		// 2002-10-31 3주년 이벤트 기간동안 다른 소원구는 생성되지 않는다.
+			/*
+			if( iItemID >= 651 && iItemID <= 655 )
+				{
+					GetLocalTime(&SysTime);
+					if( SysTime.wYear == 2002 && SysTime.wMonth == 11 && SysTime.wDay >=1 && SysTime.wDay <= 7 )
+						return;
+				}
+				*/ // 2002-11-08 제거
 
 				// 아이템 생성, 초기화
 				pItem = new class CItem;
-				if (_bInitItemAttr(pItem, cItemName) == FALSE) {
+				if (_bInitItemAttr(pItem, iItemID) == FALSE) {
 					delete pItem;
 					return;	
 				}
+
+
 			}
 			else {
-				//  희귀 아이템이다. (35/100) * (40/100) * (10/100) = 1.4%
+				//  희귀 아이템이다. (20/100) * (40/100) * (10/100) = 0.8%
 				// 죽은 몬스터에 따른 레벨을 계산.
 				switch (m_pNpcList[iNpcH]->m_sType) {
 				case 10: // Slime
 				case 16: // Giant-Ant
 				case 22: // Amphis 
+				case 55: // Rabbit	//v2.19 2002-12-9
+				case 56: // Cat 
 					iGenLevel = 1;	
 					break;
 	
@@ -38153,22 +44949,30 @@ void CGame::NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType
 					iGenLevel = 3;	
 					break;		
 				
+				case 61: //v2.19 2002-12-9 루돌프 추가 관련
 				case 27: // hellhound
 					iGenLevel = 4;
 					break;		
 
 				case 13: // Cyclops
 				case 28: // Troll
+				case 53: // Beholder
+				// 2002-09-12 #1 추가 몬스터 아이템 설정
+				case 60: // Cannibal-Plant
+				case 62: // DireBoar
 					iGenLevel = 5;
 					break;
 
 				case 29: // Orge
 				case 33: // WereWolf
 				case 48: // Stalker
+				case 54: // Dark-Elf
+				case 65: // Ice-Golem
 					iGenLevel = 6;
 					break;
 
 				case 30: // Liche
+				case 63: // Frost
 					iGenLevel = 7;
 					break;
 				
@@ -38176,94 +44980,137 @@ void CGame::NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType
 				case 32: // Unicorn
 				case 49: // Hellclaw
 				case 50: // Tigerworm
+				case 52: // Gagoyle
 					iGenLevel = 8;
 					break;
+
+				// 2002-09-12 #1 추가 몬스터 아이템 설정
+				case 58: // Mountain-Giant
+					if( iDice(1,3) == 1 )
+						iGenLevel = 9;
+					break;
+
+				case 59: // Ettin
+					if( iDice(1,2) == 1 )
+						iGenLevel = 10;
+					break;
+				
 				}	
 				
 				if (iGenLevel == 0) return;
 				
+
+				
+
 				// 먼저 만들 아이템을 결정: 
 				// 무기류 혹은 방어구
-				if (iDice(1,10000) <= 6000) {
-					// 만들어지는 아이템의 60%는 무기류
-					// v2.03 마법사용 무기는 나오지 않는다.
-					if (iDice(1,10000) <= 10000) {
+				if (iDice(1,10000) <= 6500) {
+					// 만들어지는 아이템의 65%는 무기류
+					if (iDice(1,10000) <= 8000) {
 						// 무기 중 70%는 전사용 무기.
 						switch (iGenLevel) {
 						case 1:
 							switch (iDice(1,3)) {
-							case 1: strcpy(cItemName, "단검"); break;
-							case 2: strcpy(cItemName, "쇼트-소드"); break;
-							case 3: strcpy(cItemName, "라이트-액스"); break;
+							case 1: iItemID = 1; break;   // "단검"
+							case 2: iItemID = 8; break;   // "쇼트-소드"
+							case 3: iItemID = 59; break;  // "라이트-액스"
 							}
 							break;
 							
 						case 2:
 							switch (iDice(1,6)) {
-							case 1: strcpy(cItemName, "망고슈"); break;
-							case 2: strcpy(cItemName, "그라디우스"); break;
-							case 3: strcpy(cItemName, "색슨-액스"); break;
-							case 4: strcpy(cItemName, "토마호크"); break;
-							case 5: strcpy(cItemName, "세이버"); break;
-							case 6: strcpy(cItemName, "에스터크"); break;
+							case 1: iItemID = 12; break;  //"망고슈"
+							case 2: iItemID = 15; break;  //"그라디우스"
+							case 3: iItemID = 65; break;  //"색슨-액스"
+							case 4: iItemID = 62; break;  // "토마호크"
+							case 5: iItemID = 23; break;  // "세이버"
+							case 6: iItemID = 31; break;  //"에스터크"
 							}
 							break;
 							
 						case 3:
 							switch (iDice(1,4)) {
-							case 1: strcpy(cItemName, "롱-소드"); break;
-							case 2: strcpy(cItemName, "더블액스"); break;
-							case 3: strcpy(cItemName, "세이버"); break;
-							case 4: strcpy(cItemName, "에스터크"); break;
+							case 1: iItemID = 17; break;  //"롱-소드"
+							case 2: iItemID = 68; break;  //"더블액스"
+							case 3: iItemID = 23; break;  //"세이버"
+							case 4: iItemID = 31; break;  //"에스터크"
 							}
 							break;
 									
 						case 4:
 							switch (iDice(1,5)) {
-							case 1: strcpy(cItemName, "세이버"); break;
-							case 2: strcpy(cItemName, "시미타"); break;
-							case 3: strcpy(cItemName, "팔치온"); break;
-							case 4: strcpy(cItemName, "에스터크"); break;
-							case 5: strcpy(cItemName, "레이피어"); break;
+							case 1: iItemID = 23; break;   //"세이버"
+							case 2: iItemID = 25; break;   //"시미타"
+							case 3: iItemID = 28; break;   //"팔치온"
+							case 4: iItemID = 31; break;   //"에스터크"
+							case 5: iItemID = 34; break;   //"레이피어"
 							}
 							break;
 									
 						case 5:
 							switch (iDice(1,3)) {
-							case 1: strcpy(cItemName, "에스터크"); break;
-							case 2: strcpy(cItemName, "레이피어"); break;
-							case 3: strcpy(cItemName, "워-액스"); break;
+							case 1: iItemID = 31; break;   //"에스터크"
+							case 2: iItemID = 34; break;   //"레이피어"
+							case 3: iItemID = 71; break;   //"워-액스"
 							}
 							break;
 										
 						case 6:
-							switch (iDice(1,5)) {
-							case 1: strcpy(cItemName, "그레이트-소드"); break;
-							case 2: strcpy(cItemName, "플램버그"); break;
-							case 3: strcpy(cItemName, "클레이모어"); break;
-							case 4: strcpy(cItemName, "에스터크"); break;
-							case 5: strcpy(cItemName, "레이피어"); break;
+							switch (iDice(1,6)) {
+							case 1: iItemID = 50; break;   //"그레이트-소드"
+							case 2: iItemID = 54; break;   //"플램버그"
+							case 3: iItemID = 46; break;   //"클레이모어"
+							case 4: iItemID = 31; break;   //"에스터크"
+							case 5: iItemID = 34; break;   //"레이피어"
+							case 6: iItemID = 617; break;  //"콤포지트-보우"
 							}
 							break;
 											
 						case 7:
 							switch (iDice(1,4)) {
-							case 1: strcpy(cItemName, "그레이트-소드"); break;
-							case 2: strcpy(cItemName, "플램버그"); break;
-							case 3: strcpy(cItemName, "에스터크"); break;
-							case 4: strcpy(cItemName, "레이피어"); break;
+							case 1: iItemID = 50; break;   //"그레이트-소드"
+							case 2: iItemID = 54; break;   //"플램버그"
+							case 3: iItemID = 31; break;   //"에스터크"
+							case 4: iItemID = 34; break;   //"레이피어"
 							}
 							break;
 												
 						case 8:
-							switch (iDice(1,5)) {
-							case 1: strcpy(cItemName, "그레이트-소드"); break;
-							case 2: strcpy(cItemName, "플램버그"); break;
-							case 3: strcpy(cItemName, "배틀-액스"); break;
-							case 4: strcpy(cItemName, "에스터크"); break;
-							case 5: strcpy(cItemName, "레이피어"); break;
+							switch (iDice(1,7)) {
+							case 1: iItemID = 50; break;   //"그레이트-소드"
+							case 2: iItemID = 54; break;   //"플램버그"
+							case 3: iItemID = 560; break;  //"배틀-액스"
+							case 4: iItemID = 31; break;   //"에스터크"
+							case 5: iItemID = 34; break;   //"레이피어"
+							case 6: iItemID = 55; break;   //"플램버그+1"
+							case 7: iItemID = 615; break;  //"자이안트-소드"
 							}
 							break;
+
+						case 9: // Mountain-Giant
+							switch( iDice(1, 6) ) {
+							case 1: iItemID = 23; break;   //"세이버"
+							case 2: iItemID = 25; break;   //"시미타"
+							case 3: iItemID = 28; break;   //"팔치온"
+							case 4: iItemID = 31; break;   //"에스터크"
+							case 5: iItemID = 34; break;   //"레이피어"
+							case 6: iItemID = 760; break;  //"헤머"
+							default: break;
+							}
+							break;
+
+						case 10: // Ettin
+							switch( iDice(1, 5) ) {
+							case 1: iItemID = 46; break;   //"클레이모어"
+							case 2: iItemID = 31; break;   //"에스터크"
+							case 3: iItemID = 34; break;   //"레이피어"
+							case 4: iItemID = 760; break;	// "헤머"
+							case 5: iItemID = 761; break;	// "베틀-헤머"
+							default: break;
+							}
+							break;
+						
+
 						}
 					}
 					else {
@@ -38271,47 +45118,45 @@ void CGame::NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType
 						switch (iGenLevel) {
 						case 1:	break;
 						case 2:
-						case 3:	strcpy(cItemName, "매직스탭(MS0)"); break;
+						case 3:	iItemID = 258; break;  // "매직스탭(MS0)"
 						case 4:
 						case 5:	
-						case 6: strcpy(cItemName, "매직스탭(MS10)"); break;
+						case 6: iItemID = 257; break;  // "매직스탭(MS10)"
 						case 7:
-						case 8:	strcpy(cItemName, "매직스탭(MS20)"); break;
+						case 8:	iItemID = 256; break;  // "매직스탭(MS20)"
 						}
 					}
 				}
 				else {
-					// 만들어지는 아이템의 40%는 방어구류
+					// 만들어지는 아이템의 35%는 방어구류
 					switch (iDice(1, iGenLevel)) {
 					case 1:
 					case 2:
 						switch (iDice(1,2)) {
-						case 1: strcpy(cItemName, "우드-실드"); break;
-						case 2: strcpy(cItemName, "타지-실드"); break;
+						case 1: iItemID = 79; break; // "우드-실드"
+						case 2: iItemID = 81; break; // "타지-실드"
 						}
 						break;
 
 					case 3:
-						switch (iDice(1,3)) {
-						case 1: strcpy(cItemName, "체인호스(M)"); break;
-						case 2: strcpy(cItemName, "체인호스(W)"); break;
-						case 3: strcpy(cItemName, "타지-실드"); break;
-						}
+						iItemID = 81;  break;   // "타지-실드"
 						break;
 														
 					case 4:
-						switch (iDice(1,3)) {
-						case 1: strcpy(cItemName, "호버크(M)"); break;
-						case 2: strcpy(cItemName, "호버크(W)"); break;
-						case 3: strcpy(cItemName, "브론즈-실드"); break;
+						switch (iDice(1,5)) {
+						case 1: iItemID = 454; break; // "호버크(M)"
+						case 2: iItemID = 472; break; // "호버크(W)"
+						case 3: iItemID = 461; break; // "체인호스(M)"
+						case 4: iItemID = 482; break; // "체인호스(W)"
+						case 5: iItemID = 83;  break; // "브론즈-실드"
 						}
 						break;
 															
 					case 5:					
 						switch (iDice(1,3)) {
-						case 1: strcpy(cItemName, "레더아머(M)"); break;
-						case 2: strcpy(cItemName, "레더아머(W)"); break;
-						case 3: strcpy(cItemName, "아이언-실드"); break;
+						case 1: iItemID = 455; break; // "레더아머(M)"
+						case 2: iItemID = 475; break; // "레더아머(W)"
+						case 3: iItemID = 84;  break; // "아이언-실드"
 						}
 						break;
 														
@@ -38319,17 +45164,17 @@ void CGame::NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType
 						switch (iDice(1,3)) {
 						case 1: 
 							switch (iDice(1,2)) {
-							case 1: strcpy(cItemName, "체인메일(M)"); break;
-							case 2: strcpy(cItemName, "체인메일(W)"); break;
+							case 1: iItemID = 456; break; // "체인메일(M)"
+							case 2: iItemID = 476; break; // "체인메일(W)"
 							}
 							break;
 						case 2: 
 							switch (iDice(1,2)) {
-							case 1: strcpy(cItemName, "플레이트레깅스(M)"); break;
-							case 2: strcpy(cItemName, "플레이트레깅스(W)"); break;
+							case 1: iItemID = 458; break; // "플레이트레깅스(M)"
+							case 2: iItemID = 478; break; // "플레이트레깅스(W)"
 							}
 							break;
-						case 3: strcpy(cItemName, "라지-실드"); break;
+						case 3: iItemID = 85; break; // "라지-실드"
 						}
 						break;
 											
@@ -38337,46 +45182,56 @@ void CGame::NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType
 						switch (iDice(1,6)) {
 						case 1: 
 							switch (iDice(1,2)) {
-							case 1: strcpy(cItemName, "스케일메일(M)"); break;
-							case 2: strcpy(cItemName, "스케일메일(W)"); break;
+							case 1: iItemID = 457; break; // "스케일메일(M)"
+							case 2: iItemID = 477; break; // "스케일메일(W)"
 							}
 							break;
 						case 2: 
 							switch (iDice(1,2)) {
-							case 1: strcpy(cItemName, "플레이트메일(M)"); break;
-							case 2: strcpy(cItemName, "플레이트메일(W)"); break;
+							case 1: iItemID = 458; break; // "플레이트메일(M)"
+							case 2: iItemID = 478; break; // "플레이트메일(W)"
 							}
 							break;
-						case 3: strcpy(cItemName, "나이트-실드"); break;
-						case 4: strcpy(cItemName, "타워-실드"); break;
+						case 3: iItemID = 86; break; // "나이트-실드"
+						case 4: iItemID = 87; break; // "타워-실드"
 						case 5:
 							switch (iDice(1,2)) {
-							case 1: strcpy(cItemName, "헬름(M)"); break;
-							case 2: strcpy(cItemName, "헬름(W)"); break;
+							case 1: iItemID = 600; break; // "헬름(M)"
+							case 2: iItemID = 602; break; // "헬름(W)"
 							}
 							break;
 						case 6: switch (iDice(1,2)) {
-							case 1: strcpy(cItemName, "풀-헬름(M)"); break;
-							case 2: strcpy(cItemName, "풀-헬름(W)"); break;
+							case 1: iItemID = 601; break; // "풀-헬름(M)"
+							case 2: iItemID = 603; break; // "풀-헬름(W)"
 							}
 							break;
 						}
 						break;
 												
-					case 8:	strcpy(cItemName, "망토"); break;
+					case 8:	iItemID = 402; break; // "망토"
 					}
 				}
-				
-				// 0-None 1-필살기대미지추가 2-중독효과 3-정의의  
-				// 5-민첩의 6-가벼운 7-예리한 8-강화된 9-고대문명의 10-마법 성공의
-				
+
+				//2003-02-10 제대로된값이 아니면 리턴...
+				if(0 == iItemID)
+					return;
+
 				// 아이템을 만들고 
 				pItem = new class CItem;
 				// 기본 특성으로 아이템 생성 
-				if (_bInitItemAttr(pItem, cItemName) == FALSE) {
+				if (_bInitItemAttr(pItem, iItemID) == FALSE) {
 					delete pItem;
 					return;	
 				}
+
+				// adamas(2002-10-24) : item event에 처리된 것중 type이 0인 것은 아이템이 생성되지 않는다.
+				if( bCheckInItemEventList(iItemID, iNpcH) == TRUE ) {
+					delete pItem;
+					return;
+				}
+
+				// 0-None 1-필살기대미지추가 2-중독효과 3-정의의  
+				// 5-민첩의 6-가벼운 7-예리한 8-강화된 9-고대문명의 10-마법 성공의 11-마나변환의 12-필살 충전의
 				
 				if (pItem->m_sItemEffectType == DEF_ITEMEFFECTTYPE_ATTACK) {
 					// 공격 무기류에 붙을 수 있는 접두사를 선택 
@@ -38421,20 +45276,22 @@ void CGame::NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType
 					// 가벼운, 강화된, 필살의, 민첩의, 정의의, 중독의, 예리한, 고대문명의
 					// 아이템 Main 특성치 정도값 입력 
 					
-					iResult = iDice(1, 29348);
+					// 아이템 Sub 특성치 정도값 입력 
+					iResult = iDice(1, 30000);
 					if ((iResult >= 1) && (iResult < 10000))           dwValue = 1;  // 10000/29348 = 34%
-					else if ((iResult >= 10000) && (iResult < 16600))  dwValue = 2;  // 6600/29348 = 22.4%
-					else if ((iResult >= 16600) && (iResult < 20956))  dwValue = 3;  // 4356/29348 = 14.8%
-					else if ((iResult >= 20956) && (iResult < 23830))  dwValue = 4;  // 2874/29348 = 9.7%
-					else if ((iResult >= 23830) && (iResult < 25727))  dwValue = 5;  // 1897/29348 = 6.4%
-					else if ((iResult >= 25727) && (iResult < 26979))  dwValue = 6;  // 1252/29348 = 4.2%
-					else if ((iResult >= 26979) && (iResult < 27805))  dwValue = 7;  // 826/29348 = 2.8%
-					else if ((iResult >= 27805) && (iResult < 28350))  dwValue = 8;  // 545/29348 = 1.85%
-					else if ((iResult >= 28350) && (iResult < 28710))  dwValue = 9;  // 360/29348 = 1.2%
-					else if ((iResult >= 28710) && (iResult < 28947))  dwValue = 10; // 237/29348 = 0.8%
-					else if ((iResult >= 28947) && (iResult < 29103))  dwValue = 11; // 156/29348 = 0.5%
-					else if ((iResult >= 29103) && (iResult < 29206))  dwValue = 12; // 103/29348 = 0.3%
-					else if ((iResult >= 29206) && (iResult < 29274))  dwValue = 13; // 68/29348 = 0.2%
+					else if ((iResult >= 10000) && (iResult < 17400))  dwValue = 2;  // 6600/29348 = 22.4%
+					else if ((iResult >= 17400) && (iResult < 22400))  dwValue = 3;  // 4356/29348 = 14.8%
+					else if ((iResult >= 22400) && (iResult < 25400))  dwValue = 4;  // 2874/29348 = 9.7%
+					else if ((iResult >= 25400) && (iResult < 27400))  dwValue = 5;  // 1897/29348 = 6.4%
+					else if ((iResult >= 27400) && (iResult < 28400))  dwValue = 6;  // 1252/29348 = 4.2%
+					else if ((iResult >= 28400) && (iResult < 28900))  dwValue = 7;  // 826/29348 = 2.8%
+					else if ((iResult >= 28900) && (iResult < 29300))  dwValue = 8;  // 545/29348 = 1.85%
+					else if ((iResult >= 29300) && (iResult < 29600))  dwValue = 9;  // 360/29348 = 1.2%
+					else if ((iResult >= 29600) && (iResult < 29800))  dwValue = 10; // 237/29348 = 0.8%
+					else if ((iResult >= 29800) && (iResult < 29900))  dwValue = 11; // 156/29348 = 0.5%
+					else if ((iResult >= 29900) && (iResult < 29970))  dwValue = 12; // 103/29348 = 0.3%
+					else if ((iResult >= 29970) && (iResult <= 30000))  dwValue = 13; // 68/29348 = 0.1%
+					else dwValue = 1; // v2.03 906
 
 					// 무기의 Main 특성치에 따라 수치 보정 
 					switch (dwType) {
@@ -38451,6 +45308,8 @@ void CGame::NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType
 						if (dwValue <= 2) dwValue = 2;
 						break; 
 					}
+					// v2.03 912 아이템 수준이 2이하일때 특성치 최대값은 7
+					if ((iGenLevel <= 2) && (dwValue > 7)) dwValue = 7;
 				
 					// 아이템 Main 특성치, 값 입력
 					pItem->m_dwAttribute = NULL;
@@ -38474,20 +45333,225 @@ void CGame::NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType
 						else if ((iResult >= 9500) && (iResult <= 10000)) dwType = 11;
 											
 						// 아이템 Sub 특성치 정도값 입력 
-						iResult = iDice(1, 29348);
+						iResult = iDice(1, 30000);
 						if ((iResult >= 1) && (iResult < 10000))           dwValue = 1;  // 10000/29348 = 34%
-						else if ((iResult >= 10000) && (iResult < 16600))  dwValue = 2;  // 6600/29348 = 22.4%
-						else if ((iResult >= 16600) && (iResult < 20956))  dwValue = 3;  // 4356/29348 = 14.8%
-						else if ((iResult >= 20956) && (iResult < 23830))  dwValue = 4;  // 2874/29348 = 9.7%
-						else if ((iResult >= 23830) && (iResult < 25727))  dwValue = 5;  // 1897/29348 = 6.4%
-						else if ((iResult >= 25727) && (iResult < 26979))  dwValue = 6;  // 1252/29348 = 4.2%
-						else if ((iResult >= 26979) && (iResult < 27805))  dwValue = 7;  // 826/29348 = 2.8%
-						else if ((iResult >= 27805) && (iResult < 28350))  dwValue = 8;  // 545/29348 = 1.85%
-						else if ((iResult >= 28350) && (iResult < 28710))  dwValue = 9;  // 360/29348 = 1.2%
-						else if ((iResult >= 28710) && (iResult < 28947))  dwValue = 10; // 237/29348 = 0.8%
-						else if ((iResult >= 28947) && (iResult < 29103))  dwValue = 11; // 156/29348 = 0.5%
-						else if ((iResult >= 29103) && (iResult < 29206))  dwValue = 12; // 103/29348 = 0.3%
-						else if ((iResult >= 29206) && (iResult < 29274))  dwValue = 13; // 68/29348 = 0.2%
+						else if ((iResult >= 10000) && (iResult < 17400))  dwValue = 2;  // 6600/29348 = 22.4%
+						else if ((iResult >= 17400) && (iResult < 22400))  dwValue = 3;  // 4356/29348 = 14.8%
+						else if ((iResult >= 22400) && (iResult < 25400))  dwValue = 4;  // 2874/29348 = 9.7%
+						else if ((iResult >= 25400) && (iResult < 27400))  dwValue = 5;  // 1897/29348 = 6.4%
+						else if ((iResult >= 27400) && (iResult < 28400))  dwValue = 6;  // 1252/29348 = 4.2%
+						else if ((iResult >= 28400) && (iResult < 28900))  dwValue = 7;  // 826/29348 = 2.8%
+						else if ((iResult >= 28900) && (iResult < 29300))  dwValue = 8;  // 545/29348 = 1.85%
+						else if ((iResult >= 29300) && (iResult < 29600))  dwValue = 9;  // 360/29348 = 1.2%
+						else if ((iResult >= 29600) && (iResult < 29800))  dwValue = 10; // 237/29348 = 0.8%
+						else if ((iResult >= 29800) && (iResult < 29900))  dwValue = 11; // 156/29348 = 0.5%
+						else if ((iResult >= 29900) && (iResult < 29970))  dwValue = 12; // 103/29348 = 0.3%
+						else if ((iResult >= 29970) && (iResult <= 30000))  dwValue = 13; // 68/29348 = 0.1%
+						else dwValue = 1; // v2.03 906
+
+						// 무기의 Sub 특성치에 따라 수치 보정 
+						switch (dwType) {
+						case 2: // 공격명중 최저 +21%
+							if (dwValue <= 3) dwValue = 3;
+							break; 
+						case 10: // 연속 타격 최저 +1 최대 7
+							if (dwValue > 7) dwValue = 7; 
+							break; 
+						case 11: // Exp는 무조건 +20%
+							dwValue = 2;
+							break; 
+						case 12: // Gold는 무조건 +50%
+							dwValue = 5;
+							break; 
+						}
+						// v2.03 912 아이템 수준이 2이하일때 특성치 최대값은 7
+						if ((iGenLevel <= 2) && (dwValue > 7)) dwValue = 7;
+					
+						// 아이템 Sub 특성치 입력
+						dwType  = dwType << 12;
+						dwValue = dwValue << 8;
+					
+						pItem->m_dwAttribute = pItem->m_dwAttribute | dwType | dwValue;
+					}
+				}
+				else if (pItem->m_sItemEffectType == DEF_ITEMEFFECTTYPE_DEFENSE) {
+					// 방어구에 맞는 접두사와 특성치를 선택, 할당한다.
+					
+					// 강화된(60%) 가벼운 (30%) 마나 변환의(5%) 필살 충전의(5%)
+					iResult = iDice(1,10000);
+					if ((iResult >= 1) && (iResult <= 5999))          dwType = 8;
+					else if ((iResult >= 6000) && (iResult <= 8999))  dwType = 6;
+					else if ((iResult >= 9000) && (iResult <= 9554))  dwType = 11; //dwType = 11;
+					else if ((iResult >= 9555) && (iResult <= 10000)) dwType = 12; //dwType = 12;
+
+					// 아이템 Sub 특성치 정도값 입력 
+					iResult = iDice(1, 30000);
+					if ((iResult >= 1) && (iResult < 10000))           dwValue = 1;  // 10000/29348 = 34%
+					else if ((iResult >= 10000) && (iResult < 17400))  dwValue = 2;  // 6600/29348 = 22.4%
+					else if ((iResult >= 17400) && (iResult < 22400))  dwValue = 3;  // 4356/29348 = 14.8%
+					else if ((iResult >= 22400) && (iResult < 25400))  dwValue = 4;  // 2874/29348 = 9.7%
+					else if ((iResult >= 25400) && (iResult < 27400))  dwValue = 5;  // 1897/29348 = 6.4%
+					else if ((iResult >= 27400) && (iResult < 28400))  dwValue = 6;  // 1252/29348 = 4.2%
+					else if ((iResult >= 28400) && (iResult < 28900))  dwValue = 7;  // 826/29348 = 2.8%
+					else if ((iResult >= 28900) && (iResult < 29300))  dwValue = 8;  // 545/29348 = 1.85%
+					else if ((iResult >= 29300) && (iResult < 29600))  dwValue = 9;  // 360/29348 = 1.2%
+					else if ((iResult >= 29600) && (iResult < 29800))  dwValue = 10; // 237/29348 = 0.8%
+					else if ((iResult >= 29800) && (iResult < 29900))  dwValue = 11; // 156/29348 = 0.5%
+					else if ((iResult >= 29900) && (iResult < 29970))  dwValue = 12; // 103/29348 = 0.3%
+					else if ((iResult >= 29970) && (iResult <= 30000))  dwValue = 13; // 68/29348 = 0.1%
+					else dwValue = 1; // v2.03 906
+
+					// 방어구의 Main 특성치에 따라 수치 보정 
+					switch (dwType) {
+					case 6: // 경량화 최저 +16%
+						if (dwValue <= 4) dwValue = 4;
+						break; 
+					case 8: // 수명 최저 +14%
+						if (dwValue <= 2) dwValue = 2;
+						break; 
+
+					case 11:
+					case 12:
+						// v2.04
+						dwValue = (dwValue+1) / 2;
+						if (dwValue < 1) dwValue = 1;
+						if ((iGenLevel <= 3) && (dwValue > 2)) dwValue = 2;
+						break;
+					}
+					// v2.03 912 아이템 수준이 2이하일때 특성치 최대값은 7
+					if ((iGenLevel <= 2) && (dwValue > 7)) dwValue = 7;
+				
+					// 방어구 Main 특성치, 값 입력
+					pItem->m_dwAttribute = NULL;
+					dwType  = dwType << 20;
+					dwValue = dwValue << 16;
+					pItem->m_dwAttribute = pItem->m_dwAttribute | dwType | dwValue;
+
+					// 방어구 Sub 특성치가 입력될 확률은 40%
+					if (iDice(1,10000) >= 6000) {
+						
+						// 희귀 아이템 Sub 특성치 효과 종류: 
+						//추가 독성저항(1), 추가 명중값(2), 추가 방어값(3), HP 회복량 추가(4), SP 회복량 추가(5)
+						//MP 회복량 추가(6), 추가 마법저항(7), 물리 대미지 흡수(8), 마법 대미지 흡수(9)
+						//연타 대미지 추가(10), 더 많은 경험치(11), 더많은 Gold(12)
+						
+						// 방어구 이기 때문에 
+						// 추가방어값(10%) 추가독성저항(30%)    SP회복추가(15%)  HP회복추가(10%) 
+						// MP회복 추가(10%) 추가마법저항(15%) 물리대미지흡수(3%) 마법대미지흡수(3%)
+						iResult = iDice(1,10000);
+						if ((iResult >= 1) && (iResult <= 999))           dwType = 3;
+						else if ((iResult >= 1000) && (iResult <= 3999))  dwType = 1;
+						else if ((iResult >= 4000) && (iResult <= 5499))  dwType = 5;
+						else if ((iResult >= 5500) && (iResult <= 6499))  dwType = 4;
+						else if ((iResult >= 6500) && (iResult <= 7499))  dwType = 6;
+						else if ((iResult >= 7500) && (iResult <= 9399))  dwType = 7;
+						else if ((iResult >= 9400) && (iResult <= 9799))  dwType = 8;
+						else if ((iResult >= 9800) && (iResult <= 10000)) dwType = 9;
+					
+								// 아이템 Sub 특성치 정도값 입력 
+						iResult = iDice(1, 30000);
+						if ((iResult >= 1) && (iResult < 10000))           dwValue = 1;  // 10000/29348 = 34%
+						else if ((iResult >= 10000) && (iResult < 17400))  dwValue = 2;  // 6600/29348 = 22.4%
+						else if ((iResult >= 17400) && (iResult < 22400))  dwValue = 3;  // 4356/29348 = 14.8%
+						else if ((iResult >= 22400) && (iResult < 25400))  dwValue = 4;  // 2874/29348 = 9.7%
+						else if ((iResult >= 25400) && (iResult < 27400))  dwValue = 5;  // 1897/29348 = 6.4%
+						else if ((iResult >= 27400) && (iResult < 28400))  dwValue = 6;  // 1252/29348 = 4.2%
+						else if ((iResult >= 28400) && (iResult < 28900))  dwValue = 7;  // 826/29348 = 2.8%
+						else if ((iResult >= 28900) && (iResult < 29300))  dwValue = 8;  // 545/29348 = 1.85%
+						else if ((iResult >= 29300) && (iResult < 29600))  dwValue = 9;  // 360/29348 = 1.2%
+						else if ((iResult >= 29600) && (iResult < 29800))  dwValue = 10; // 237/29348 = 0.8%
+						else if ((iResult >= 29800) && (iResult < 29900))  dwValue = 11; // 156/29348 = 0.5%
+						else if ((iResult >= 29900) && (iResult < 29970))  dwValue = 12; // 103/29348 = 0.3%
+						else if ((iResult >= 29970) && (iResult <= 30000))  dwValue = 13; // 68/29348 = 0.1%
+						else dwValue = 1; // v2.03 906
+
+						// 방어구의 Sub 특성치에 따라 수치 보정 
+						switch (dwType) {
+						case 1: // 독성저항 최저 +21%
+						case 3: // 물리방어 최저 +21%
+						case 7: // 마법 저항 최저 +21%
+						case 8: // 물리흡수 최저 +9%
+						case 9: // 마법흡수 최저 +9%
+							if (dwValue <= 3) dwValue = 3;
+							break; 
+						}
+						// v2.03 912 아이템 수준이 2이하일때 특성치 최대값은 7
+						if ((iGenLevel <= 2) && (dwValue > 7)) dwValue = 7;
+					
+						// 아이템 Sub 특성치 입력
+						dwType  = dwType << 12;
+						dwValue = dwValue << 8;
+						pItem->m_dwAttribute = pItem->m_dwAttribute | dwType | dwValue;
+					}
+				}
+				else if (pItem->m_sItemEffectType == DEF_ITEMEFFECTTYPE_ATTACK_MANASAVE) {
+					// 마법 공격 무기류에 붙을 수 있는 접두사를 선택 10, 11
+					// 마법 성공의(100%) <- 현재 마법 지팡이에 붙을 수 있는 요소가 이거 밖에 없다.
+					dwType = 10;
+					cColor = 5;
+										
+					// 아이템 색상 입력 
+					pItem->m_cItemColor = cColor;
+
+					iResult = iDice(1, 30000);
+					if ((iResult >= 1) && (iResult < 10000))           dwValue = 1;  // 10000/29348 = 34%
+					else if ((iResult >= 10000) && (iResult < 17400))  dwValue = 2;  // 6600/29348 = 22.4%
+					else if ((iResult >= 17400) && (iResult < 22400))  dwValue = 3;  // 4356/29348 = 14.8%
+					else if ((iResult >= 22400) && (iResult < 25400))  dwValue = 4;  // 2874/29348 = 9.7%
+					else if ((iResult >= 25400) && (iResult < 27400))  dwValue = 5;  // 1897/29348 = 6.4%
+					else if ((iResult >= 27400) && (iResult < 28400))  dwValue = 6;  // 1252/29348 = 4.2%
+					else if ((iResult >= 28400) && (iResult < 28900))  dwValue = 7;  // 826/29348 = 2.8%
+					else if ((iResult >= 28900) && (iResult < 29300))  dwValue = 8;  // 545/29348 = 1.85%
+					else if ((iResult >= 29300) && (iResult < 29600))  dwValue = 9;  // 360/29348 = 1.2%
+					else if ((iResult >= 29600) && (iResult < 29800))  dwValue = 10; // 237/29348 = 0.8%
+					else if ((iResult >= 29800) && (iResult < 29900))  dwValue = 11; // 156/29348 = 0.5%
+					else if ((iResult >= 29900) && (iResult < 29970))  dwValue = 12; // 103/29348 = 0.3%
+					else if ((iResult >= 29970) && (iResult <= 30000))  dwValue = 13; // 68/29348 = 0.1%
+					else dwValue = 1; // v2.03 906
+
+					// v2.03 912 아이템 수준이 2이하일때 특성치 최대값은 7
+					if ((iGenLevel <= 2) && (dwValue > 7)) dwValue = 7;
+									
+					// 방어구 Main 특성치, 값 입력
+					pItem->m_dwAttribute = NULL;
+					dwType  = dwType << 20;
+					dwValue = dwValue << 16;
+					pItem->m_dwAttribute = pItem->m_dwAttribute | dwType | dwValue;
+
+					// 아이템 Sub 특성치가 입력될 확률은 40%
+					if (iDice(1,10000) >= 6000) {
+					
+						// 희귀 아이템 Sub 특성치 효과 종류: 
+						//추가 독성저항(1), 추가 명중값(2), 추가 방어값(3), HP 회복량 추가(4), SP 회복량 추가(5)
+						//MP 회복량 추가(6), 추가 마법저항(7), 물리 대미지 흡수(8), 마법 대미지 흡수(9)
+						//연타 대미지 추가(10), 더 많은 경험치(11), 더많은 Gold(12)
+
+						// 무기류이기 때문에 공격 명중 추가(50%), 연타 타격치 증가(35%), 더 많은 Gold(10%), 더 많은 경험치(5%)
+						iResult = iDice(1,10000);
+						if ((iResult >= 1) && (iResult <= 4999))          dwType = 2;
+						else if ((iResult >= 5000) && (iResult <= 8499))  dwType = 10;
+						else if ((iResult >= 8500) && (iResult <= 9499))  dwType = 12;
+						else if ((iResult >= 9500) && (iResult <= 10000)) dwType = 11;
+											
+									// 아이템 Sub 특성치 정도값 입력 
+						iResult = iDice(1, 30000);
+						if ((iResult >= 1) && (iResult < 10000))           dwValue = 1;  // 10000/29348 = 34%
+						else if ((iResult >= 10000) && (iResult < 17400))  dwValue = 2;  // 6600/29348 = 22.4%
+						else if ((iResult >= 17400) && (iResult < 22400))  dwValue = 3;  // 4356/29348 = 14.8%
+						else if ((iResult >= 22400) && (iResult < 25400))  dwValue = 4;  // 2874/29348 = 9.7%
+						else if ((iResult >= 25400) && (iResult < 27400))  dwValue = 5;  // 1897/29348 = 6.4%
+						else if ((iResult >= 27400) && (iResult < 28400))  dwValue = 6;  // 1252/29348 = 4.2%
+						else if ((iResult >= 28400) && (iResult < 28900))  dwValue = 7;  // 826/29348 = 2.8%
+						else if ((iResult >= 28900) && (iResult < 29300))  dwValue = 8;  // 545/29348 = 1.85%
+						else if ((iResult >= 29300) && (iResult < 29600))  dwValue = 9;  // 360/29348 = 1.2%
+						else if ((iResult >= 29600) && (iResult < 29800))  dwValue = 10; // 237/29348 = 0.8%
+						else if ((iResult >= 29800) && (iResult < 29900))  dwValue = 11; // 156/29348 = 0.5%
+						else if ((iResult >= 29900) && (iResult < 29970))  dwValue = 12; // 103/29348 = 0.3%
+						else if ((iResult >= 29970) && (iResult <= 30000))  dwValue = 13; // 68/29348 = 0.1%
+						else dwValue = 1; // v2.03 906
+
+						// v2.03 912 아이템 수준이 2이하일때 특성치 최대값은 7
+						if ((iGenLevel <= 2) && (dwValue > 7)) dwValue = 7;
 
 						// 무기의 Sub 특성치에 따라 수치 보정 
 						switch (dwType) {
@@ -38508,107 +45572,10 @@ void CGame::NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType
 						// 아이템 Sub 특성치 입력
 						dwType  = dwType << 12;
 						dwValue = dwValue << 8;
-					
 						pItem->m_dwAttribute = pItem->m_dwAttribute | dwType | dwValue;
 					}
 				}
-				else if (pItem->m_sItemEffectType == DEF_ITEMEFFECTTYPE_DEFENSE) {
-					// 방어구에 맞는 접두사와 특성치를 선택, 할당한다.
-					
-					// 강화된(60%) 가벼운 (40%)
-					iResult = iDice(1,10000);
-					if ((iResult >= 1) && (iResult <= 5999))          dwType = 8;
-					else if ((iResult >= 6000) && (iResult <= 10000)) dwType = 6;
 
-					// 아이템 Main 특성치 정도값 입력 
-					iResult = iDice(1, 29348);
-					if ((iResult >= 1) && (iResult < 10000))           dwValue = 1;  // 10000/29348 = 34%
-					else if ((iResult >= 10000) && (iResult < 16600))  dwValue = 2;  // 6600/29348 = 22.4%
-					else if ((iResult >= 16600) && (iResult < 20956))  dwValue = 3;  // 4356/29348 = 14.8%
-					else if ((iResult >= 20956) && (iResult < 23830))  dwValue = 4;  // 2874/29348 = 9.7%
-					else if ((iResult >= 23830) && (iResult < 25727))  dwValue = 5;  // 1897/29348 = 6.4%
-					else if ((iResult >= 25727) && (iResult < 26979))  dwValue = 6;  // 1252/29348 = 4.2%
-					else if ((iResult >= 26979) && (iResult < 27805))  dwValue = 7;  // 826/29348 = 2.8%
-					else if ((iResult >= 27805) && (iResult < 28350))  dwValue = 8;  // 545/29348 = 1.85%
-					else if ((iResult >= 28350) && (iResult < 28710))  dwValue = 9;  // 360/29348 = 1.2%
-					else if ((iResult >= 28710) && (iResult < 28947))  dwValue = 10; // 237/29348 = 0.8%
-					else if ((iResult >= 28947) && (iResult < 29103))  dwValue = 11; // 156/29348 = 0.5%
-					else if ((iResult >= 29103) && (iResult < 29206))  dwValue = 12; // 103/29348 = 0.3%
-					else if ((iResult >= 29206) && (iResult < 29274))  dwValue = 13; // 68/29348 = 0.2%
-
-					// 방어구의 Main 특성치에 따라 수치 보정 
-					switch (dwType) {
-					case 6: // 경량화 최저 +16%
-						if (dwValue <= 4) dwValue = 4;
-						break; 
-					case 8: // 수명 최저 +14%
-						if (dwValue <= 2) dwValue = 2;
-						break; 
-					}
-				
-					// 방어구 Main 특성치, 값 입력
-					pItem->m_dwAttribute = NULL;
-					dwType  = dwType << 20;
-					dwValue = dwValue << 16;
-					pItem->m_dwAttribute = pItem->m_dwAttribute | dwType | dwValue;
-
-					// 방어구 Sub 특성치가 입력될 확률은 40%
-					if (iDice(1,10000) >= 6000) {
-						
-						// 희귀 아이템 Sub 특성치 효과 종류: 
-						//추가 독성저항(1), 추가 명중값(2), 추가 방어값(3), HP 회복량 추가(4), SP 회복량 추가(5)
-						//MP 회복량 추가(6), 추가 마법저항(7), 물리 대미지 흡수(8), 마법 대미지 흡수(9)
-						//연타 대미지 추가(10), 더 많은 경험치(11), 더많은 Gold(12)
-						
-						// 방어구 이기 때문에 
-						// 추가독성저항(10%)  추가방어값(30%)  SP회복추가(15%)  HP회복추가(10%) 
-						// MP회복 추가(10%) 추가마법저항(15%) 물리대미지흡수(5%) 마법대미지흡수(5%)
-						iResult = iDice(1,10000);
-						if ((iResult >= 1) && (iResult <= 999))           dwType = 1;
-						else if ((iResult >= 1000) && (iResult <= 3999))  dwType = 3;
-						else if ((iResult >= 4000) && (iResult <= 5499))  dwType = 5;
-						else if ((iResult >= 5500) && (iResult <= 6499))  dwType = 4;
-						else if ((iResult >= 6500) && (iResult <= 7499))  dwType = 6;
-						else if ((iResult >= 7500) && (iResult <= 8999))  dwType = 7;
-						else if ((iResult >= 9000) && (iResult <= 9499))  dwType = 8;
-						else if ((iResult >= 9500) && (iResult <= 10000)) dwType = 9;
-					
-						// 방어구 Sub 특성치 정도값 입력 
-						
-						iResult = iDice(1, 29348);
-						if ((iResult >= 1) && (iResult < 10000))           dwValue = 1;  // 10000/29348 = 34%
-						else if ((iResult >= 10000) && (iResult < 16600))  dwValue = 2;  // 6600/29348 = 22.4%
-						else if ((iResult >= 16600) && (iResult < 20956))  dwValue = 3;  // 4356/29348 = 14.8%
-						else if ((iResult >= 20956) && (iResult < 23830))  dwValue = 4;  // 2874/29348 = 9.7%
-						else if ((iResult >= 23830) && (iResult < 25727))  dwValue = 5;  // 1897/29348 = 6.4%
-						else if ((iResult >= 25727) && (iResult < 26979))  dwValue = 6;  // 1252/29348 = 4.2%
-						else if ((iResult >= 26979) && (iResult < 27805))  dwValue = 7;  // 826/29348 = 2.8%
-						else if ((iResult >= 27805) && (iResult < 28350))  dwValue = 8;  // 545/29348 = 1.85%
-						else if ((iResult >= 28350) && (iResult < 28710))  dwValue = 9;  // 360/29348 = 1.2%
-						else if ((iResult >= 28710) && (iResult < 28947))  dwValue = 10; // 237/29348 = 0.8%
-						else if ((iResult >= 28947) && (iResult < 29103))  dwValue = 11; // 156/29348 = 0.5%
-						else if ((iResult >= 29103) && (iResult < 29206))  dwValue = 12; // 103/29348 = 0.3%
-						else if ((iResult >= 29206) && (iResult < 29274))  dwValue = 13; // 68/29348 = 0.2%
-
-						// 방어구의 Sub 특성치에 따라 수치 보정 
-						switch (dwType) {
-						case 1: // 독성저항 최저 +21%
-						case 3: // 물리방어 최저 +21%
-						case 7: // 마법 저항 최저 +21%
-						case 8: // 물리흡수 최저 +9%
-						case 9: // 마법흡수 최저 +9%
-							if (dwValue <= 3) dwValue = 3;
-							break; 
-						}
-					
-						// 아이템 Sub 특성치 입력
-						dwType  = dwType << 12;
-						dwValue = dwValue << 8;
-					
-						pItem->m_dwAttribute = pItem->m_dwAttribute | dwType | dwValue;
-					}
-				}
-				
 				// 마지막으로 특성치를 특수 아이템에 맞게끔 변경 
 				_AdjustRareItemValue(pItem);
 			}
@@ -38618,14 +45585,26 @@ void CGame::NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType
 		pItem->m_sTouchEffectType   = DEF_ITET_ID;
 		pItem->m_sTouchEffectValue1 = iDice(1,100000);
 		pItem->m_sTouchEffectValue2 = iDice(1,100000);
-		//pItem->m_sTouchEffectValue3 = timeGetTime();
-		// 마지막 숫자는 아이템 생성 월, 일	
-		SYSTEMTIME SysTime;
-		char cTemp[256];
+#ifdef DEF_LOGTIME
+		pItem->m_sTouchEffectValue3 = timeGetTime();
+#else 
 		GetLocalTime(&SysTime);
 		ZeroMemory(cTemp, sizeof(cTemp));
-		wsprintf(cTemp, "%d%2d",  (short)SysTime.wMonth, (short)SysTime.wDay);
+//		wsprintf(cTemp, "%d%02d%02d",  (short)SysTime.wMonth, (short)SysTime.wDay,(short) SysTime.wHour);
+		wsprintf(cTemp, "%d%02d%",  (short)SysTime.wMonth, (short)SysTime.wDay);
+
 		pItem->m_sTouchEffectValue3 = atoi(cTemp);
+#endif
+
+		// v2.181 2002-10-22 #1 3주년 이벤트 : 소원구
+		/*
+		if( pItem->m_sIDnum >= 651 &&  pItem->m_sIDnum <= 655 )
+		{
+			// 이벤트 기간 11월 1일 ~ 7일 (1주일)
+			if(  SysTime.wYear == 2002 && SysTime.wMonth == 11 && (SysTime.wDay >= 1 && SysTime.wDay <=7 ) )
+				pItem->m_sItemSpecEffectValue2 = 113; // 3주년 이벤트용 소원구
+		}
+		*/ // 2002-11-08 제거
 
 		// 아이템을 서있는 위치에 떨어뜨린다. 
 		m_pMapList[ m_pNpcList[iNpcH]->m_cMapIndex ]->bSetItem(m_pNpcList[iNpcH]->m_sX, 
@@ -38638,9 +45617,178 @@ void CGame::NpcDeadItemGenerator(int iNpcH, short sAttackerH, char cAttackerType
 			                        pItem->m_sSprite, pItem->m_sSpriteFrame, pItem->m_cItemColor); //v1.4 color
 
 		// 로그 남긴다.
-		_bItemLog(DEF_ITEMLOG_NEWGENDROP, NULL, NULL, pItem);
+		_bItemLog(DEF_ITEMLOG_NEWGENDROP, 0, m_pNpcList[iNpcH]->m_cNpcName, pItem);
 	}
 } 
+
+// 2002-10-23 Item Event 기능 추가
+/*
+; mapdata에 들어갈 내용
+;item-event = index	item_name	amount	TotalNumber	month	day		type	mob_list[Max:5]
+;	type = 0 : 해당 아이템이 일반 아이템 생성과정에서 생성되지 않는다.
+;	       1 : Item Event에 의해서도 생성되고 일반 아이템 생성과정을 통해서도 생성된다.
+
+item-event = 	1	적색소원구	1		10			11		1		0		Cannibal-Plant Ettin EOL
+item-event = 	2	녹색소원구	1		10			11		1		0		Giant-Frog Scorpion EOL
+*/
+BOOL CGame::NpcDeadItemGeneratorWithItemEvent(int iNpcH, short sAttackerH, char cAttackerType)
+{
+ class CItem * pItem;
+ char  cColor, cItemName[21], cTemp[20];
+ BOOL  bIsGold;
+ int   i, j, iGenLevel, iResult, iT1, iT2, iT3, iItemID;
+ int	iNumMob;
+ double dTmp1, dTmp2, dTmp3;
+ SYSTEMTIME SysTime;
+
+	// v2.04 아이템 이벤트용 특수 코드
+	if (m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_iTotalItemEvents != NULL)
+	{
+		GetLocalTime(&SysTime);
+		for ( i = 0; i < m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_iTotalItemEvents; i++ )
+		if (// 날짜 같고,
+			( SysTime.wMonth == m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_stItemEventList[i].iMonth) &&
+			( SysTime.wDay   == m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_stItemEventList[i].iDay) &&
+			// 아이템 이벤트 개수가 남았으면.
+			( m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_stItemEventList[i].iCurNum < m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_stItemEventList[i].iTotalNum )
+		)
+		{
+
+			iNumMob = m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_stItemEventList[i].iNumMob;
+
+			// item event의 대상이 되는 몬스터가 있는지 검색
+			for( j=0; j<iNumMob; j++) {
+				if( strcmp(m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_stItemEventList[i].cMob[j], m_pNpcList[iNpcH]->m_cNpcName) == 0)
+					break;
+			}
+
+			// 리스트에 없는 몬스터다.
+			if( j == iNumMob )
+				continue;
+
+			if (SysTime.wHour < 12 ) {
+				if(iDice(1,9000) != 6433)
+					continue;
+			} else if (SysTime.wHour < 18 ) {
+				if(iDice(1,3000) != 1433)  
+					continue;
+			} 
+
+
+		// 날짜가 일치하고 만들어야할 수량이 남아 있는 상태라면
+			// : 24시간을 분단위로 쪼개서 처리. 중복 생성을 막기 위해 주사위를 굴린다.
+			iT1 = 1440 / m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_stItemEventList[i].iTotalNum;
+			iT2 = iT1 * m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_stItemEventList[i].iCurNum;
+			iT3 = (SysTime.wHour*60) + SysTime.wMinute;
+
+			// 첫 번째 아이템 생성 시기는 iT1 / 2 이후 시간이다.
+			if ( (iT1 / 2) > iT3 )
+				continue;
+
+			if ( ((iT2 <= iT3) && (iT3 <= iT2 + iT1)) || (iT2+iT1 < iT3) ) {
+				// 구간이 일치한다. 아이템 생성
+				// 아이템을 만들고
+
+				// 약간의 다이스
+				// 300개 이상은 안된다.
+				int	iT4 = iT1 / 4;
+				if( (iT4 > 10) && iDice(1, iT4) != 5 )
+					continue;
+
+				pItem = new class CItem;
+				if (_bInitItemAttr(pItem, m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_stItemEventList[i].cItemName) == FALSE) {
+					delete pItem;
+					pItem = NULL;
+				}
+				else {
+					// 아이템에 고유 코드 입력 
+					pItem->m_sTouchEffectType   = DEF_ITET_ID;
+					pItem->m_sTouchEffectValue1 = iDice(1,100000);
+					pItem->m_sTouchEffectValue2 = iDice(1,100000);
+		
+#ifdef DEF_LOGTIME
+					pItem->m_sTouchEffectValue3 = timeGetTime();
+#else 
+					// 마지막 숫자는 아이템 생성 월, 일
+					ZeroMemory(cTemp, sizeof(cTemp));
+//					wsprintf(cTemp, "%d%02d%02d",  (short)SysTime.wMonth, (short)SysTime.wDay,(short) SysTime.wHour);
+					wsprintf(cTemp, "%d%02d",  (short)SysTime.wMonth, (short)SysTime.wDay);
+					pItem->m_sTouchEffectValue3 = atoi(cTemp);
+#endif
+					
+					// v2.181 2002-10-22 #1 3주년 이벤트 : 소원구
+					/*
+		.			if( pItem->m_sIDnum >= 651 &&  pItem->m_sIDnum <= 655 )
+					{
+						// 이벤트 기간 11월 1일 ~ 7일 (1주일)
+						if(  SysTime.wYear == 2002 && SysTime.wMonth == 11 && (SysTime.wDay >= 1 && SysTime.wDay <=7 ) )
+							pItem->m_sItemSpecEffectValue2 = 113; // 3주년 이벤트용 소원구
+					}
+					*/ // 2002-11-08 제거
+					
+					// 아이템을 서있는 위치에 떨어뜨린다.
+					m_pMapList[ m_pNpcList[iNpcH]->m_cMapIndex ]->bSetItem(m_pNpcList[iNpcH]->m_sX,
+								                                           m_pNpcList[iNpcH]->m_sY,
+																		   pItem);
+
+					// 다른 클라이언트에게 아이템이 떨어진 것을 알린다. 
+					SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_ITEMDROP, m_pNpcList[iNpcH]->m_cMapIndex,
+								                m_pNpcList[iNpcH]->m_sX, m_pNpcList[iNpcH]->m_sY,
+										        pItem->m_sSprite, pItem->m_sSpriteFrame, pItem->m_cItemColor); //v1.4 color
+
+					// 로그 남긴다.
+					_bItemLog(DEF_ITEMLOG_NEWGENDROP, 0, m_pNpcList[iNpcH]->m_cNpcName, pItem);
+					wsprintf(G_cTxt,"Event Item (%s)",pItem->m_cName) ;
+					PutDebugMsg(G_cTxt);
+
+					m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_stItemEventList[i].iCurNum++;
+
+					return TRUE;
+				}
+				
+				// return FALSE;
+			}
+		}
+	} // 아이템 이벤트용
+
+	return FALSE;
+} // NpcDeadItemGeneratorWithItemEvent
+
+// 2002-10-24 해당 아이템이 아이템 이벤트에 등록되어 있고 type이 0인지 검사한다.
+// 수정 필요하다. 오류 내포(adamas)
+BOOL CGame::bCheckInItemEventList(int iItemID, int iNpcH)
+{
+	int		i;
+	char	cItemName[21];
+
+	if (m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_iTotalItemEvents != NULL)
+	{
+		// item id로 item name을 가져 온다.
+		for (i = 0; i < DEF_MAXITEMTYPES; i++ )
+		{
+			if( m_pItemConfigList[i] == NULL )
+				continue;
+
+			if( m_pItemConfigList[i]->m_sIDnum == iItemID ) {
+				strcpy(cItemName, m_pItemConfigList[i]->m_cName);
+				break;
+			}
+		}
+
+		// 해당 item이 item event에 있는지 검사한다.
+		for (i = 0; i < m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_iTotalItemEvents; i++)
+		{
+			// type이 0이 아니면 건너 뛴다.
+			if( m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_stItemEventList[i].iType != 0 )
+				continue;
+
+			if( strcmp( m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->m_stItemEventList[i].cItemName, cItemName) == 0 )
+				return TRUE;
+		}
+	}
+
+	return FALSE;
+} // bCheckInItemEventList()
 
 
 BOOL CGame::_bDecodeDupItemIDFileContents(char *pData, DWORD dwMsgSize)
@@ -39008,11 +46156,10 @@ void CGame::GetMagicAbilityHandler(int iClientH)
 int CGame::iRequestPanningMapDataRequest(int iClientH, char * pData)
 {
  char  * cp, cDir, cData[3000];
- class CTile * pTile;
  DWORD * dwp;
- WORD  * wp, wObjectID;
- short * sp, dX, dY, sTemp, sTemp2, sDOtype;
- int   * ip, iRet, iSize, iDamage;
+ WORD  * wp;
+ short * sp, dX, dY;
+ int   iRet, iSize;
 
 	if (m_pClientList[iClientH] == NULL) return 0;
 	if (m_pClientList[iClientH]->m_bIsObserverMode == FALSE) return 0;
@@ -39076,8 +46223,6 @@ int CGame::iRequestPanningMapDataRequest(int iClientH, char * pData)
 
 void CGame::AdminOrder_SetObserverMode(int iClientH)
 {
- int dX, dY;
-
 	if (m_pClientList[iClientH] == NULL) return;
 
 	if (m_pClientList[iClientH]->m_bIsObserverMode == TRUE) {
@@ -39100,36 +46245,78 @@ void CGame::AdminOrder_SetObserverMode(int iClientH)
 
 void CGame::RequestRestartHandler(int iClientH)
 {
- char cMapName[31];
+ char  cTmpMap[32];
 
 	if (m_pClientList[iClientH] == NULL) return;
 
 	if (m_pClientList[iClientH]->m_bIsKilled == TRUE) {
-			
-		ZeroMemory(m_pClientList[iClientH]->m_cMapName, sizeof(m_pClientList[iClientH]->m_cMapName));
 		
-		if (strcmp(m_pClientList[iClientH]->m_cLocation, "NONE") == 0) {
+		strcpy(cTmpMap,m_pClientList[iClientH]->m_cMapName) ;
+		ZeroMemory(m_pClientList[iClientH]->m_cMapName, sizeof(m_pClientList[iClientH]->m_cMapName));
+		// v2.181 2002-10-24 서버 속도 향상을 위해 스트링 비교를 줄인다.
+		if (m_pClientList[iClientH]->m_cSide == DEF_NETURAL) {
 			// 여행자라면  default맵으로 간다.
 			strcpy(m_pClientList[iClientH]->m_cMapName, "default");
 		}
 		else {
 			// 소속이 있다면 소속 마을의 부활존으로 간다.
-			if (strcmp(m_pClientList[iClientH]->m_cLocation, "aresden") == 0) {
-				 memcpy(m_pClientList[iClientH]->m_cMapName, "resurr1", 7);
+			if (m_pClientList[iClientH]->m_cSide == DEF_ARESDEN ) { // 2002-11-14 사냥꾼 모드 추가
+				if (m_bIsCrusadeMode == TRUE) {
+					// 크루세이드 모드에서 사망한 경우: 마을 맵에서 일정시간 나갈 수 없다.
+					if (m_pClientList[iClientH]->m_iDeadPenaltyTime > 0) {
+						ZeroMemory(m_pClientList[iClientH]->m_cLockedMapName, sizeof(m_pClientList[iClientH]->m_cLockedMapName));
+						strcpy(m_pClientList[iClientH]->m_cLockedMapName, "aresden");
+						m_pClientList[iClientH]->m_iLockedMapTime = 60*5;
+						m_pClientList[iClientH]->m_iDeadPenaltyTime = 60*10; // v2.04
+					}
+					else {
+						memcpy(m_pClientList[iClientH]->m_cMapName, "resurr1", 7);
+						m_pClientList[iClientH]->m_iDeadPenaltyTime = 60*10; // v2.04 10분 안에 또 죽으면 마을에 갖힌다.
+					}
+				}
+				// v2.16 2002-5-31
+				if (strcmp(cTmpMap, "elvine") == 0){
+					memcpy(m_pClientList[iClientH]->m_cMapName, "elvjail", 7);
+					strcpy(m_pClientList[iClientH]->m_cLockedMapName, "elvjail");
+					m_pClientList[iClientH]->m_iLockedMapTime = 60*3 ; // 3분 
+				}else if (m_pClientList[iClientH]->m_iLevel > 80)
+					 memcpy(m_pClientList[iClientH]->m_cMapName, "resurr1", 7);
+				else memcpy(m_pClientList[iClientH]->m_cMapName, "arefarm", 7);
 			}
 			else {
-				memcpy(m_pClientList[iClientH]->m_cMapName, "resurr2", 7);
+				if (m_bIsCrusadeMode == TRUE) {
+					// 크루세이드 모드에서 사망한 경우: 마을 맵에서 일정시간 나갈 수 없다.
+					if (m_pClientList[iClientH]->m_iDeadPenaltyTime > 0) {
+						ZeroMemory(m_pClientList[iClientH]->m_cLockedMapName, sizeof(m_pClientList[iClientH]->m_cLockedMapName));
+						strcpy(m_pClientList[iClientH]->m_cLockedMapName, "elvine");
+						m_pClientList[iClientH]->m_iLockedMapTime = 60*5;
+						m_pClientList[iClientH]->m_iDeadPenaltyTime = 60*10; // v2.04
+					}
+					else {
+						memcpy(m_pClientList[iClientH]->m_cMapName, "resurr2", 7);
+						m_pClientList[iClientH]->m_iDeadPenaltyTime = 60*10; // v2.04 10분 안에 또 죽으면 마을에 갖힌다.
+					}
+				}
+				if (strcmp(cTmpMap, "aresden") == 0){
+					memcpy(m_pClientList[iClientH]->m_cMapName, "arejail", 7);
+					strcpy(m_pClientList[iClientH]->m_cLockedMapName, "arejail");
+					m_pClientList[iClientH]->m_iLockedMapTime = 60*3 ; // 3분 
+
+				}else if (m_pClientList[iClientH]->m_iLevel > 80)
+					 memcpy(m_pClientList[iClientH]->m_cMapName, "resurr2", 7);
+				else memcpy(m_pClientList[iClientH]->m_cMapName, "elvfarm", 7);
 			}
 		}
 		
-		// 다시 살리는 처리를 한다.
+		// v2.04 다시 살리는 처리를 한다. HP, 배고픔 지수 만땅
 		m_pClientList[iClientH]->m_bIsKilled = FALSE;
-		m_pClientList[iClientH]->m_iHP = 30;
+		m_pClientList[iClientH]->m_iHP = (3*m_pClientList[iClientH]->m_iVit) + (2*m_pClientList[iClientH]->m_iLevel) + (m_pClientList[iClientH]->m_iStr/2);
+		m_pClientList[iClientH]->m_iHungerStatus = 100;
 
-		ZeroMemory(cMapName, sizeof(cMapName));
-		strcpy(cMapName, m_pClientList[iClientH]->m_cMapName);
+		ZeroMemory(cTmpMap, sizeof(cTmpMap));
+		strcpy(cTmpMap, m_pClientList[iClientH]->m_cMapName);
 		// !!! RequestTeleportHandler내에서 m_cMapName을 쓰기 때문에 그대로 파라미터로 넘겨주면 오동작
-		RequestTeleportHandler(iClientH, "2   ", cMapName, -1, -1);
+		RequestTeleportHandler(iClientH, "2   ", cTmpMap, -1, -1);
 	}
 }
 
@@ -39138,34 +46325,62 @@ void CGame::AdminOrder_EnableAdminCreateItem(int iClientH, char *pData, DWORD dw
 	if (m_pClientList[iClientH] == NULL) return;
 	if ((dwMsgSize)	<= 0) return;
 
+#ifdef DEF_TAIWAN
+	if (m_pClientList[iClientH]->m_iAdminUserLevel < 4) {
+#else
 	if (m_pClientList[iClientH]->m_iAdminUserLevel < 3) {
+#endif
+	
 		return;
 	}
 
 	m_pClientList[iClientH]->m_bIsAdminCreateItemEnabled = TRUE;
 }
 
+// v2.18 2002-10-15 중요 GM 명령어에 패스워드 추가 
+void CGame::AdminOrder_EnableAdminCommand(int iClientH, char *pData, DWORD dwMsgSize)
+{
+	if (m_pClientList[iClientH] == NULL) return;
+	if ((dwMsgSize)	<= 0) return;
+
+
+	if (m_pClientList[iClientH]->m_iAdminUserLevel < 1) {
+		return;
+	}
+
+	m_pClientList[iClientH]->m_bIsAdminCommandEnabled = TRUE;
+}
+
 void CGame::AdminOrder_CreateItem(int iClientH, char *pData, DWORD dwMsgSize)
 {
  char   seps[] = "= \t\n";
- char   * cp, * token, cBuff[256], cItemName[256], cData[256], cTemp[256];
+ char   * cp, * token, cBuff[256], cItemName[256], cData[256], cTemp[256], cAttribute[256], cValue[256];
  SYSTEMTIME SysTime;
  class  CStrTok * pStrTok;
  class  CItem * pItem;
  short  * sp;
- int    iRet, iEraseReq;
+ int    iRet, iTemp, iEraseReq, iValue;
  DWORD * dwp;
- WORD  * wp;
+ WORD  * wp, wTemp;
+ double dV1, dV2, dV3;
  
 	if (m_pClientList[iClientH] == NULL) return;
 	if ((dwMsgSize)	<= 0) return;
 
+#ifdef	DEF_TAIWAN
 	if (m_pClientList[iClientH]->m_iAdminUserLevel < 3) {
+#else
+	if (m_pClientList[iClientH]->m_iAdminUserLevel < 4) {
+#endif
+
 		// Admin user level이 낮아서 이 기능을 사용할 수 없다.
 		if (m_pClientList[iClientH]->m_iAdminUserLevel !=  0)	
 			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ADMINUSERLEVELLOW, NULL, NULL, NULL, NULL);
 		return;
 	}
+	// 01-12-10 아이피 검사. 회사 내에서만 아이템 생성이 가능
+//	if (memcmp(m_pClientList[iClientH]->m_cIPaddress, "203.234.215.", 12) != 0) return;
+
 	// 아이템 생성 확인 코드가 입력되지 않았다면 만들 수 없다.
 	if (m_pClientList[iClientH]->m_bIsAdminCreateItemEnabled == FALSE) return;
 
@@ -39182,12 +46397,84 @@ void CGame::AdminOrder_CreateItem(int iClientH, char *pData, DWORD dwMsgSize)
 		strcpy(cItemName, token);
 	}
 
+	// 01-12-10 attribute값 해독 
+	ZeroMemory(cAttribute, sizeof(cAttribute));
+	token = pStrTok->pGet();
+	if (token != NULL) {
+		ZeroMemory(cAttribute, sizeof(cAttribute));
+		strcpy(cAttribute, token);
+	}
+
+	// 01-12-10 완성도 
+	ZeroMemory(cValue, sizeof(cValue));
+	iValue = 0;
+	token = pStrTok->pGet();
+	if (token != NULL) {
+		ZeroMemory(cValue, sizeof(cValue));
+		strcpy(cValue, token);
+		iValue = atoi(cValue);
+	}
+
 	// 아이템을 만들고 
 	pItem = new class CItem;
 	// 기본 특성으로 아이템 생성 
 	if (_bInitItemAttr(pItem, cItemName) == FALSE) {
 		delete pItem;
 		return;	
+	}
+
+	// 01-12-10 특성치 입력 
+	if (strlen(cAttribute) != 0) {
+		pItem->m_dwAttribute = atoi(cAttribute);
+		if (pItem->m_dwAttribute == 1) {
+			if ((iValue >= 1) && (iValue <= 200)) {
+				// 제작 아이템을 만든다.
+				pItem->m_cItemColor = 2;
+				pItem->m_sItemSpecEffectValue2 = iValue - 100;
+								
+				// 2. 새로운 최대 수명 계산 
+				dV2 = (double)pItem->m_sItemSpecEffectValue2;
+				dV3 = (double)pItem->m_wMaxLifeSpan;
+				dV1 = (dV2/100.0f)*dV3;
+
+				iTemp  = (int)pItem->m_wMaxLifeSpan;
+				iTemp += (int)dV1;
+
+				if (iTemp <= 0) 
+					 wTemp = 1;
+				else wTemp = (WORD)iTemp;
+
+				if (wTemp <= pItem->m_wMaxLifeSpan*2) {
+					// 에러로 인해 너무 많은 수명값이 나옴을 막기위함 
+					pItem->m_wMaxLifeSpan = wTemp;
+					pItem->m_sItemSpecEffectValue1 = (short)wTemp;
+					pItem->m_wCurLifeSpan = pItem->m_wMaxLifeSpan;
+				}
+				else pItem->m_sItemSpecEffectValue1 = (short)pItem->m_wMaxLifeSpan;
+
+			}
+			else pItem->m_dwAttribute = NULL;
+		}
+		else {
+			// 제작 아이템이 아니다. 특성치에 따라 색을 넣는다.
+			if (pItem->m_sItemEffectType == DEF_ITEMEFFECTTYPE_ATTACK) {
+				switch ((pItem->m_dwAttribute & 0xF00000) >> 20) {
+				case 6:	pItem->m_cItemColor = 2; break;
+				case 8: pItem->m_cItemColor = 3; break;
+				case 1:	pItem->m_cItemColor = 5; break;
+				case 5:	pItem->m_cItemColor = 1; break;
+				case 3:	pItem->m_cItemColor = 7; break;
+				case 2:	pItem->m_cItemColor = 4; break;
+				case 7:	pItem->m_cItemColor = 6; break;
+				case 9:	pItem->m_cItemColor = 8; break;
+				}
+			}
+			else if (pItem->m_sItemEffectType == DEF_ITEMEFFECTTYPE_ATTACK_MANASAVE) {
+				switch ((pItem->m_dwAttribute & 0xF00000) >> 20) {
+				case 10: pItem->m_cItemColor = 5; break;
+				}
+			}
+		}
 	}
 
 	// 아이템에 고유 코드 입력 혹은 날짜입력 
@@ -39283,16 +46570,25 @@ void CGame::AdminOrder_CreateItem(int iClientH, char *pData, DWORD dwMsgSize)
 		dwp = (DWORD *)cp;
 		*dwp = pItem->m_dwAttribute;
 		cp += 4;
-				
+
+		// v2.15 로그 관련 수정
+#ifdef DEF_TAIWANLOG 
+		_bItemLog(DEF_ITEMLOG_CREATE, iClientH, (int) -1, pItem);
+#endif
+					
 		if (iEraseReq == 1) {
 			delete pItem;
+			pItem = NULL ;
 		}
 		
 		// 아이템 정보 전송 
 		iRet = m_pClientList[iClientH]->m_pXSock->iSendMsg(cData, 53);
 		
-		// v1.41 희귀 아이템이라면 로그를 남긴다. 
-		_bItemLog(DEF_ITEMLOG_GET, iClientH, NULL, pItem);
+
+		// v2.14 Admin Log
+		wsprintf(G_cTxt, "GM Order(%s): Create ItemName(%s)", m_pClientList[iClientH]->m_cCharName, cItemName);
+		bSendMsgToLS(MSGID_GAMEMASTERLOG, iClientH, NULL,G_cTxt);
+
 		return;
 	}
 	else {
@@ -39440,17 +46736,109 @@ void CGame::CreateNewPartyHandler(int iClientH)
 }
 
 
-void CGame::JoinPartyHandler(int iClientH, char *pMemberName)
+void CGame::JoinPartyHandler(int iClientH, int iV1, char *pMemberName)
 {
+ char * cp, cData[120];
+ short sAppr2;
+ DWORD * dwp;
+ WORD * wp;
  int i;
 
 	if (m_pClientList[iClientH] == NULL) return;
+	 
+	switch (iV1) {
+	case 0: // 파티 탈퇴 신청
+		RequestDeletePartyHandler(iClientH);
+		break;
 
-	for (i = 1; i < DEF_MAXCLIENTS; i++)
-	if ((m_pClientList[i] != NULL) && (strcmp(m_pClientList[i]->m_cCharName, pMemberName) == 0)) {
-		// 같은 이름을 가진 플레이어를 찾았다.
-		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_QUERY_JOINPARTY, NULL, NULL, NULL, m_pClientList[iClientH]->m_cCharName);
-		return;
+	case 1: // 파티 가입 신청
+		//testcode
+		wsprintf(G_cTxt, "Join Party Req: %s(%d) ID(%d) Stat(%d) ReqJoinH(%d) ReqJoinName(%s)", m_pClientList[iClientH]->m_cCharName, iClientH, 
+			     m_pClientList[iClientH]->m_iPartyID, m_pClientList[iClientH]->m_iPartyStatus, m_pClientList[iClientH]->m_iReqJoinPartyClientH,
+				 m_pClientList[iClientH]->m_cReqJoinPartyName);
+		PutLogList(G_cTxt);
+
+		if ((m_pClientList[iClientH]->m_iPartyID != NULL) || (m_pClientList[iClientH]->m_iPartyStatus != DEF_PARTYSTATUS_NULL)) {
+			// 이미 파티에 가입해 있다면 파티 가입 신청을 할 수 없다.
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PARTY, 7, 0, NULL, NULL);
+// v2.19 2002-12-4  파티 버그 수정 			
+/*			m_pClientList[iClientH]->m_iReqJoinPartyClientH = NULL;
+			ZeroMemory(m_pClientList[iClientH]->m_cReqJoinPartyName, sizeof(m_pClientList[iClientH]->m_cReqJoinPartyName));
+			m_pClientList[iClientH]->m_iPartyStatus = DEF_PARTYSTATUS_NULL;
+			*/
+			//testcode
+			PutLogList("Join Party Reject (1)");
+			return;
+		}
+
+		for (i = 1; i < DEF_MAXCLIENTS; i++)
+		if ((m_pClientList[i] != NULL) && (strcmp(m_pClientList[i]->m_cCharName, pMemberName) == 0)) {
+			// 같은 이름을 가진 플레이어를 찾았다.
+			sAppr2 = (short)((m_pClientList[i]->m_sAppr2 & 0xF000) >> 12);
+			if (sAppr2 != 0) {
+				// 전투 모드 상태의 상대에게는 파티 가입 신청을 할 수 없다.
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PARTY, 7, 0, NULL, NULL);
+				//testcode
+				PutLogList("Join Party Reject (2)");
+			}
+			else if (m_pClientList[i]->m_cSide != m_pClientList[iClientH]->m_cSide) {
+				// 편이 다르면 파티에 들 수 없다.
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PARTY, 7, 0, NULL, NULL);
+				//testcode
+				PutLogList("Join Party Reject (3)");
+			}
+			else if (m_pClientList[i]->m_iPartyStatus == DEF_PARTYSTATUS_PROCESSING) {
+				// 파티 가입을 신청한 대상이 이미 다른 파티 가입 관련 처리를 하고 있다. 신청 불가.
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PARTY, 7, 0, NULL, NULL);
+				//testcode
+				PutLogList("Join Party Reject (4)");
+				//testcode
+				wsprintf(G_cTxt, "Party join reject(2) ClientH:%d ID:%d JoinName:%d", i, m_pClientList[i]->m_iPartyID, m_pClientList[i]->m_cReqJoinPartyName);
+				PutLogList(G_cTxt);
+
+				m_pClientList[iClientH]->m_iReqJoinPartyClientH = NULL;
+				ZeroMemory(m_pClientList[iClientH]->m_cReqJoinPartyName, sizeof(m_pClientList[iClientH]->m_cReqJoinPartyName));
+				m_pClientList[iClientH]->m_iPartyStatus = DEF_PARTYSTATUS_NULL;
+			}
+			else {
+				// 가입 승인 여부를 묻는다.
+				m_pClientList[i]->m_iReqJoinPartyClientH = iClientH;
+				ZeroMemory(m_pClientList[i]->m_cReqJoinPartyName, sizeof(m_pClientList[i]->m_cReqJoinPartyName));
+				strcpy(m_pClientList[i]->m_cReqJoinPartyName, m_pClientList[iClientH]->m_cCharName);
+				SendNotifyMsg(NULL, i, DEF_NOTIFY_QUERY_JOINPARTY, NULL, NULL, NULL, m_pClientList[iClientH]->m_cCharName);
+				
+				// 신청한 측에는 파티 마스터가 될 캐릭터의 인덱스를 넣어줌. 취소할때 처리하기 위함임.
+				m_pClientList[iClientH]->m_iReqJoinPartyClientH = i;
+				ZeroMemory(m_pClientList[iClientH]->m_cReqJoinPartyName, sizeof(m_pClientList[iClientH]->m_cReqJoinPartyName));
+				strcpy(m_pClientList[iClientH]->m_cReqJoinPartyName, m_pClientList[i]->m_cCharName);
+				// 파티 상태 세트
+				m_pClientList[iClientH]->m_iPartyStatus = DEF_PARTYSTATUS_PROCESSING;
+			}
+			return;
+		}
+		break;
+
+	case 2: // 파티 멤버 확인 명령 
+		if (m_pClientList[iClientH]->m_iPartyStatus == DEF_PARTYSTATUS_CONFIRM) {
+			ZeroMemory(cData, sizeof(cData));
+			cp = (char *)cData;
+			dwp = (DWORD *)cp;
+			*dwp = MSGID_PARTYOPERATION;
+			cp += 4;
+			wp = (WORD*)cp;
+			*wp = 6; // 파티 멤버 리스트 요청
+			cp += 2;
+			wp = (WORD *)cp;
+			*wp = iClientH;
+			cp += 2;
+			memcpy(cp, m_pClientList[iClientH]->m_cCharName, 10);
+			cp += 10;
+			wp = (WORD *)cp;
+			*wp = m_pClientList[iClientH]->m_iPartyID;
+			cp += 2;
+			SendMsgToGateServer(MSGID_PARTYOPERATION, iClientH, cData);
+		}
+		break;
 	}
 }
 
@@ -39473,22 +46861,19 @@ BOOL CGame::bCheckEnergySphereDestination(int iNpcH, short sAttackerH, char cAtt
 		cResult = m_pMapList[iGoalMapIndex]->m_stEnergySphereGoalList[m_pMapList[iGoalMapIndex]->m_iCurEnergySphereGoalPointIndex].cResult;
 		dX = m_pMapList[iGoalMapIndex]->m_stEnergySphereGoalList[m_pMapList[iGoalMapIndex]->m_iCurEnergySphereGoalPointIndex].aresdenX;
 		dY = m_pMapList[iGoalMapIndex]->m_stEnergySphereGoalList[m_pMapList[iGoalMapIndex]->m_iCurEnergySphereGoalPointIndex].aresdenY;
-		if ((sX >= dX-2) && (sX <= dX+2) && (sY >= dY-2) && (sY <= dY+2)) {
+		if ((sX >= dX-1) && (sX <= dX+1) && (sY >= dY-1) && (sY <= dY+1)) {
 			// 아레스덴 목표지점에 도착했다.
 			// 현재 에너지 스피어 골 인덱스 저장 
 			m_pMapList[iGoalMapIndex]->m_iCurEnergySphereGoalPointIndex = -1;
 		
 			if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sAttackerH] != NULL)) {
 				if (m_pClientList[sAttackerH]->m_cSide == 1) { // Aresden (Side:1)
-					// 자신의 국가 포탈에 골을 넣은 경우 공헌도 +5
-					m_pClientList[sAttackerH]->m_iContribution += 5;
 					// 로그 작성
 					wsprintf(G_cTxt, "(!) 에너지 스피어 골인 (%s)", m_pClientList[sAttackerH]->m_cCharName);
 					PutLogFileList(G_cTxt);
 				}
 				else {
-					// 다른 국가에 골을 넣었을 경우 공헌도가 10 떨어진다.
-					m_pClientList[sAttackerH]->m_iContribution -= 10;
+					// 사투장에서는 적국 쪽에 골을 넣어도 페널티가 없다.
 				}
 			
 				// 에너지 스피어가 골인 됐음을 모든 클라이언트에게 알려준다.
@@ -39498,27 +46883,26 @@ BOOL CGame::bCheckEnergySphereDestination(int iNpcH, short sAttackerH, char cAtt
 					SendNotifyMsg(NULL, i, DEF_NOTIFY_ENERGYSPHEREGOALIN, cResult, m_pClientList[sAttackerH]->m_cSide, 2, m_pClientList[sAttackerH]->m_cCharName);
 				}
 			}
+			// v2.05 자동 생성인 경우 에너지 스피어가 없어지자 마자 생성 
+			if (m_pMapList[iGoalMapIndex]->m_bIsEnergySphereAutoCreation == TRUE) EnergySphereProcessor(TRUE, -1*iGoalMapIndex);
 			return TRUE;
 		}
 
 		dX = m_pMapList[iGoalMapIndex]->m_stEnergySphereGoalList[m_pMapList[iGoalMapIndex]->m_iCurEnergySphereGoalPointIndex].elvineX;
 		dY = m_pMapList[iGoalMapIndex]->m_stEnergySphereGoalList[m_pMapList[iGoalMapIndex]->m_iCurEnergySphereGoalPointIndex].elvineY;
-		if ((sX >= dX-2) && (sX <= dX+2) && (sY >= dY-2) && (sY <= dY+2)) {
+		if ((sX >= dX-1) && (sX <= dX+1) && (sY >= dY-1) && (sY <= dY+1)) {
 			// 엘바인 목표지점에 도착했다.
 			// 현재 에너지 스피어 골 인덱스 저장 
 			m_pMapList[iGoalMapIndex]->m_iCurEnergySphereGoalPointIndex = -1;
 
 			if ((cAttackerType == DEF_OWNERTYPE_PLAYER) && (m_pClientList[sAttackerH] != NULL)) {
 				if (m_pClientList[sAttackerH]->m_cSide == 2) { // Elvine (Side:2)
-					// 자신의 국가 포탈에 골을 넣은 경우 공헌도 +5
-					m_pClientList[sAttackerH]->m_iContribution += 5;
 					// 로그 작성
 					wsprintf(G_cTxt, "(!) 에너지 스피어 골인 (%s)", m_pClientList[sAttackerH]->m_cCharName);
 					PutLogFileList(G_cTxt);
 				}
 				else {
-					// 다른 국가에 골을 넣었을 경우 공헌도가 10 떨어진다.
-					m_pClientList[sAttackerH]->m_iContribution -= 10;
+					// 사투장에서는 적국 쪽에 골을 넣어도 페널티가 없다.
 				}
 			
 				// 에너지 스피어가 골인 됐음을 모든 클라이언트에게 알려준다.
@@ -39528,8 +46912,11 @@ BOOL CGame::bCheckEnergySphereDestination(int iNpcH, short sAttackerH, char cAtt
 					SendNotifyMsg(NULL, i, DEF_NOTIFY_ENERGYSPHEREGOALIN, cResult, m_pClientList[sAttackerH]->m_cSide, 1, m_pClientList[sAttackerH]->m_cCharName);
 				}
 			}
+			// v2.05 자동 생성인 경우 에너지 스피어가 없어지자 마자 생성 
+			if (m_pMapList[iGoalMapIndex]->m_bIsEnergySphereAutoCreation == TRUE) EnergySphereProcessor(TRUE, -1*iGoalMapIndex);
 			return TRUE;
 		}
+
 		return FALSE;
 	}
 	else {
@@ -39542,7 +46929,7 @@ BOOL CGame::bCheckEnergySphereDestination(int iNpcH, short sAttackerH, char cAtt
 		cResult = m_pMapList[m_iMiddlelandMapIndex]->m_stEnergySphereGoalList[m_pMapList[m_iMiddlelandMapIndex]->m_iCurEnergySphereGoalPointIndex].cResult;
 		dX = m_pMapList[m_iMiddlelandMapIndex]->m_stEnergySphereGoalList[m_pMapList[m_iMiddlelandMapIndex]->m_iCurEnergySphereGoalPointIndex].aresdenX;
 		dY = m_pMapList[m_iMiddlelandMapIndex]->m_stEnergySphereGoalList[m_pMapList[m_iMiddlelandMapIndex]->m_iCurEnergySphereGoalPointIndex].aresdenY;
-		if ((sX >= dX-4) && (sX <= dX+4) && (sY >= dY-4) && (sY <= dY+4)) {
+		if ((sX >= dX-1) && (sX <= dX+1) && (sY >= dY-1) && (sY <= dY+1)) {
 			// 아레스덴 목표지점에 도착했다.
 			// 현재 에너지 스피어 골 인덱스 저장 
 			m_pMapList[m_iMiddlelandMapIndex]->m_iCurEnergySphereGoalPointIndex = -1;
@@ -39572,7 +46959,7 @@ BOOL CGame::bCheckEnergySphereDestination(int iNpcH, short sAttackerH, char cAtt
 
 		dX = m_pMapList[m_iMiddlelandMapIndex]->m_stEnergySphereGoalList[m_pMapList[m_iMiddlelandMapIndex]->m_iCurEnergySphereGoalPointIndex].elvineX;
 		dY = m_pMapList[m_iMiddlelandMapIndex]->m_stEnergySphereGoalList[m_pMapList[m_iMiddlelandMapIndex]->m_iCurEnergySphereGoalPointIndex].elvineY;
-		if ((sX >= dX-4) && (sX <= dX+4) && (sY >= dY-4) && (sY <= dY+4)) {
+		if ((sX >= dX-1) && (sX <= dX+1) && (sY >= dY-1) && (sY <= dY+1)) {
 			// 엘바인 목표지점에 도착했다.
 			// 현재 에너지 스피어 골 인덱스 저장 
 			m_pMapList[m_iMiddlelandMapIndex]->m_iCurEnergySphereGoalPointIndex = -1;
@@ -39605,7 +46992,7 @@ BOOL CGame::bCheckEnergySphereDestination(int iNpcH, short sAttackerH, char cAtt
 
 void CGame::EnergySphereProcessor(BOOL bIsAdminCreate, int iClientH)
 {
- int i, iNamingValue, iCIndex, iTemp, pX, pY;
+ int i, iNamingValue, iCIndex, iTemp, pX, pY, iMapIndex;
  char cSA, cName_Internal[31], cWaypoint[31];
 
 	if (bIsAdminCreate != TRUE) {
@@ -39666,42 +47053,48 @@ void CGame::EnergySphereProcessor(BOOL bIsAdminCreate, int iClientH)
 		PutLogFileList(G_cTxt);
 	}
 	else {
+		if (iClientH == 0)
+			iMapIndex = 0;
+		else if (iClientH < 0) // 음수인 경우에는 맵 인덱스 
+			 iMapIndex = -1*iClientH;
+		else iMapIndex = m_pClientList[iClientH]->m_cMapIndex;
+
 		// 만약 이미 에너지 스피어의 골이 할당되어 있으면 만들면 안된다.
-		if (m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_iCurEnergySphereGoalPointIndex >= 0) return;
+		if (m_pMapList[iMapIndex]->m_iCurEnergySphereGoalPointIndex >= 0) return;
 
 		// 에너지 스피어를 만들 위치를 결정 
-		iCIndex = iDice(1, m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_iTotalEnergySphereCreationPoint);
+		iCIndex = iDice(1, m_pMapList[iMapIndex]->m_iTotalEnergySphereCreationPoint);
 
 		// 에너지 스피어 시작 위치가 초기화가 안된 상태라면 
-		if (m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stEnergySphereCreationList[iCIndex].cType == NULL) return;
+		if (m_pMapList[iMapIndex]->m_stEnergySphereCreationList[iCIndex].cType == NULL) return;
 		
 		// 여기서 에너지 스피어 생성 
 		cSA = 0;
- 		pX = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stEnergySphereCreationList[iCIndex].sX;
-		pY = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stEnergySphereCreationList[iCIndex].sY;
+ 		pX = m_pMapList[iMapIndex]->m_stEnergySphereCreationList[iCIndex].sX;
+		pY = m_pMapList[iMapIndex]->m_stEnergySphereCreationList[iCIndex].sY;
 		ZeroMemory(cWaypoint, sizeof(cWaypoint));
 	
-		iNamingValue = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->iGetEmptyNamingValue();
+		iNamingValue = m_pMapList[iMapIndex]->iGetEmptyNamingValue();
 		if (iNamingValue != -1) {
 			// 
 			ZeroMemory(cName_Internal, sizeof(cName_Internal));
 			wsprintf(cName_Internal, "XX%d", iNamingValue);
 			cName_Internal[0] = '_';
-			cName_Internal[1] = m_pClientList[iClientH]->m_cMapIndex + 65;
+			cName_Internal[1] = iMapIndex + 65;
 			
-			if ((bCreateNewNpc("Energy-Sphere", cName_Internal, m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, (rand() % 3), cSA, DEF_MOVETYPE_RANDOM, &pX, &pY, cWaypoint, NULL, NULL, -1, FALSE, FALSE, FALSE)) == FALSE) {
+			if ((bCreateNewNpc("Energy-Sphere", cName_Internal, m_pMapList[iMapIndex]->m_cName, (rand() % 3), cSA, DEF_MOVETYPE_RANDOM, &pX, &pY, cWaypoint, NULL, NULL, -1, FALSE, FALSE, FALSE)) == FALSE) {
 				// 실패했으므로 예약된 NameValue를 해제시킨다.
-				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->SetNamingValueEmpty(iNamingValue);
+				m_pMapList[iMapIndex]->SetNamingValueEmpty(iNamingValue);
 				return;
 			}
 		}		
 
 		// 에너지 스피어 골 생성 
-		iTemp  = iDice(1, m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_iTotalEnergySphereGoalPoint);
-		if (m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stEnergySphereGoalList[iTemp].cResult == NULL) return;
+		iTemp  = iDice(1, m_pMapList[iMapIndex]->m_iTotalEnergySphereGoalPoint);
+		if (m_pMapList[iMapIndex]->m_stEnergySphereGoalList[iTemp].cResult == NULL) return;
 	
 		// 현재 에너지 스피어 골 인덱스 저장 
-		m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_iCurEnergySphereGoalPointIndex = iTemp;
+		m_pMapList[iMapIndex]->m_iCurEnergySphereGoalPointIndex = iTemp;
 
 		// 에너지 스피어가 만들어 졌음을 모든 클라이언트에게 알려준다.
 		for (i = 1; i < DEF_MAXCLIENTS; i++)
@@ -39727,6 +47120,11 @@ void CGame::ActivateSpecialAbilityHandler(int iClientH)
 	if (m_pClientList[iClientH]->m_iSpecialAbilityTime != 0) return;
 	if (m_pClientList[iClientH]->m_iSpecialAbilityType == 0) return;
 	if (m_pClientList[iClientH]->m_bIsSpecialAbilityEnabled == TRUE) return;
+
+#ifdef DEF_GUILDWARMODE
+	// 길드전 모드일때는 특수 능력 사용 불가 
+	return;
+#endif
 
 	m_pClientList[iClientH]->m_bIsSpecialAbilityEnabled  = TRUE;
 	m_pClientList[iClientH]->m_dwSpecialAbilityStartTime = dwTime;
@@ -39775,7 +47173,6 @@ void CGame::CancelQuestHandler(int iClientH)
 int CGame::iGetItemWeight(CItem *pItem, int iCount)
 {
  int iWeight;
- DWORD dwCount;
 	// 아이템의 수량에 따른 무게를 계산한다. Gold인 경우 무게를 20분의 1로 변경 
 	iWeight = (pItem->m_wWeight);
 	if (iCount < 0) iCount = 1;
@@ -39786,417 +47183,377 @@ int CGame::iGetItemWeight(CItem *pItem, int iCount)
 	return iWeight;
 }
 
-
-BOOL CGame::bGetItemNameWhenDeleteNpc(char * pItemName, short sNpcType)
+// NPC를 삭제할때 특수 아이템을 발생시킬 것인지의 여부를 계산한다.
+BOOL CGame::bGetItemNameWhenDeleteNpc(int & iItemID, short sNpcType, int iItemprobability)
 {
- int iGenType, iResult;
+
+//-- NPC ITEM -----------------------------------------------------------------------------------------------------
+// 2002-09-17 #1 NPCITEM 개선
+// 2002-09-09 #1
+#if		defined(DEF_NPCITEM) 
+
+ class	CNpcItem CTempNpcItem;
+ int	iResult;
+ int	iNpcIndex;
+ int	iNumNpcitem;
+ int	iIndex;
+ int	iDiceValue;
+ BOOL	bFirstDice = FALSE, bSecondDice = FALSE;
+
+	for ( iNpcIndex = 0; iNpcIndex < DEF_MAXNPCTYPES; iNpcIndex++) {
+		if (m_pNpcConfigList[iNpcIndex] != NULL) {
+			if(m_pNpcConfigList[iNpcIndex]->m_sType == sNpcType ) break; 
+		}
+	}
+
+	if ( iNpcIndex == DEF_MAXNPCTYPES ) return FALSE;
+
+	if( m_pNpcConfigList[iNpcIndex]->m_vNpcItem.size() <=  0 )  return FALSE;
+
+	switch( m_pNpcConfigList[iNpcIndex]->m_iNpcitemType )
+	{
+	case 1:
+		// 설정 파일의 여러 개의 아이템 중 하나를 고른다.
+		iResult = iDice( 1, m_pNpcConfigList[iNpcIndex]->m_vNpcItem.size() ) - 1;
+
+		CTempNpcItem = m_pNpcConfigList[iNpcIndex]->m_vNpcItem.at(iResult);
+		
+		if ( iDice(1,CTempNpcItem.m_sFirstProbability  ) == CTempNpcItem.m_cFirstTargetValue ) bFirstDice  = TRUE;
+		if ( iDice(1,CTempNpcItem.m_sSecondProbability ) == CTempNpcItem.m_cSecondTargetValue) bSecondDice = TRUE;
+
+		if ( (bFirstDice == TRUE) && (bSecondDice == TRUE) )
+		{
+			iItemID = CTempNpcItem.m_sItemID;
+
+			wsprintf(G_cTxt, "NpcType 1 (%d) size(%d) %s(%d) (%d)", sNpcType, m_pNpcConfigList[iNpcIndex]->m_vNpcItem.size(), CTempNpcItem.m_cName, CTempNpcItem.m_sItemID, iItemID);
+		//	PutDebugMsg(G_cTxt);
+
+		}
+		break;
+
+	case 2:
+		iNumNpcitem = m_pNpcConfigList[iNpcIndex]->m_vNpcItem.size();
+		iDiceValue  = iDice(1, m_pNpcConfigList[iNpcIndex]->m_iNpcitemMax);
+
+		for(iIndex = 0; iIndex < iNumNpcitem; iIndex++) {
+			CTempNpcItem = m_pNpcConfigList[iNpcIndex]->m_vNpcItem.at(iIndex);
+
+			if( CTempNpcItem.m_sFirstProbability <= iDiceValue && iDiceValue < CTempNpcItem.m_sSecondProbability )
+			{
+				iItemID = CTempNpcItem.m_sItemID;
+
+				wsprintf(G_cTxt, "NpcType 2 (%d) size(%d) %s(%d) (%d)", sNpcType, m_pNpcConfigList[iNpcIndex]->m_vNpcItem.size(), CTempNpcItem.m_cName, CTempNpcItem.m_sItemID, iItemID);
+				//PutDebugMsg(G_cTxt);
+
+				break;
+			}
+		}
+		break;
+
+	} // switch
+
+	if ( iItemID <= 0 )
+		return FALSE;
+
+	return TRUE;
+
+#else	// !DEF_NPCITEM
+
+//-- End : NPC ITEM -----------------------------------------------------------------------------------------------
+
+ int iResult;
 	// NPC를 삭제할때 특수 아이템을 발생시킬 것인지의 여부를 계산한다.
 
 	switch (sNpcType) {
 	case 49: // 헬클라우
-		iResult = iDice(1,10000);
-		if ((iResult >= 1) && (iResult <= 4999)) {
-			if (iDice(1,2) == 1) 
-				 strcpy(pItemName, "루비반지"); 
-			else strcpy(pItemName, "에머랄드반지");
-		}
-		else if ((iResult >= 5000) && (iResult <= 7499))  strcpy(pItemName, "링오브위저드");
-		else if ((iResult >= 7500) && (iResult <= 8749))  strcpy(pItemName, "링오브메이지");
-		else if ((iResult >= 8750) && (iResult <= 9374))  strcpy(pItemName, "마법목걸이(DM+1)");
-		else if ((iResult >= 9375) && (iResult <= 9687))  strcpy(pItemName, "마법목걸이(MS10)");
-		else if ((iResult >= 9688) && (iResult <= 9843))  strcpy(pItemName, "링오브오우거파워");
-		else if ((iResult >= 9844) && (iResult <= 9921))  strcpy(pItemName, "넥클리스오브아엘");
-		else if ((iResult >= 9922) && (iResult <= 9960))  strcpy(pItemName, "넥클리스오브서펀트");
-		else if ((iResult >= 9961) && (iResult <= 9980))  strcpy(pItemName, "넥클리스오브라프");
-		else if ((iResult >= 9981) && (iResult <= 9990))  strcpy(pItemName, "메리엔-실드");
-		else if ((iResult >= 9991) && (iResult <= 9996))  strcpy(pItemName, "넥클리스오브에어엘레");
-		else if ((iResult >= 9996) && (iResult <= 9998))  strcpy(pItemName, "소드-오브-아이스");
-		else if ((iResult >= 9999) && (iResult <= 10000)) strcpy(pItemName, "링오브그랜드메이지");
+		iResult = iDice(1,20000);
+		if ((iResult >= 1) && (iResult <  5000)) iItemID = 300 ;			// "마법목걸이(RM10)"		5000
+		else if ((iResult >= 5000) && (iResult <  10000)) iItemID = 259 ;	// "매직스탭(M.Shield)"		5000
+		else if ((iResult >= 10000) && (iResult < 13000))  iItemID = 337 ;  // "루비반지"				3000
+		else if ((iResult >= 13000) && (iResult < 15000))  iItemID = 335 ;  // "에머랄드반지"			2000
+		else if ((iResult >= 15000) && (iResult < 17500))  iItemID = 308 ;  // "마법목걸이(MS10)"		2500
+		else if ((iResult >= 17500) && (iResult < 18750))  iItemID = 311 ;  // "마법목걸이(DF+10)"		1000
+		else if ((iResult >= 18750) && (iResult < 19000))  iItemID = 305 ;  // "마법목걸이(DM+1)"		 250
+		else if ((iResult >= 19000) && (iResult < 19700))  iItemID = 634 ;  // "링오브위저드"			 700
+		else if ((iResult >= 19700) && (iResult < 19844))  iItemID = 635 ;  // "링오브메이지"			 144
+		else if ((iResult >= 19844) && (iResult < 19922))  iItemID = 643 ;  // "넥클리스오브아엘"		  78
+		else if ((iResult >= 19922) && (iResult < 19961))  iItemID = 640 ;  // "넥클리스오브서펀트"		  39
+		else if ((iResult >= 19961) && (iResult < 19981))  iItemID = 637 ;  // "넥클리스오브라프"		  20
+		else if ((iResult >= 19981) && (iResult < 19991))  iItemID = 620 ;  // "메리엔-실드"			  10
+		else if ((iResult >= 19991) && (iResult < 19996))  iItemID = 644 ;  // "넥클리스오브에어엘레"	   5
+		else if ((iResult >= 19996) && (iResult < 19999))  iItemID = 614 ;  // "소드-오브-아이스"		   3
+		else if ((iResult >= 19999) && (iResult <= 20000)) iItemID = 636 ;  // "링오브그랜드메이지"		   2
 		return TRUE;
 
 	case 50: // 타이거웜
 		iResult = iDice(1,10000);
 		if ((iResult >= 1) && (iResult <= 4999)) {
 			if (iDice(1,2) == 1) 
-				 strcpy(pItemName, "마법목걸이(DF+10)"); 
-			else strcpy(pItemName, "마법목걸이(DM+1)");
+				 iItemID = 311 ;  // "마법목걸이(DF+10)"												2500
+			else iItemID = 305 ;  // "마법목걸이(DM+1)"													2500
 		}
-		else if ((iResult >= 5000) && (iResult <= 7499))  strcpy(pItemName, "소드-오브-아이스");
-		else if ((iResult >= 7500) && (iResult <= 8749))  strcpy(pItemName, "플램버그+3(LLF)");
-		else if ((iResult >= 8750) && (iResult <= 9374))  strcpy(pItemName, "링오브데몬파워");
-		else if ((iResult >= 9375) && (iResult <= 9687))  strcpy(pItemName, "블러드-레이피어");
-		else if ((iResult >= 9688) && (iResult <= 9843))  strcpy(pItemName, "블러드-소드");
-		else if ((iResult >= 9844) && (iResult <= 9921))  strcpy(pItemName, "블러드-액스");
-		else if ((iResult >= 9922) && (iResult <= 9960))  strcpy(pItemName, "매직원드(MS30-LLF)");
-		else if ((iResult >= 9961) && (iResult <= 9980))  strcpy(pItemName, "링오브더제리마");
-		else if ((iResult >= 9981) && (iResult <= 9990))  strcpy(pItemName, "제리마-레이피어");
-		else if ((iResult >= 9991) && (iResult <= 9996))  strcpy(pItemName, "제리마-블레이드");
-		else if ((iResult >= 9996) && (iResult <= 9998))  strcpy(pItemName, "제리마-액스");
-		else if ((iResult >= 9999) && (iResult <= 10000)) strcpy(pItemName, "링오브더아바돈");
+		else if ((iResult >= 5000) && (iResult <= 7499))  iItemID = 614 ;  // "소드-오브-아이스"		2500
+		else if ((iResult >= 7500) && (iResult <= 8749))  iItemID = 290 ;  // "플램버그+3(LLF)"			1250
+		else if ((iResult >= 8750) && (iResult <= 9374))  iItemID = 633 ;  // "링오브데몬파워"			 625
+		else if ((iResult >= 9375) && (iResult <= 9687))  iItemID = 492 ;  // "블러드-레이피어"			 313
+		else if ((iResult >= 9688) && (iResult <= 9843))  iItemID = 490 ;  // "블러드-소드"				 156
+		else if ((iResult >= 9844) && (iResult <= 9921))  iItemID = 491 ;  // "블러드-액스"				  78
+		else if ((iResult >= 9922) && (iResult <= 9960))  iItemID = 291 ;  // "매직원드(MS30-LLF)"		  39
+		else if ((iResult >= 9961) && (iResult <= 9980))  iItemID = 630 ;  // "링오브더제리마"			  20
+		else if ((iResult >= 9981) && (iResult <= 9990))  iItemID = 612 ;  // "제리마-레이피어"			  10
+		else if ((iResult >= 9991) && (iResult <= 9996))  iItemID = 610 ;  // "제리마-블레이드"			   5
+		else if ((iResult >= 9996) && (iResult <= 9998))  iItemID = 611 ;  // "제리마-액스"				   3
+		else if ((iResult >= 9999) && (iResult <= 10000)) iItemID = 631 ;  // "링오브더아바돈"			   2
 		return TRUE;
 
 	default: // 다른 몬스터. 확률 계산한다.
 		break;
 	}
 
+#ifdef DEF_TESTSERVER
 	// 일단 확률 계산.
-	if (iDice(1,50) == 13) {
-		switch (sNpcType) {
-		case 11: if (iDice(1,550) != 11) return FALSE;	 break;	 // Skeleton   2 * 100
-		case 12: if (iDice(1,400) != 11) return FALSE;	 break;	 // Stone-Golem 2 * 100
-		case 13: if (iDice(1,100) != 11) return FALSE;	 break;	 // Cyclops  6 * 100
-		case 14: if (iDice(1,700) != 11) return FALSE;	 break;	 // Orc 4 * 100
-		case 17: if (iDice(1,600) != 11) return FALSE;	 break;	 // Scorpoin 5 * 100
-		case 18: if (iDice(1,850) != 11) return FALSE;	 break;	 // Zombie 1 * 100
-		case 22: if (iDice(1,600) != 11) return FALSE;	 break;	 // Amphis 5 * 100
-		case 23: if (iDice(1,400) != 11) return FALSE;	 break;	 // Clay-Golem 2 * 100
-		case 27: if (iDice(1,100) != 11) return FALSE;	 break;	 // Hellhound 7 * 100
-		case 28: if (iDice(1,100) != 11) return FALSE;	 break;	 // Troll 5 * 100
-		case 29: if (iDice(1,15) != 3) return FALSE;	 break;	 // Orge  7 * 100
-		case 30: if (iDice(1,10) !=  3) return FALSE;	 break;  // Liche 1 * 100
-		case 31:  	                                     break;	 // Demon 5 * 100
-		case 32: if (iDice(1,2) !=  1) return FALSE;	 break;	 // Unicorn 5 * 100
-		case 33: if (iDice(1,30) !=  3) return FALSE;	 break;  // WereWolf 7 * 100
-		case 48: if (iDice(1,30) !=  3) return FALSE;	 break;  // Stalker 
-		default: return FALSE;
-		}
-	}
-	else return FALSE;
 
-	// GenType 결정
 	switch (sNpcType) {
-	case 11: // 반지류 아이템 나오는 경우
-	case 17:
-	case 14:
-	case 28: 
-		switch (iDice(1,7)) {
-		case 1: strcpy(pItemName, "행운의금반지"); break;
-		case 2: strcpy(pItemName, "싸파이어반지"); break;
-		case 3: strcpy(pItemName, "에머랄드반지"); break;
-		case 4: strcpy(pItemName, "루비반지"); break;
-		case 5: strcpy(pItemName, "백금반지"); break;
-		case 6: if (iDice(1,15) == 3) strcpy(pItemName, "링오브위저드"); break;
-		case 7: if (iDice(1,25) == 3) strcpy(pItemName, "링오브메이지"); break;
-		}
-		break;
-	
-	case 13: // 목걸이류 아이템 나오는 경우 
-	case 27: 
+	case 11: if (iDice(1,55) != 11) return FALSE; break; 	  // Skeleton   2 * 100	
+	case 12: if (iDice(1,40) != 11) return FALSE; break;	  // Stone-Golem 2 * 100	
+	case 13: if (iDice(1,10) != 11) return FALSE; break;	  // Cyclops  6 * 100	
+	case 14: if (iDice(1,70) != 11) return FALSE; break;	  // Orc 4 * 100	
+	case 17: if (iDice(1,60) != 11) return FALSE; break;	  // Scorpoin 5 * 100	
+	case 18: if (iDice(1,85) != 11) return FALSE; break;	  // Zombie 1 * 100	
+	case 22: if (iDice(1,60) != 11) return FALSE; break;	  // Amphis 5 * 100	
+	case 23: if (iDice(1,40) != 11) return FALSE; break;	  // Clay-Golem 2 * 100	
+	case 27: if (iDice(1,10) != 11) return FALSE; break;	  // Hellhound 7 * 100	
+	case 28: if (iDice(1,10) != 11) return FALSE; break;	  // Troll 5 * 100	
 	case 29: 
-		switch (iDice(1,7)) {
-		case 1: strcpy(pItemName, "마법목걸이(DF+10)"); break;
-		case 2: if (iDice(1,20) == 13) strcpy(pItemName, "마법목걸이(MS10)"); break;
-		case 3: if (iDice(1,10) == 13) strcpy(pItemName, "마법목걸이(DM+1)"); break;
-		case 4: strcpy(pItemName, "마법목걸이(RM10)"); break;
-		case 5: if (iDice(1,30) == 13) strcpy(pItemName, "링오브오우거파워"); break;
-		case 6: if (iDice(1,30) == 13) strcpy(pItemName, "넥클리스오브라프"); break;
-		case 7: if (iDice(1,30) == 13) strcpy(pItemName, "넥클리스오브파프"); break;
-		}
+	case 30: 
+	case 31: break;	                                   // Demon 5 * 100	
+	case 32: if (iDice(1,2) !=  1) return FALSE; break;	   // Unicorn 5 * 100	
+	case 33: if (iDice(1,3) !=  3) return FALSE; break;	   // WereWolf 7 * 100
+	case 48: if (iDice(1,10) !=  3) return FALSE; break;	   // Stalker 
+	case 52: if (iDice(1,3)  !=  1) return FALSE; break;      // Gagoyle
+	case 53: if (iDice(1,50) !=  11) return FALSE; break;	   // Beholder
+	case 54: if (iDice(1,2)  !=  11) return FALSE; break;	   // Dark-Elf
+	case 57: if (iDice(1,40) !=  11) return FALSE; break;	   // Giant-Frog
+
+	// 2002-09-12 #1 추가 몬스터 특수 아이템 확률 조정
+	case 58:	// Mountain-Giant
+	case 59:	// Ettin
+	case 60:	// Cannibal-Plant
 		break;
 
-	case 18: 
-	case 22:
-		switch (iDice(1,4)) {
-		case 1: if (iDice(1,75) == 13)  strcpy(pItemName, "소드-오브-메두사"); break;
-		case 2: if (iDice(1,20) == 13)  strcpy(pItemName, "넥클리스오브포프"); break;
-		case 3: if (iDice(1,40) == 13) strcpy(pItemName, "넥클리스오브메두사"); break;
-		case 4: if (iDice(1,30) == 13) strcpy(pItemName, "넥클리스오브서펀트"); break;
-		}
-		break;
-
-	case 12:
-	case 23:
-	case 32:
-		switch (iDice(1,4)) {
-		case 1: if (iDice(1,30) == 13) strcpy(pItemName, "메리엔-실드"); break;
-		case 2: if (iDice(1,30) == 13) strcpy(pItemName, "메리엔-플레이트메일M"); break;
-		case 3: if (iDice(1,30) == 13) strcpy(pItemName, "메리엔-플레이트메일W"); break;
-		case 4: if (iDice(1,20) == 11 ) strcpy(pItemName, "넥클리스오브에어엘레"); break;
-		}
-		break;
-
-	case 33:
-	case 48:
-		switch (iDice(1,2)) {
-		case 1: if (iDice(1,30) == 3) strcpy(pItemName, "플램버그+3(LLF)"); break;
-		case 2: strcpy(pItemName, "골드액스(LLF)"); break;
-		}
-		break;
-
-	case 30:
-		switch (iDice(1,7)) {
-		case 1: if (iDice(1,5) == 3) strcpy(pItemName, "마법교본(Ice-Storm)"); break;
-		case 2: strcpy(pItemName, "매직스탭(M.Shield)");  break;
-		case 3: if (iDice(1,20) == 3) strcpy(pItemName, "매직원드(MS30-LLF)"); break;
-		case 4: if (iDice(1,10) == 3) strcpy(pItemName, "소드-오브-아이스"); break;
-		case 5: if (iDice(1,10) == 3) strcpy(pItemName, "넥클리스오브아프"); break;
-		case 6: if (iDice(1,15) == 3) strcpy(pItemName, "넥클리스오브아엘"); break;
-		case 7: if (iDice(1,20) == 3) strcpy(pItemName, "링오브그랜드메이지"); break;
-		}
-		break;
-
-	case 31:
-		switch (iDice(1,12)) {
-		case 1: if (iDice(1,15) == 3) strcpy(pItemName, "마법교본(Bloody.S.W)"); break;
-		case 2: strcpy(pItemName, "블러드-액스"); break;
-		case 3: if (iDice(1,5) == 3) strcpy(pItemName, "블러드-소드"); break;
-		case 4: strcpy(pItemName, "블러드-레이피어"); break;
-		case 5: if (iDice(1,10) == 3) strcpy(pItemName, "제리마-블레이드"); break;
-		case 6: if (iDice(1,10) == 3) strcpy(pItemName, "제리마-액스"); break;
-		case 7: if (iDice(1,10) == 3) strcpy(pItemName, "제리마-레이피어"); break;
-		case 8: if (iDice(1,5) == 3)  strcpy(pItemName, "마법교본(Mass.F.S)"); break;
-		case 9: if (iDice(1,10) == 3)  strcpy(pItemName, "링오브데몬파워"); break;
-		case 10: if (iDice(1,10) == 3) strcpy(pItemName, "넥클리스오브이프리트"); break;
-		case 11: if (iDice(1,20) == 3)  strcpy(pItemName, "링오브더제리마"); break;
-		case 12: if (iDice(1,30) == 3) strcpy(pItemName, "링오브더아바돈"); break;
-		}
-		break;
-	}
-	
-	if (strlen(pItemName) == 0) 
-		 return FALSE;
-	else return TRUE;
-}
-
-
-
-/*
-BOOL CGame::bGetItemNameWhenDeleteNpc(char * pItemName, short sNpcType)
-{
-	
- int iGenType;
-	// NPC를 삭제할때 특수 아이템을 발생시킬 것인지의 여부를 계산한다.
-
+	default: return FALSE;
+	} // switch
+		
+#else 
 	// 일단 확률 계산.
-	if (iDice(1,150) == 13) {
-		switch (sNpcType) {
-		case 11: if (iDice(1,1000) != 11) return FALSE;		 // Skeleton
-		case 12: if (iDice(1,750) != 11) return FALSE;		 // Stone-Golem
-		case 13: if (iDice(1,500) != 11) return FALSE;		 // Cyclops
-		case 14: if (iDice(1,1000) != 11) return FALSE;		 // Orc
-		case 17: if (iDice(1,1500) != 11) return FALSE;		 // Scorpoin
-		case 18: if (iDice(1,1000) != 11) return FALSE;		 // Zombie
-		case 22: if (iDice(1,1500) != 11) return FALSE;		 // Amphis
-		case 23: if (iDice(1,750) != 11) return FALSE;		 // Clay-Golem
-		case 27: if (iDice(1,900) != 11) return FALSE;		 // Hellhound
-		case 28: if (iDice(1,500) != 11) return FALSE;		 // Troll
-		case 29: if (iDice(1,15) != 3) return FALSE;		 // Orge
-		case 30: if (iDice(1,10) !=  3) return FALSE;		 // Liche
-		case 31: if (iDice(1,8) !=  3) return FALSE;		 // Demon
-		case 32: if (iDice(1,5) !=  3) return FALSE;		 // Unicorn
-		case 33: if (iDice(1,30) !=  3) return FALSE;	     // WereWolf
+
+	if (iDice(1,iItemprobability) != 13) return FALSE ;
+
+	switch (sNpcType) {
+		case 11: if (iDice(1,550) != 11) return FALSE; break;	  // Skeleton   2 * 100	
+		case 12: if (iDice(1,400) != 11) return FALSE; break;	  // Stone-Golem 2 * 100	
+		case 13: if (iDice(1,100) != 11) return FALSE; break;	  // Cyclops  6 * 100	
+		case 14: if (iDice(1,700) != 11) return FALSE; break;	  // Orc 4 * 100	
+		case 17: if (iDice(1,600) != 11) return FALSE; break;	  // Scorpoin 5 * 100	
+		case 18: if (iDice(1,850) != 11) return FALSE; break;	  // Zombie 1 * 100	
+		case 22: if (iDice(1,600) != 11) return FALSE; break;	  // Amphis 5 * 100	
+		case 23: if (iDice(1,400) != 11) return FALSE; break;	  // Clay-Golem 2 * 100	
+		case 27: if (iDice(1,100) != 11) return FALSE; break;	  // Hellhound 7 * 100	
+		case 28: if (iDice(1,100) != 11) return FALSE; break;	  // Troll 5 * 100	
+		case 29: if (iDice(1,15)  != 3) return FALSE; break;	  // Orge  7 * 100	
+		case 30: if (iDice(1,12)  != 3) return FALSE; break;	  // Liche 1 * 100   
+		case 31:  	                                      // Demon 5 * 100	
+		case 32: if (iDice(1,2)   != 1) return FALSE; break;	  // Unicorn 5 * 100	
+		case 33: if (iDice(1,30)  != 3) return FALSE; break;	  // WereWolf 7 * 100
+		case 48: if (iDice(1,100) != 3) return FALSE; break;	  // Stalker 
+		case 52: if (iDice(1,3)   != 1) return FALSE; break;     // Gagoyle
+		case 53: if (iDice(1,300) != 11) return FALSE; break;	  // Beholder
+		case 54: if (iDice(1,20)  != 11) return FALSE; break;	  // Dark-Elf
+		case 57: if (iDice(1,500) != 11) return FALSE; break;	  // Giant-Frog
+			// 2002-09-12 #1 추가 몬스터 특수 아이템 확률 조정
+		case 58: if (iDice(1,15)  != 11) return FALSE; break;	  // Mountain-Giant
+		case 59: if (iDice(1,10)  != 11) return FALSE; break;	  // Ettin
+		case 60: if (iDice(1,80)  != 11) return FALSE; break;	  // Cannibal-Plant
 		default: return FALSE;
-		}
 	}
-	else return FALSE;
+
+#endif // DEF_TESTSERVER
 
 	// GenType 결정
 	switch (sNpcType) {
-	case 11: // 반지류 아이템 나오는 경우
-	case 17:
-	case 14:
-	case 28: 
+	// 반지류 아이템 나오는 경우
+	case 11: // Skeleton
+	case 17: // Scorpoin
+	case 14: // Orc
+	case 28: // Troll
+	case 57: // Giant-Frog
 		switch (iDice(1,7)) {
-		case 1: strcpy(pItemName, "행운의금반지"); break;
-		case 2: strcpy(pItemName, "싸파이어반지"); break;
-		case 3: strcpy(pItemName, "에머랄드반지"); break;
-		case 4: strcpy(pItemName, "루비반지"); break;
-		case 5: strcpy(pItemName, "백금반지"); break;
-		case 6: if (iDice(1,10) == 3) strcpy(pItemName, "링오브위저드"); break;
-		case 7: if (iDice(1,20) == 3) strcpy(pItemName, "링오브메이지"); break;
-		}
-		break;
-	
-	case 13: // 목걸이류 아이템 나오는 경우 
-	case 27: 
-	case 29: 
-		switch (iDice(1,7)) {
-		case 1: strcpy(pItemName, "마법목걸이(DF+10)"); break;
-		case 2: if (iDice(1,50) == 13) strcpy(pItemName, "마법목걸이(MS10)"); break;
-		case 3: if (iDice(1,40) == 13) strcpy(pItemName, "마법목걸이(DM+1)"); break;
-		case 4: strcpy(pItemName, "마법목걸이(RM10)"); break;
-		case 5: if (iDice(1,80) == 13) strcpy(pItemName, "링오브오우거파워"); break;
-		case 6: if (iDice(1,80) == 13) strcpy(pItemName, "넥클리스오브라프"); break;
-		case 7: if (iDice(1,80) == 13) strcpy(pItemName, "넥클리스오브파프"); break;
+		case 1: iItemID = 334 ; break; // "행운의금반지"
+		case 2: iItemID = 336 ; break; // "싸파이어반지"
+		case 3: if (iDice(1,15) == 3) iItemID = 335 ; break; // "에머랄드반지"
+		case 4: iItemID = 337 ; break; // "루비반지"
+		case 5: iItemID = 333 ; break; // "백금반지"
+		case 6: if (iDice(1,15) == 3) iItemID = 634 ; break; // "링오브위저드"
+		case 7: if (iDice(1,25) == 3) iItemID = 635 ; break; // "링오브메이지"
 		}
 		break;
 
-	case 18: 
-	case 22:
+	// 목걸이류 아이템 나오는 경우 
+	case 13: // Cyclops 
+	case 27: // Hellhound
+	case 29: // Orge
+		switch (iDice(1,7)) {
+		case 1: iItemID = 311 ; break; // "마법목걸이(DF+10)"
+		case 2: if (iDice(1,20) == 13) iItemID = 308 ; break; // "마법목걸이(MS10)"
+		case 3: if (iDice(1,10) == 13) iItemID = 305 ; break; // "마법목걸이(DM+1)"
+		case 4: iItemID = 300 ; break; // "마법목걸이(RM10)"
+		case 5: if (iDice(1,30) == 13) iItemID = 632 ; break; // "링오브오우거파워"
+		case 6: if (iDice(1,30) == 13) iItemID = 637 ; break; // "넥클리스오브라프"
+		case 7: if (iDice(1,30) == 13) iItemID = 638 ; break; // "넥클리스오브파프"
+		}
+		break;
+
+	case 18: // Zombie
+	case 22: // Amphis
 		switch (iDice(1,4)) {
-		case 1: if (iDice(1,100) == 13)  strcpy(pItemName, "소드-오브-메두사"); break;
-		case 2: if (iDice(1,200) == 13)  strcpy(pItemName, "넥클리스오브포프"); break;
-		case 3: if (iDice(1,400) == 13) strcpy(pItemName, "넥클리스오브서펀트"); break;
-		case 4: if (iDice(1,800) == 13) strcpy(pItemName, "넥클리스오브메두사"); break;
+		case 1: if (iDice(1,75) == 13) iItemID = 613 ; break; // "소드-오브-메두사"
+		case 2: if (iDice(1,20) == 13) iItemID = 639 ; break; // "넥클리스오브포프"
+		case 3: if (iDice(1,40) == 13) iItemID = 641 ; break; // "넥클리스오브메두사"
+		case 4: if (iDice(1,30) == 13) iItemID = 640 ; break; // "넥클리스오브서펀트"
 		}
 		break;
 
-	case 12:
-	case 23:
-	case 32:
-		switch (iDice(1,4)) {
-		case 1: if (iDice(1,100) == 13) strcpy(pItemName, "메리엔-실드"); break;
-		case 2: if (iDice(1,100) == 13) strcpy(pItemName, "메리엔-플레이트메일M"); break;
-		case 3: if (iDice(1,100) == 13) strcpy(pItemName, "메리엔-플레이트메일W"); break;
-		case 4: if (iDice(1,100) == 13) strcpy(pItemName, "넥클리스오브에어엘레"); break;
-		}
-		break;
-
-	case 33:
-		switch (iDice(1,2)) {
-		case 1: if (iDice(1,30) == 3) strcpy(pItemName, "플램버그+3(LLF)"); break;
-		case 2: strcpy(pItemName, "골드액스(LLF)"); break;
-		}
-		break;
-
-	case 30:
-		switch (iDice(1,7)) {
-		case 1: if (iDice(1,5) == 3) strcpy(pItemName, "마법교본(Ice-Storm)"); break;
-		case 2: strcpy(pItemName, "매직스탭(M.Shield)");  break;
-		case 3: if (iDice(1,20) == 3) strcpy(pItemName, "매직원드(MS30-LLF)"); break;
-		case 4: if (iDice(1,10) == 3) strcpy(pItemName, "소드-오브-아이스"); break;
-		case 5: if (iDice(1,10) == 3) strcpy(pItemName, "넥클리스오브아프"); break;
-		case 6: if (iDice(1,15) == 3) strcpy(pItemName, "넥클리스오브아엘"); break;
-		case 7: if (iDice(1,20) == 3) strcpy(pItemName, "링오브그랜드메이지"); break;
-		}
-		break;
-
-	case 31:
-		switch (iDice(1,12)) {
-		case 1: if (iDice(1,15) == 3) strcpy(pItemName, "마법교본(Bloody.S.W)"); break;
-		case 2: strcpy(pItemName, "블러드-액스"); break;
-		case 3: if (iDice(1,5) == 3) strcpy(pItemName, "블러드-소드"); break;
-		case 4: strcpy(pItemName, "블러드-레이피어"); break;
-		case 5: if (iDice(1,5) == 3) strcpy(pItemName, "제리마-블레이드"); break;
-		case 6: if (iDice(1,5) == 3) strcpy(pItemName, "제리마-액스"); break;
-		case 7: if (iDice(1,5) == 3) strcpy(pItemName, "제리마-레이피어"); break;
-		case 8: if (iDice(1,10) == 3)  strcpy(pItemName, "마법교본(Mass.F.S)"); break;
-		case 9: if (iDice(1,10) == 3)  strcpy(pItemName, "링오브데몬파워"); break;
-		case 10: if (iDice(1,20) == 3) strcpy(pItemName, "넥클리스오브이프리트"); break;
-		case 11: if (iDice(1,50) == 3)  strcpy(pItemName, "링오브더제리마"); break;
-		case 12: if (iDice(1,100) == 3) strcpy(pItemName, "링오브더아바돈"); break;
-		}
-		break;
-	}
-	
-	if (strlen(pItemName) == 0) 
-		 return FALSE;
-	else return TRUE;
-}
-*/
-
-/*
-BOOL CGame::bGetItemNameWhenDeleteNpc(char * pItemName, short sNpcType)
-{
-	
- int iGenType;
-	// NPC를 삭제할때 특수 아이템을 발생시킬 것인지의 여부를 계산한다.
-
-	// 일단 확률 계산.
-	if (iDice(1,700) == 13) {
-		switch (sNpcType) {
-		case 11: if (iDice(1,6000) != 11) return FALSE;		 // Skeleton
-		case 12: if (iDice(1,5000) != 11) return FALSE;		 // Stone-Golem
-		case 13: if (iDice(1,5000) != 11) return FALSE;		 // Cyclops
-		case 14: if (iDice(1,6000) != 11) return FALSE;		 // Orc
-		case 17: if (iDice(1,8000) != 11) return FALSE;		 // Scorpoin
-		case 18: if (iDice(1,5000) != 11) return FALSE;		 // Zombie
-		case 22: if (iDice(1,8000) != 11) return FALSE;		 // Amphis
-		case 23: if (iDice(1,5000) != 11) return FALSE;		 // Clay-Golem
-		case 27: if (iDice(1,5000) != 11) return FALSE;		 // Hellhound
-		case 28: if (iDice(1,3000) != 11) return FALSE;		 // Troll
-		case 29: if (iDice(1,50) != 3) return FALSE;		 // Orge
-		case 30: if (iDice(1,8) !=  3) return FALSE;		 // Liche
-		case 31: if (iDice(1,5) !=  3) return FALSE;		 // Demon
-		case 32: if (iDice(1,5) !=  3) return FALSE;		 // Unicorn
-		case 33: if (iDice(1,30) !=  3) return FALSE;	     // WereWolf
-		default: return FALSE;
-		}
-	}
-	else return FALSE;
-
-	// GenType 결정
-	switch (sNpcType) {
-	case 11: // 반지류 아이템 나오는 경우
-	case 17:
-	case 14:
-	case 28: 
+	case 12: // Stone-Golem
 		switch (iDice(1,5)) {
-		case 1: strcpy(pItemName, "행운의금반지"); break;
-		case 2: strcpy(pItemName, "싸파이어반지"); break;
-		case 3: strcpy(pItemName, "에머랄드반지"); break;
-		case 4: strcpy(pItemName, "루비반지"); break;
-		case 5: strcpy(pItemName, "백금반지"); break;
+		case 1: if (iDice(1,40) == 13) iItemID = 620 ; break; // "메리엔-실드"
+		case 2: if (iDice(1,40) == 13) iItemID = 621 ; break; // "메리엔-플레이트메일M"
+		case 3: if (iDice(1,40) == 13) iItemID = 622 ; break; // "메리엔-플레이트메일W"
+		case 4: if (iDice(1,20) == 11) iItemID = 644 ; break; // "넥클리스오브에어엘레"
+		case 5: if (iDice(1,20) == 11) iItemID = 647 ; break; // "넥클리스오브스톤골렘"
 		}
 		break;
-	
-	case 13: // 목걸이류 아이템 나오는 경우 
-	case 27: 
-	case 29: 
+
+	case 23: // Clay-Golem
+	case 32: // Unicorn
 		switch (iDice(1,4)) {
-		case 1: strcpy(pItemName, "마법목걸이(DF+10)"); break;
-		case 2: if (iDice(1,50) == 13) strcpy(pItemName, "마법목걸이(MS10)"); break;
-		case 3: if (iDice(1,40) == 13) strcpy(pItemName, "마법목걸이(DM+1)"); break;
-		case 4: strcpy(pItemName, "마법목걸이(RM10)"); break;
+		case 1: if (iDice(1,40) == 13) iItemID = 620 ; break; // "메리엔-실드"
+		case 2: if (iDice(1,40) == 13) iItemID = 621 ; break; // "메리엔-플레이트메일M"
+		case 3: if (iDice(1,40) == 13) iItemID = 622 ; break; // "메리엔-플레이트메일W"
+		case 4: if (iDice(1,20) == 11) iItemID = 644 ; break; // "넥클리스오브에어엘레"
 		}
 		break;
 
-	case 18: // 소드-오브-메두사
-	case 22:
-		if (iDice(1,100) == 13) strcpy(pItemName, "소드-오브-메두사"); 
-		break;
-
-	case 12:
-	case 23:
-	case 32:
-		switch (iDice(1,3)) {
-		case 1: if (iDice(1,100) == 13) strcpy(pItemName, "메리엔-실드"); break;
-		case 2: if (iDice(1,100) == 13) strcpy(pItemName, "메리엔-플레이트메일M"); break;
-		case 3: if (iDice(1,100) == 13) strcpy(pItemName, "메리엔-플레이트메일W"); break;
-		}
-		break;
-
-	case 33:
+	case 33: // WereWolf
+	case 48: // Stalker
 		switch (iDice(1,2)) {
-		case 1: if (iDice(1,30) == 3) strcpy(pItemName, "플램버그+3(LLF)"); break;
-		case 2: strcpy(pItemName, "골드액스(LLF)"); break;
+		case 1: if (iDice(1,30) == 3) iItemID = 290 ; break; // "플램버그+3(LLF)"
+		case 2: iItemID = 292 ; break; // "골드액스(LLF)"
 		}
 		break;
 
-	case 30:
-		switch (iDice(1,4)) {
-		case 1: if (iDice(1,5) == 3) strcpy(pItemName, "마법교본(Ice-Storm)"); break;
-		case 2: strcpy(pItemName, "매직스탭(M.Shield)");  break;
-		case 3: if (iDice(1,20) == 3) strcpy(pItemName, "매직원드(MS30-LLF)"); break;
-		case 4: if (iDice(1,10) == 3) strcpy(pItemName, "소드-오브-아이스"); break;
+	case 30: // Liche
+		switch (iDice(1,9)) {
+		case 1: if (iDice(1,10) == 3) iItemID = 380 ; break; // "마법교본(Ice-Storm)"
+		case 2: iItemID = 259 ; break; // "매직스탭(M.Shield)");  break;
+		case 3: if (iDice(1,30) == 3) iItemID = 291 ; break; // "매직원드(MS30-LLF)"
+		case 4: if (iDice(1,10) == 3) iItemID = 614 ; break; // "소드-오브-아이스"
+		case 5: if (iDice(1,10) == 3) iItemID = 642 ; break; // "넥클리스오브아프"
+		case 6: if (iDice(1,15) == 3) iItemID = 643 ; break; // "넥클리스오브아엘"
+		case 7: if (iDice(1,30) == 3) iItemID = 636 ; break; // "링오브그랜드메이지"
+		case 8: if (iDice(1,30) == 3) iItemID = 734 ; break; // "링오브아크메이지"
+		case 9: if (iDice(1,30) == 3) iItemID = 648 ; break; // "넥클리스오브리치"
 		}
 		break;
 
-	case 31:
+	case 31: // 데몬 
+
 		switch (iDice(1,8)) {
-		case 1: if (iDice(1,15) == 3) strcpy(pItemName, "마법교본(Bloody.S.W)"); break;
-		case 2: strcpy(pItemName, "블러드-액스"); break;
-		case 3: if (iDice(1,5) == 3) strcpy(pItemName, "블러드-소드"); break;
-		case 4: strcpy(pItemName, "블러드-레이피어"); break;
-		case 5: if (iDice(1,5) == 3) strcpy(pItemName, "제리마-블레이드"); break;
-		case 6: if (iDice(1,5) == 3) strcpy(pItemName, "제리마-액스"); break;
-		case 7: if (iDice(1,5) == 3) strcpy(pItemName, "제리마-레이피어"); break;
-		case 8: if (iDice(1,10) == 3)strcpy(pItemName, "마법교본(Mass.F.S)"); break;
+		case 1: if (iDice(1,30) == 3) iItemID = 382 ; break; // "마법교본(Bloody.S.W)"
+		case 2: iItemID = 491 ; break; // "블러드-액스"
+		case 3: if (iDice(1,10) == 3) iItemID = 490 ; break; // "블러드-소드"
+		case 4: iItemID = 492 ; break; // "블러드-레이피어"
+		case 5: if (iDice(1,10) == 3) iItemID = 381 ; break; // "마법교본(Mass.F.S)"
+		case 6: if (iDice(1,30) == 3) iItemID = 633 ; break; // "링오브데몬파워"
+		case 7: if (iDice(1,10) == 3) iItemID = 645 ; break; // "넥클리스오브이프리트"
+		case 8: if (iDice(1,20) == 3) iItemID = 616 ; break; // "데몬-슬레이어"
+		}
+		break ;
+	case 52: // 가고일
+		switch (iDice(1,11)) {
+		case 1: if (iDice(1,30) == 3) iItemID = 382 ; break; // "마법교본(Bloody.S.W)"
+		case 2: if (iDice(1,20) == 3) iItemID = 610 ; break; // "제리마-블레이드"
+		case 3: if (iDice(1,20) == 3) iItemID = 611 ; break; // "제리마-액스"
+		case 4: if (iDice(1,20) == 3) iItemID = 612 ; break; // "제리마-레이피어"
+		case 5: if (iDice(1,10) == 3) iItemID = 381 ; break; // "마법교본(Mass.F.S)"
+		case 6: if (iDice(1,30) == 3) iItemID = 633 ; break; // "링오브데몬파워"
+		case 7: if (iDice(1,10) == 3) iItemID = 645 ; break; // "넥클리스오브이프리트"
+		case 8: if (iDice(1,40) == 3) iItemID = 630 ; break; // "링오브더제리마"
+		case 9: if (iDice(1,50) == 3) iItemID = 631 ; break; // "링오브더아바돈"
+		case 10: if (iDice(1,20) == 3) iItemID = 735 ; break; // "링오브드래곤파워"
+		case 11: if (iDice(1,40) == 3) iItemID = 20 ; break;  // "엑스칼리버"
+		}
+		break ;
+
+	case 53: // 비홀더
+		//switch (iDice(1,1)) {
+		//case 1: if (iDice(1,20) == 11) iItemID = 530 ; break; // "넥클리스오브비홀더"
+		//}
+		break;
+	case 54: // 다크엘프
+		if (iDice(1,20) == 11) iItemID = 618 ; break; // "다크엘프-보우"
+
+	// 2002-09-12 #1 추가 몬스터 특수 아이템 설정
+	case 58: // Mountain-Giant
+		switch(iDice(1,6) ) {
+		case 1: if (iDice(1,40) == 13) iItemID = 620 ; break; // "메리엔-실드"
+		case 2: if (iDice(1,40) == 13) iItemID = 621 ; break; // "메리엔-플레이트메일M"
+		case 3: if (iDice(1,40) == 13) iItemID = 622 ; break; // "메리엔-플레이트메일W"
+		case 4: if (iDice(1,20) == 11) iItemID = 644 ; break; // "넥클리스오브에어엘레"
+		case 5: if (iDice(1,30) == 11) iItemID = 762 ; break; // "자이언트-베틀헤머" //v2.19 2002-12-18 맵 몬스터 아이템 추가
+		case 6: iItemID = 337 ; break;			// "루비반지"
+		}
+		break;
+
+	case 59: // Ettin
+		switch(iDice(1,8) ) {
+		case 1: if (iDice(1,40) == 3) iItemID = 382 ; break; // "마법교본(Bloody.S.W)"
+		case 2: iItemID = 491 ; break; // "블러드-액스"
+		case 3: if (iDice(1,30) == 3) iItemID = 490 ; break; // "블러드-소드"
+		case 4: iItemID = 492 ; break; // "블러드-레이피어"
+		case 5: if (iDice(1,15) == 3) iItemID = 381 ; break; // "마법교본(Mass.F.S)"
+		case 6: if (iDice(1,35) == 3) iItemID = 633 ; break; // "링오브데몬파워"
+		case 7: if (iDice(1,15) == 3) iItemID = 645 ; break; // "넥클리스오브이프리트"
+		case 8: if (iDice(1,30) == 3) iItemID = 762 ; break; // "자이언트-베틀헤머" //v2.19 2002-12-18 맵 몬스터 아이템 추가
+//		case 8: if (iDice(1,25) == 3) iItemID = 616 ; break; // "데몬-슬레이어" //v2.19 2002-12-18 데몬한테만 나온다.
+		}
+		break;
+
+	case 60: // Cannibal-Plant
+		switch(iDice(1,7) ) {
+		case 1: iItemID = 334 ; break; // "행운의금반지"
+		case 2: iItemID = 336 ; break; // "싸파이어반지"
+		case 3: if (iDice(1,15) == 3) iItemID = 335 ; break; // "에머랄드반지"
+		case 4: iItemID = 337 ; break; // "루비반지"
+		case 5: iItemID = 333 ; break; // "백금반지"
+		case 6: if (iDice(1,15) == 3) iItemID = 634 ; break; // "링오브위저드"
+		case 7: if (iDice(1,25) == 3) iItemID = 635 ; break; // "링오브메이지"
 		}
 		break;
 	}
 	
-	if (strlen(pItemName) == 0) 
+	if (iItemID == 0) 
 		 return FALSE;
 	else return TRUE;
-}
-*/
+
+#endif // !DEF_NPCITEM
+
+} // bGetItemNameWhenDeleteNpc
+
 
 void CGame::UpdateMapSectorInfo()
 {
  int i, ix, iy;
  int iMaxNeutralActivity, iMaxAresdenActivity, iMaxElvineActivity, iMaxMonsterActivity, iMaxPlayerActivity;
- int iMaxNx, iMaxNy, iMaxAx, iMaxAy, iMaxEx, iMaxEy, iMaxMx, iMaxMy, iMaxPx, iMaxPy;
 	
 	for (i = 0; i < DEF_MAXMAPS; i++) 
 	if (m_pMapList[i] != NULL) {
@@ -40300,7 +47657,7 @@ BOOL CGame::__bSetConstructionKit(int iMapIndex, int dX, int dY, int iType, int 
 
 		// 먼저 설치하고자 하는 근처에 구조물이 없나 확인한다.
 		for (ix = dX -3; ix <= dX +5; ix++)
-		for (iy = dY -3; iy <= dX +5; iy++) {
+		for (iy = dY -3; iy <= dY +5; iy++) {
 			m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, ix, iy);
 			if ((sOwnerH != NULL) && (cOwnerType == DEF_OWNERTYPE_NPC) && (m_pNpcList[sOwnerH]->m_cActionLimit == 5)) return FALSE;
 		}
@@ -40397,11 +47754,23 @@ BOOL CGame::_bNpcBehavior_ManaCollector(int iNpcH)
 				// 근처에 마나 스톤이 있나 찾는다.
 				if (m_pNpcList[sOwnerH]->m_sType == 42) {
 					// 마나 스톤이 있다. 마나 스톤이 갖고 있는 마나를 얻는다.
+					if (m_pNpcList[sOwnerH]->m_iV1 > 0) {
+						// 마나 콜렉터가 한번에 채집할 수 있는 최대량은 3 
+						if (m_pNpcList[sOwnerH]->m_iV1 >= 3) {
+							m_iCollectedMana[m_pNpcList[iNpcH]->m_cSide] += 3; 
+							m_pNpcList[sOwnerH]->m_iV1 -= 3;
+							bRet = TRUE;
+						}
+						else {
+							m_iCollectedMana[m_pNpcList[iNpcH]->m_cSide] += m_pNpcList[sOwnerH]->m_iV1; 
+							m_pNpcList[sOwnerH]->m_iV1 = 0;
+							bRet = TRUE;
+						}
+					}
+					else bRet = FALSE;
 					//testcode
 					//wsprintf(G_cTxt, "Side: %d  Mana: %d", m_pNpcList[iNpcH]->m_cSide, m_iCollectedMana[m_pNpcList[iNpcH]->m_cSide]);
 					//PutLogList(G_cTxt);
-					m_iCollectedMana[m_pNpcList[iNpcH]->m_cSide]++; 
-					bRet = TRUE;
 				}
 				break;
 			}
@@ -40473,30 +47842,55 @@ void CGame::CheckCrusadeResultCalculation(int iClientH)
 
 	// 전면전이 종료되었고 전쟁 공헌도가 0이 아니라면 해당하는 처리를 해 주어야 한다.
 	if ((m_bIsCrusadeMode == FALSE) && (m_pClientList[iClientH]->m_dwCrusadeGUID != 0)) {
+		// v2.15 최대 전쟁 공헌도 경험치 감소 
+		if (m_pClientList[iClientH]->m_iWarContribution > 300000 ) m_pClientList[iClientH]->m_iWarContribution = 300000 ;
 		
 		if (m_pClientList[iClientH]->m_dwCrusadeGUID == m_dwCrusadeGUID) {
 			if (m_iCrusadeWinnerSide == 0) {
 				// 전쟁에서 비겼다. 양쪽 모두에게 원래 경험치 제공
 				m_pClientList[iClientH]->m_iExpStock += (m_pClientList[iClientH]->m_iWarContribution/6);
 				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CRUSADE, (DWORD)m_bIsCrusadeMode, NULL, m_pClientList[iClientH]->m_iWarContribution, NULL);		
+
+				_bCrusadeLog(DEF_CRUSADELOG_GETEXP,iClientH,(m_pClientList[iClientH]->m_iWarContribution/6),NULL) ;
 			}
 			else {
 				if (m_iCrusadeWinnerSide == m_pClientList[iClientH]->m_cSide) {
 					// 포상해야 한다.
 					// 레벨만큼 기본 경험치 추가.
+					// v2.15 전면전에 경험치를 준다.
+					// v2.20 2002-2-22 전면전 기본 경험치 증가. 
 					if (m_pClientList[iClientH]->m_iLevel <= 80) {
-						m_pClientList[iClientH]->m_iWarContribution += m_pClientList[iClientH]->m_iLevel*100;
+						m_pClientList[iClientH]->m_iWarContribution += m_pClientList[iClientH]->m_iLevel*200;
 					}
-					else m_pClientList[iClientH]->m_iWarContribution += m_pClientList[iClientH]->m_iLevel;
+					else if (m_pClientList[iClientH]->m_iLevel <= 100) {
+						m_pClientList[iClientH]->m_iWarContribution += m_pClientList[iClientH]->m_iLevel*100 ;
+					}
+					else m_pClientList[iClientH]->m_iWarContribution += m_pClientList[iClientH]->m_iLevel*30;
+
 					// 경험치 누적
-					m_pClientList[iClientH]->m_iExpStock += m_pClientList[iClientH]->m_iWarContribution;
-					SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CRUSADE, (DWORD)m_bIsCrusadeMode, NULL, m_pClientList[iClientH]->m_iWarContribution, NULL);		
+					m_pClientList[iClientH]->m_iExpStock += (m_pClientList[iClientH]->m_iWarContribution)*(1.2);
+
+					SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CRUSADE, (DWORD)m_bIsCrusadeMode, NULL, m_pClientList[iClientH]->m_iWarContribution, NULL);
+					_bCrusadeLog(DEF_CRUSADELOG_GETEXP,iClientH,m_pClientList[iClientH]->m_iWarContribution,NULL) ;
 				}
 				else if (m_iCrusadeWinnerSide != m_pClientList[iClientH]->m_cSide) {
 					// 전쟁에서 졌기때문에 포상이 없다.
 					// 레벨만큼 기본 경험치 추가.
-					m_pClientList[iClientH]->m_iWarContribution += m_pClientList[iClientH]->m_iLevel;
-					SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CRUSADE, (DWORD)m_bIsCrusadeMode, NULL, -1*m_pClientList[iClientH]->m_iWarContribution, NULL);		
+					// v2.15 전면전에서 져도 10분의 1의 경험치를 준다.
+					// v2.20 2002-2-22 전면전 기본 경험치 증가. 
+					if (m_pClientList[iClientH]->m_iLevel <= 80) {
+						m_pClientList[iClientH]->m_iWarContribution += m_pClientList[iClientH]->m_iLevel*200;
+					}
+					else if (m_pClientList[iClientH]->m_iLevel <= 100) {
+						m_pClientList[iClientH]->m_iWarContribution += m_pClientList[iClientH]->m_iLevel*100 ;
+					}
+					else m_pClientList[iClientH]->m_iWarContribution += m_pClientList[iClientH]->m_iLevel*30;
+					
+					m_pClientList[iClientH]->m_iExpStock += m_pClientList[iClientH]->m_iWarContribution/5 ;
+
+					SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CRUSADE, (DWORD)m_bIsCrusadeMode, NULL, -1*m_pClientList[iClientH]->m_iWarContribution, NULL);	
+					
+					_bCrusadeLog(DEF_CRUSADELOG_GETEXP,iClientH,(m_pClientList[iClientH]->m_iWarContribution/10),NULL) ;
 				}
 			}
 		}
@@ -40546,6 +47940,9 @@ void CGame::LocalStartCrusadeMode(DWORD dwCrusadeGUID)
 	CreateCrusadeStructures();
 	
 	PutLogList("(!)Crusade Mode ON.");
+
+	// v2.15 크루세이드 모드
+	_bCrusadeLog(DEF_CRUSADELOG_STARTCRUSADE,NULL,NULL,NULL) ;
 }
 
 void CGame::LocalEndCrusadeMode(int iWinnerSide)
@@ -40563,10 +47960,12 @@ void CGame::LocalEndCrusadeMode(int iWinnerSide)
 
 	// 설치되었던 크루세이드 건축물 제거.
 	RemoveCrusadeStructures();
+	// 전쟁용 유닛 등 제거 
+	KillCrusadeObjects();
 
 	// 이긴쪽 사이드를 입력.
 	_CreateCrusadeGUID(m_dwCrusadeGUID, iWinnerSide);
-	m_iCrusadeWinnerSide = iWinnerSide;
+	m_iWinnerSide = m_iCrusadeWinnerSide = iWinnerSide;  //v2.19 2002-11-15
 
 	for (i = 1; i < DEF_MAXCLIENTS; i++)
 	if ((m_pClientList[i] != NULL) && (m_pClientList[i]->m_bIsInitComplete == TRUE)) {
@@ -40575,6 +47974,17 @@ void CGame::LocalEndCrusadeMode(int iWinnerSide)
 		m_pClientList[i]->m_iConstructionPoint = 0;
 		SendNotifyMsg(NULL, i, DEF_NOTIFY_CRUSADE, (DWORD)m_bIsCrusadeMode, NULL, NULL, NULL, m_iCrusadeWinnerSide);
 	}
+
+	// v2.20 2002-12-28 전면전 종료후 민간인 마을로 강콜
+	RecallHunterPlayer() ;
+
+	// v2.15 크루세이드 모드
+	if (iWinnerSide == 2)
+		_bCrusadeLog(DEF_CRUSADELOG_ENDCRUSADE,NULL,NULL,"Elvine Win!") ;
+	else if (iWinnerSide == 1)
+		_bCrusadeLog(DEF_CRUSADELOG_ENDCRUSADE,NULL,NULL,"Aresden Win!") ;
+	else 
+		_bCrusadeLog(DEF_CRUSADELOG_ENDCRUSADE,NULL,NULL,"Drawn!") ;
 }
 
 
@@ -40583,6 +47993,8 @@ void CGame::SaveOccupyFlagData()
  char * pData;
  int iSize;
  FILE * pFile;
+
+	return;
 
 	PutLogList("(!) Middleland OccupyFlag data saved.");
 		
@@ -40606,13 +48018,47 @@ void CGame::SaveOccupyFlagData()
 
 void CGame::CreateCrusadeStructures()
 {
- int i, z, tX, tY, iNamingValue;
+ int i, z, tX, tY, iNamingValue, iTotalMS, iMSIndex[100], iMSSelected[DEF_MAXCRUSADESTRUCTURES], iMSLeft;
  char cName[6], cNpcName[21], cNpcWayPoint[11];
+ BOOL bFlag;
 
 	ZeroMemory(cName, sizeof(cName));
 	ZeroMemory(cNpcName, sizeof(cNpcName));
 	ZeroMemory(cNpcWayPoint, sizeof(cNpcWayPoint));
 
+	// v2.05 마나 스톤의 인덱스를 따로 구한다.
+	for (i = 0; i < 100; i++) iMSIndex[i] = -1;
+	
+	iTotalMS = 0;
+	for (i = 0; i < DEF_MAXCRUSADESTRUCTURES; i++) 
+	if (m_stCrusadeStructures[i].cType == 42) {
+		iMSIndex[iTotalMS] = i;
+		iTotalMS++;
+		iMSSelected[i] = -1;
+	}
+
+	if (iTotalMS <= 3) {
+		// 정의된 마나 스톤의 갯수가 3개 이하라면 모두 다 선택 
+		iMSSelected[ iMSIndex[0] ] = 1;
+		iMSSelected[ iMSIndex[1] ] = 1;
+		iMSSelected[ iMSIndex[2] ] = 1;
+	}
+	else {
+		// 임의의 3개를 선택한다. 
+		iMSLeft = 3;
+		bFlag = FALSE;
+		while (bFlag == FALSE) {
+			i = iDice(1, iTotalMS) -1;
+			if (iMSIndex[i] != -1) {
+				iMSSelected[ iMSIndex[i] ] = 1;
+				iMSIndex[i] = -1;
+				iMSLeft--;
+				if (iMSLeft <= 0) bFlag = TRUE;
+			}
+		}
+	}
+	// iMSSelected[DEF_MAXCRUSADESTRUCTURES] 배열에 선택된 마나 스톤에 1값이 들어가 있다.
+	
 	for (i = 0; i < DEF_MAXCRUSADESTRUCTURES; i++) 
 	if (m_stCrusadeStructures[i].cType != NULL) {
 		for (z = 0; z < DEF_MAXMAPS; z++)
@@ -40624,6 +48070,9 @@ void CGame::CreateCrusadeStructures()
 				// 이런 일이?
 			}
 			else {
+				ZeroMemory(cName, sizeof(cName));
+				ZeroMemory(cNpcName, sizeof(cNpcName));
+
 				// NPC를 생성한다.
 				wsprintf(cName, "XX%d", iNamingValue);
 				cName[0] = '_';
@@ -40658,6 +48107,11 @@ void CGame::CreateCrusadeStructures()
 						strcpy(cNpcName, "GMG-Elvine");
 					break;
 
+				case 42:
+					// v2.05
+					if (iMSSelected[i] == 1) strcpy(cNpcName, "ManaStone");
+					break;
+
 				default: 
 					strcpy(cNpcName, m_pNpcConfigList[m_stCrusadeStructures[i].cType]->m_cNpcName); 
 					break;
@@ -40668,7 +48122,7 @@ void CGame::CreateCrusadeStructures()
 				if (bCreateNewNpc(cNpcName, cName, m_pMapList[z]->m_cName, 0, 0, DEF_MOVETYPE_RANDOM, 
 					              &tX, &tY, cNpcWayPoint, NULL, NULL, -1, FALSE) == FALSE) {
 					// 실패했으므로 예약된 NameValue를 해제시킨다.
-					m_pMapList[ m_pClientList[i]->m_cMapIndex ]->SetNamingValueEmpty(iNamingValue);
+					m_pMapList[z]->SetNamingValueEmpty(iNamingValue);
 				} 
 				else {
 					wsprintf(G_cTxt, "(!) Creating Crusade Structure(%s) at %s(%d, %d)", cNpcName, m_stCrusadeStructures[i].cMapName, tX, tY);
@@ -40725,8 +48179,8 @@ void CGame::CollectedManaHandler(WORD wAresdenMana, WORD wElvineMana)
 		m_iAresdenMana += wAresdenMana;
 		//testcode
 		if (wAresdenMana > 0) {
-			//wsprintf(G_cTxt, "Aresden Mana: %d Total:%d", wAresdenMana, m_iAresdenMana);
-			//PutLogList(G_cTxt);
+			wsprintf(G_cTxt, "Aresden Mana: %d Total:%d", wAresdenMana, m_iAresdenMana);
+			PutLogList(G_cTxt);
 		}
 	}
 
@@ -40734,8 +48188,8 @@ void CGame::CollectedManaHandler(WORD wAresdenMana, WORD wElvineMana)
 		m_iElvineMana += wElvineMana;
 		//testcode
 		if (wAresdenMana > 0) {
-			//wsprintf(G_cTxt, "Elvine Mana: %d Total:%d", wElvineMana, m_iElvineMana);
-			//PutLogList(G_cTxt);
+			wsprintf(G_cTxt, "Elvine Mana: %d Total:%d", wElvineMana, m_iElvineMana);
+			PutLogList(G_cTxt);
 		}
 	}
 }
@@ -40747,7 +48201,7 @@ void CGame::_NpcBehavior_GrandMagicGenerator(int iNpcH)
 	case 1:
 		if (m_iAresdenMana > DEF_GMGMANACONSUMEUNIT) {
 			// 마나를 흡수한다.
-			m_iAresdenMana -= DEF_GMGMANACONSUMEUNIT;
+			m_iAresdenMana = 0 ; 
 			m_pNpcList[iNpcH]->m_iManaStock++;
 			// 만약 마법 공격을 하기에 충분한 마나가 찼다면 적국으로 마법 공격
 			if (m_pNpcList[iNpcH]->m_iManaStock > m_pNpcList[iNpcH]->m_iMaxMana) {
@@ -40759,13 +48213,16 @@ void CGame::_NpcBehavior_GrandMagicGenerator(int iNpcH)
 				m_iAresdenMana = 0;
 				// 공격 동작을 한다.
 			}
+			//testcode
+			wsprintf(G_cTxt, "(!) Aresden GMG %d/%d", m_pNpcList[iNpcH]->m_iManaStock, m_pNpcList[iNpcH]->m_iMaxMana);
+			PutLogList(G_cTxt);
 		}
 		break;
 
 	case 2:
 		if (m_iElvineMana > DEF_GMGMANACONSUMEUNIT) {
 			// 마나를 흡수한다.
-			m_iElvineMana -= DEF_GMGMANACONSUMEUNIT;
+			m_iElvineMana = 0 ; 
 			m_pNpcList[iNpcH]->m_iManaStock++;
 			// 만약 마법 공격을 하기에 충분한 마나가 찼다면 적국으로 마법 공격
 			if (m_pNpcList[iNpcH]->m_iManaStock > m_pNpcList[iNpcH]->m_iMaxMana) {
@@ -40777,6 +48234,9 @@ void CGame::_NpcBehavior_GrandMagicGenerator(int iNpcH)
 				m_iElvineMana = 0;
 				// 공격 동작을 한다.
 			}
+			//testcode
+			wsprintf(G_cTxt, "(!) Elvine GMG %d/%d", m_pNpcList[iNpcH]->m_iManaStock, m_pNpcList[iNpcH]->m_iMaxMana);
+			PutLogList(G_cTxt);
 		}
 		break;
 	}
@@ -40795,7 +48255,8 @@ void CGame::MeteorStrikeMsgHandler(char cAttackerSide)
 			// 현재 서버에 폭격 지점이 있다.
 			for (i = 1; i < DEF_MAXCLIENTS; i++)
 			if ((m_pClientList[i] != NULL) && (m_pClientList[i]->m_bIsInitComplete == TRUE)) {
-				if (strcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cLocationName, "elvine") == 0) {
+				// v2.19 2002-11-12 강콜 지역을 확대하기 위해 LocationName 을 m_cName 으로 변경함  Location Name을 강콜 지역으로 설정함 .
+				if (strcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cName, "elvine") == 0) {
 					// 엘바인에 소속된 맵의 모든 플레이어에게 메테오 스트라이크 공격이 임박했음을 알려준다.
 					SendNotifyMsg(NULL, i, DEF_NOTIFY_METEORSTRIKECOMING, 1, NULL, NULL, NULL);
 				}
@@ -40822,7 +48283,8 @@ void CGame::MeteorStrikeMsgHandler(char cAttackerSide)
 			// 현재 서버에 폭격 지점이 있다.
 			for (i = 1; i < DEF_MAXCLIENTS; i++)
 			if ((m_pClientList[i] != NULL) && (m_pClientList[i]->m_bIsInitComplete == TRUE)) {
-				if (strcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cLocationName, "aresden") == 0) {
+				// v2.19 2002-11-12 강콜 지역을 확대하기 위해 LocationName 을 m_cName 으로 변경함  Location Name을 강콜 지역으로 설정함 .
+				if (strcmp(m_pMapList[m_pClientList[i]->m_cMapIndex]->m_cName, "aresden") == 0) {
 					// 아레스덴에 소속된 맵의 모든 플레이어에게 메테오 스트라이크 공격이 임박했음을 알려준다.
 					SendNotifyMsg(NULL, i, DEF_NOTIFY_METEORSTRIKECOMING, 3, NULL, NULL, NULL);
 				}
@@ -40874,7 +48336,7 @@ LSPMI_LOOPBREAK:;
 void CGame::MeteorStrikeHandler(int iMapIndex)
 {
  int i, ix, iy, dX, dY, iIndex, iTargetIndex, iTotalESG, iEffect;
- int iTargetArray[DEF_MAXSTRIKEPOINTS], iTotalTargets;
+ int iTargetArray[DEF_MAXSTRIKEPOINTS];
  short sOwnerH;
  char  cOwnerType;
  DWORD dwTime = timeGetTime();
@@ -40996,6 +48458,10 @@ void CGame::RequestSetGuildTeleportLocHandler(int iClientH, int dX, int dY, int 
  DWORD dwTemp, dwTime;
 
 	if (m_pClientList[iClientH] == NULL) return;
+
+	// v2.04 좌표 보정 
+	if (dY < 100) dY = 100;
+	if (dY > 600) dY = 600;
 
 	// 게이트 서버 메시지 작성 
 	ZeroMemory(cData, sizeof(cData));
@@ -41233,9 +48699,9 @@ void CGame::RequestGuildTeleportHandler(int iClientH)
 
 void CGame::RequestSummonWarUnitHandler(int iClientH, int dX, int dY, char cType, char cNum, char cMode)
 {
- char * cp, cName[6], cNpcName[21], cMapName[11], cNpcWayPoint[11], cOwnerType;
+ char cName[6], cNpcName[21], cMapName[11], cNpcWayPoint[11], cOwnerType;
  register int i, x;
- int *ip, iNamingValue, tX, tY, ix, iy;
+ int iNamingValue, tX, tY, ix, iy;
  BOOL bRet;
  short sOwnerH;
  DWORD dwTime = timeGetTime();
@@ -41385,8 +48851,29 @@ void CGame::RequestSummonWarUnitHandler(int iClientH, int dX, int dY, char cType
 				m_pMapList[ m_pClientList[iClientH]->m_cMapIndex ]->SetNamingValueEmpty(iNamingValue);
 				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CANNOTCONSTRUCT, 3, NULL, NULL, NULL);
 				return;
-				/////
 				break;
+
+			// 2002-12-24 전면전시 소환할 수 있는 (건물 수를 제외한) NPC의 수를 제한한다.(대만 요청)
+			case 43:
+			case 44:
+			case 45:
+			case 46:
+			case 47:
+			case 51:
+				for (i = 0; i < DEF_MAXGUILDS; i++) 
+				if (m_pGuildTeleportLoc[i].m_iNumSummonNpc >= DEF_MAX_CRUSADESUMMONMOB) {
+					m_pMapList[ m_pClientList[iClientH]->m_cMapIndex ]->SetNamingValueEmpty(iNamingValue);
+					SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CANNOTCONSTRUCT, 4, NULL, NULL, NULL);
+					return;
+				} else {
+					m_pGuildTeleportLoc[i].m_iNumSummonNpc ++;
+					goto RSWU_LOOPBREAK;
+				}
+
+				m_pMapList[ m_pClientList[iClientH]->m_cMapIndex ]->SetNamingValueEmpty(iNamingValue);
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CANNOTCONSTRUCT, 3, NULL, NULL, NULL);
+				return;
+				break;	
 			}
 			
 RSWU_LOOPBREAK:;
@@ -41438,6 +48925,10 @@ RSWU_LOOPBREAK:;
 				if (m_pClientList[iClientH]->m_iConstructionPoint < 0) m_pClientList[iClientH]->m_iConstructionPoint = 0;
 				// 지휘관에게 바로 통보.
 				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CONSTRUCTIONPOINT, m_pClientList[iClientH]->m_iConstructionPoint, m_pClientList[iClientH]->m_iWarContribution, NULL, NULL);
+
+#ifdef DEF_TAIWANLOG
+				_bItemLog(DEF_ITEMLOG_SUMMONMONSTER,iClientH,cNpcName,NULL) ;
+#endif
 			}
 		}
 	}
@@ -41483,6 +48974,68 @@ void CGame::CheckConnectionHandler(int iClientH, char *pData)
 			return;
 		}
 	}
+
+	if (m_pClientList[iClientH]->m_bIsManager == TRUE) {
+		char cTemp[256] ;
+		short * sp ; 
+		WORD * wp ;
+
+		cp += 4;
+		memcpy(cTemp, cp, 10);
+		cp += 10;
+
+		if (memcmp(cTemp,"?BWordMtr?",10) != 0) return ;
+
+		ZeroMemory(cTemp, sizeof(cTemp));
+	
+		dwp = (DWORD *)cTemp;
+		*dwp = MSGID_RESPONSE_CHECKCONNECTION;
+		
+		wp  = (WORD *)(cTemp + DEF_INDEX2_MSGTYPE);
+		*wp = NULL;
+
+		cp  = (char *)(cTemp + DEF_INDEX2_MSGTYPE + 2);
+		sp  = (short *)cp;
+		
+		if ((m_bIsGameStarted == TRUE) && (m_bIsItemAvailable == TRUE) && 
+				(m_bIsNpcAvailable == TRUE) && (m_bIsGateSockAvailable == TRUE) &&
+				(m_bIsLogSockAvailable == TRUE) && (m_bIsMagicAvailable == TRUE) &&
+				(m_bIsSkillAvailable == TRUE) && (m_bIsPortionAvailable == TRUE) &&
+				(m_bIsQuestAvailable == TRUE)
+#ifdef DEF_DEFENCEHACKING
+				// 2002-12-8 World server 보안 설정을 위해 
+			&& (m_bIsWLServerAvailable == TRUE)
+#endif 
+				) {
+				// 게임을 시작할 준비가 되었다. 메시지를 보낸다.
+			*sp =  1 ; 		
+		} 
+		else 
+		{
+			*sp =  0 ; 
+		}
+		cp += 2 ;
+
+		sp  = (short *)cp;
+		*sp = m_iTotalClients ;
+		cp += 2 ;
+
+		sp  = (short *)cp;
+		*sp = m_iMaxClients ;
+		cp += 2 ;
+
+		sp  = (short *)cp;
+		*sp = m_iTotalGameServerClients ;
+		cp += 2 ;
+
+		sp  = (short *)cp;
+		*sp = m_iTotalGameServerMaxClients ;
+		cp += 2 ;
+
+		m_pClientList[iClientH]->m_pXSock->iSendMsg(cTemp, 16 );
+
+	}
+
 }
 
 
@@ -41492,8 +49045,30 @@ void CGame::SelectCrusadeDutyHandler(int iClientH, int iDuty)
 	// 길드 마스터가 아닌데 지휘관 역할을 맡겠다는 메시지가 수신되면 무시.
 	if ((m_pClientList[iClientH]->m_iGuildRank != 0) && (iDuty == 3)) return;
 
+	//v2.19 2002-11-15  전면전시 전에 전면전에 진쪽은 길드마스터들은 소환 포인트를 3000을 넣어 준다..
+//	if(m_pClientList[iClientH]->m_dwCrusadeGUID != m_dwCrusadeGUID)
+
+#ifdef DEF_V219
+
+	if( (3 - m_iWinnerSide) == m_pClientList[iClientH]->m_cSide) 
+	if(m_pClientList[iClientH]->m_iCrusadeDuty == 0)
+	{
+		if(3==iDuty)
+		{
+			m_pClientList[iClientH]->m_iConstructionPoint = 3000;
+		}
+	}
+#endif
+
 	m_pClientList[iClientH]->m_iCrusadeDuty = iDuty;
 	SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_CRUSADE, (DWORD)m_bIsCrusadeMode, m_pClientList[iClientH]->m_iCrusadeDuty, NULL, NULL);
+	
+	if (iDuty == 1) 
+		_bCrusadeLog(DEF_CRUSADELOG_SELECTDUTY,iClientH,NULL,"Fighter") ;
+	else if (iDuty == 2) 
+		_bCrusadeLog(DEF_CRUSADELOG_SELECTDUTY,iClientH,NULL,"Constructor") ;
+	else
+		_bCrusadeLog(DEF_CRUSADELOG_SELECTDUTY,iClientH,NULL,"Commander") ;
 }
 
 void CGame::MapStatusHandler(int iClientH, int iMode, char * pMapName)
@@ -41538,10 +49113,21 @@ void CGame::MapStatusHandler(int iClientH, int iMode, char * pMapName)
 			// 현재 사용자가 위치한 맵의 정보를 요구했다.
 			// 맵 데이터를 요청할 당시의 내용을 그대로 카피한다.
 			for (i = 0; i < m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_iTotalCrusadeStructures; i++) {
-				m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].cType = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stCrusadeStructureInfo[i].cType;
-				m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].cSide = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stCrusadeStructureInfo[i].cSide;
-				m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].sX    = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stCrusadeStructureInfo[i].sX;
-				m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].sY    = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stCrusadeStructureInfo[i].sY;
+				// v2.15 사용자가 Commander 가 아니어도 건물의 위치를 보여준다.
+				if ( m_pClientList[iClientH]->m_iCrusadeDuty == 3) 
+				{
+					m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].cType = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stCrusadeStructureInfo[i].cType;
+					m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].cSide = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stCrusadeStructureInfo[i].cSide;
+					m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].sX    = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stCrusadeStructureInfo[i].sX;
+					m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].sY    = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stCrusadeStructureInfo[i].sY;
+				}
+				else if (m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stCrusadeStructureInfo[i].cType == 42) 
+				{
+					m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].cType = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stCrusadeStructureInfo[i].cType;
+					m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].cSide = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stCrusadeStructureInfo[i].cSide;
+					m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].sX    = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stCrusadeStructureInfo[i].sX;
+					m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].sY    = m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_stCrusadeStructureInfo[i].sY;
+				}
 			}
 			memcpy(m_pClientList[iClientH]->m_cSendingMapName, m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, 10);
 		}
@@ -41549,10 +49135,21 @@ void CGame::MapStatusHandler(int iClientH, int iMode, char * pMapName)
 			// 다른 맵의 상황을 요청했다. 미들랜드의 경우는 가능 
 			if (strcmp(pMapName, "middleland") == 0) {
 				for (i = 0; i < m_iTotalMiddleCrusadeStructures; i++) {
-					m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].cType = m_stMiddleCrusadeStructureInfo[i].cType;
-					m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].cSide = m_stMiddleCrusadeStructureInfo[i].cSide;
-					m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].sX    = m_stMiddleCrusadeStructureInfo[i].sX;
-					m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].sY    = m_stMiddleCrusadeStructureInfo[i].sY;
+				// v2.15 사용자가 Commander 가 아니어도 건물의 위치를 보여준다.
+					if ( m_pClientList[iClientH]->m_iCrusadeDuty == 3) 
+					{
+						m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].cType = m_stMiddleCrusadeStructureInfo[i].cType;
+						m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].cSide = m_stMiddleCrusadeStructureInfo[i].cSide;
+						m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].sX    = m_stMiddleCrusadeStructureInfo[i].sX;
+						m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].sY    = m_stMiddleCrusadeStructureInfo[i].sY;
+					}								
+					else if (m_stMiddleCrusadeStructureInfo[i].cType == 42)
+					{
+						m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].cType = m_stMiddleCrusadeStructureInfo[i].cType;
+						m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].cSide = m_stMiddleCrusadeStructureInfo[i].cSide;
+						m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].sX    = m_stMiddleCrusadeStructureInfo[i].sX;
+						m_pClientList[iClientH]->m_stCrusadeStructureInfo[i].sY    = m_stMiddleCrusadeStructureInfo[i].sY;
+					}
 				}
 				strcpy(m_pClientList[iClientH]->m_cSendingMapName, "middleland");
 			}
@@ -41594,6 +49191,8 @@ void CGame::_SendMapStatus(int iClientH)
 	for (i = 0 ; i < 100; i++) {
 		if (m_pClientList[iClientH]->m_iCSIsendPoint >= DEF_MAXCRUSADESTRUCTURES) goto SMS_ENDOFDATA;
 		if (m_pClientList[iClientH]->m_stCrusadeStructureInfo[m_pClientList[iClientH]->m_iCSIsendPoint].cType == NULL) goto SMS_ENDOFDATA;
+		// v2.15 보통 캐릭터는 마나 스톤만 보여준다.
+		if ((m_pClientList[iClientH]->m_iCSIsendPoint >= 3) && (m_pClientList[iClientH]->m_iCrusadeDuty != 3) )  goto SMS_ENDOFDATA;
 		
 		*cp = m_pClientList[iClientH]->m_stCrusadeStructureInfo[m_pClientList[iClientH]->m_iCSIsendPoint].cType;
 		cp++;
@@ -41648,6 +49247,24 @@ void CGame::RemoveCrusadeStructures()
 	}
 }
 
+// v2.20 2002-12-28 전면전 종료후 민간인 마을로 강콜
+void CGame::RecallHunterPlayer()
+{
+ register int i;
+
+	for (i = 1; i < DEF_MAXCLIENTS; i++)
+	{
+		if ((m_pClientList[i] != NULL) && (m_pClientList[i]->m_bIsWarLocation == TRUE) 
+			&& (m_pClientList[i]->m_bIsHunter == TRUE) && (m_pClientList[i]->m_bIsInitComplete == TRUE) )
+		{
+			m_pClientList[i]->m_iTimeLeft_ForceRecall = 0;
+		}
+	}
+
+
+}
+
+
 void CGame::RequestHelpHandler(int iClientH)
 {
  // 헬프 요청이다. 길드 마스터에게 좌표를 전달해 준다.
@@ -41680,7 +49297,7 @@ BOOL CGame::bStockMsgToGateServer(char *pData, DWORD dwSize)
 
 	if ((m_iIndexGSS + dwSize) >= DEF_MAXGATESERVERSTOCKMSGSIZE-10) return FALSE;
 
-	cp = (char *)(m_cGateServerStockMsg + m_iIndexGSS);	
+	cp = (char *)(m_cGateServerStockMsg + m_iIndexGSS);
 	memcpy(cp, pData, dwSize);
 
 	m_iIndexGSS += dwSize;
@@ -41721,18 +49338,63 @@ void CGame::SendStockMsgToGateServer()
 
 void CGame::ServerStockMsgHandler(char *pData)
 {
- char * cp, cTemp[120], cName[11];
- short * sp;
- WORD * wp, wServerID, wClientH, wV1, wV2, wV3, wV4;
+ char * cp,* cp2, cTemp[120], cTemp2[120], cTemp3[120], cName[11], cBuffer[256];
+ short * sp ;
+ WORD * wp, wServerID, wClientH, wV1, wV2, wV3, wV4 , wV5;
  DWORD * dwp;
  BOOL bFlag = FALSE;
- int * ip, i, iTotal, iV1, iV2, iV3;
+ int * ip, i, iTotal, iV1, iV2, iV3, iRet;
 
 	iTotal = 0;
 	cp = (char *)(pData + 6);
 	while (bFlag == FALSE) {
 		iTotal++;
 		switch (*cp) {
+		case GSM_DISCONNECT:
+			ZeroMemory(cName, sizeof(cName));
+			cp++;
+			memcpy(cName, cp, 10);
+			cp += 10;
+			
+			for (i = 1; i < DEF_MAXCLIENTS; i++)
+			if ((m_pClientList[i] != NULL) && (m_pClientList[i]->m_iWhisperPlayerIndex != -1) && (strcmp(m_pClientList[i]->m_cWhisperPlayerName, cName) == 0)) {
+				// 귓속말 상태가 해제되었음을 통보. 
+				m_pClientList[i]->m_iWhisperPlayerIndex = -1;
+				SendNotifyMsg(NULL, i, DEF_NOTIFY_WHISPERMODEOFF, NULL, NULL, NULL, cName);
+				goto SSMH_LOOPBREAK; 
+			}
+			break;
+
+		case GSM_WHISFERMSG:
+			ZeroMemory(cName, sizeof(cName));
+			ZeroMemory(cBuffer, sizeof(cBuffer));
+			cp++;
+			memcpy(cName, cp, 10);
+			cp += 10;
+			wp = (WORD *)cp;
+			wV1 = *wp;
+			cp += 2;
+
+			memcpy(cBuffer, cp, wV1);
+			cp += wV1;
+		
+			for (i = 1; i < DEF_MAXCLIENTS; i++)
+			if ((m_pClientList[i] != NULL) && (strcmp(m_pClientList[i]->m_cCharName, cName) == 0)) {
+				iRet = m_pClientList[i]->m_pXSock->iSendMsg(cBuffer, wV1);
+				if(	m_pClientList[i]->m_iAdminUserLevel > 0) {
+					char cTxt[200],cTmpName[12] ;
+					ZeroMemory(cTxt,sizeof(cTxt)) ;
+					ZeroMemory(cTmpName,sizeof(cTmpName)) ;
+
+					memcpy(cTmpName,cBuffer+10,10) ;
+					wsprintf(cTxt,"PC Chat(%s):\"%s\"\tto GM(%s)",cTmpName,cBuffer+21,m_pClientList[i]->m_cCharName) ;
+					bSendMsgToLS(MSGID_GAMEMASTERLOG, i, NULL, cTxt);
+				}
+				break;
+			}
+
+			break;
+		
 		case GSM_CHATMSG:
 			cp++;
 			ZeroMemory(cTemp, sizeof(cTemp));
@@ -41882,9 +49544,141 @@ void CGame::ServerStockMsgHandler(char *pData)
 			wp  = (WORD *)cp;
 			wV4 = *wp;
 			cp += 2;
-			GrandMagicResultHandler(cTemp, wV1, wV2, wV3, wV4);
+
+			// v2.15 나중 확장을 위해 현재 건물의 갯수를 보냄 
+			wp  = (WORD *)cp;
+			wV5 = *wp;
+			
+
+		/*	cp++ ;
+
+			// 4개 건물의 HP를 받는다.
+			wp  = (WORD *)cp;
+			wV5 = *wp;
+			cp += 2;
+			wp  = (WORD *)cp;
+			wV6 = *wp;
+			cp += 2;
+			wp  = (WORD *)cp;
+			wV7 = *wp;
+			cp += 2;
+			wp  = (WORD *)cp;
+			wV8 = *wp;
+			cp += 2; */ 
+
+			GrandMagicResultHandler(cTemp, wV1, wV2, wV3, wV4,wV5,cp);
 			break;
+
+		// v2.14 성후니 추가 유저 소환 
+		case GSM_REQUEST_SUMMONPLAYER:
+			cp++;
+			ZeroMemory(cName, sizeof(cName));
+			memcpy(cName, cp, 10);
+			cp += 10;
+
+			ZeroMemory(cTemp, sizeof(cTemp));
+			memcpy(cTemp, cp, 10);
+			cp += 10;
+			
+
+			wp  = (WORD *)cp;
+			wV1 = *wp;
+			cp += 2;
+
+			wp  = (WORD *)cp;
+			wV2 = *wp;
+			cp += 2;
+
+			for (i = 1; i < DEF_MAXCLIENTS; i++)
+			if ((m_pClientList[i] != NULL) && (strcmp(m_pClientList[i]->m_cCharName, cName) == 0)) {
+				
+				//testcode
+		//		wsprintf(G_cTxt, "(!) Request Teleport (%s)(%d)(%d).", cTemp,wV1,wV2);
+		//		PutLogList(G_cTxt);
+#ifdef DEF_TAIWANLOG
+				short sX = 0,sY = 0 ;
+				char cMapName[22] ; 
+
+				ZeroMemory(cMapName,sizeof(cMapName)) ;
+
+				sX = m_pClientList[i]->m_sX ;
+				sY = m_pClientList[i]->m_sY ;
+				strcpy(cMapName, m_pClientList[i]->m_cMapName) ;
+
+				m_pClientList[i]->m_sX = wV1;
+				m_pClientList[i]->m_sY = wV2;
+				strcpy(m_pClientList[i]->m_cMapName, cTemp) ;
+
+				_bItemLog(DEF_ITEMLOG_SUMMONPLAYER, i, cTemp2,NULL) ;
+
+				m_pClientList[i]->m_sY = sY ; 
+				m_pClientList[i]->m_sX = sX ;
+
+				strcpy(m_pClientList[i]->m_cMapName,cMapName) ;
+
+#endif
+				RequestTeleportHandler(i, "2   ", cTemp ,wV1, wV2);
+				break;
+			}
+			break ;
 		
+			// v2.15 2002-5-21
+		case GSM_REQUEST_SHUTUPPLAYER:
+			cp++;
+			wp = (WORD *)cp;
+			wServerID = *wp;
+			cp += 2;
+			wp = (WORD *)cp;
+			wClientH = *wp;
+			cp += 2;
+
+			ZeroMemory(cName, sizeof(cName));
+			memcpy(cName, cp, 10);
+			cp += 10;
+			
+			wp  = (WORD *)cp;
+			wV1 = *wp;
+			cp += 2;
+
+			ZeroMemory(cTemp, sizeof(cTemp));
+			memcpy(cTemp, cp, 10);
+			cp += 10;
+
+			GSM_RequestShutupPlayer(cTemp,wServerID,wClientH, wV1, cName);
+
+			break ;
+
+	case GSM_RESPONSE_SHUTUPPLAYER:
+			cp++;
+			wp = (WORD *)cp;
+			wServerID = *wp;
+			cp += 2;
+			wp = (WORD *)cp;
+			wClientH = *wp;
+			cp += 2;
+
+			ZeroMemory(cName, sizeof(cName));
+			memcpy(cName, cp, 10);
+			cp += 10;
+
+			wp  = (WORD *)cp;
+			wV1 = *wp;
+			cp += 2;
+
+			ZeroMemory(cTemp, sizeof(cTemp));
+			memcpy(cTemp, cp, 10);
+			cp += 10;
+
+
+			if (wServerID == m_wServerID_GSS) {
+				
+				if ((m_pClientList[wClientH] != NULL)&& (strcmp(m_pClientList[wClientH]->m_cCharName, cName) == 0)&&(m_pClientList[wClientH]->m_iAdminUserLevel > 0)) {
+					SendNotifyMsg(NULL, wClientH, DEF_NOTIFY_PLAYERSHUTUP, wV1, NULL, NULL, cTemp);
+					
+				}
+			}
+			break;
+
 		case GSM_REQUEST_FINDCHARACTER:
 			cp++;
 			wp = (WORD *)cp;
@@ -41896,7 +49690,12 @@ void CGame::ServerStockMsgHandler(char *pData)
 			ZeroMemory(cTemp, sizeof(cTemp));
 			memcpy(cTemp, cp, 10);
 			cp += 10;
-			GSM_RequestFindCharacter(wServerID, wClientH, cTemp);
+
+			ZeroMemory(cTemp2, sizeof(cTemp2));
+			memcpy(cTemp2, cp, 10);
+			cp += 10;
+
+			GSM_RequestFindCharacter(wServerID, wClientH, cTemp,cTemp2);
 			break;
 
 		case GSM_RESPONSE_FINDCHARACTER:
@@ -41911,16 +49710,52 @@ void CGame::ServerStockMsgHandler(char *pData)
 			memcpy(cTemp, cp, 10);
 			cp += 10;
 
+			ZeroMemory(cTemp2, sizeof(cTemp2));
+			memcpy(cTemp2, cp, 10);
+			cp += 10;
+
+
+			// v2.14 /fi 기능 추가 
+			ZeroMemory(cTemp3, sizeof(cTemp3));
+			memcpy(cTemp3, cp, 14);
+			cp += 14;
+
 			if (wServerID == m_wServerID_GSS) {
-				//testcode
-				SendNotifyMsg(NULL, wClientH, DEF_NOTIFY_PLAYERONGAME, NULL, NULL, NULL, cTemp);
+				// 01-12-10 
+				if (m_pClientList[wClientH] != NULL) {
+					// v2.12 귓속말 설정 
+					if ((m_pClientList[wClientH]->m_bIsCheckingWhisperPlayer == TRUE) && (strcmp(m_pClientList[wClientH]->m_cWhisperPlayerName, cTemp) == 0)) {
+						m_pClientList[wClientH]->m_iWhisperPlayerIndex = 10000;			
+						m_pClientList[wClientH]->m_bIsCheckingWhisperPlayer = FALSE;
+						SendNotifyMsg(NULL, wClientH, DEF_NOTIFY_WHISPERMODEON, NULL, NULL, NULL, m_pClientList[wClientH]->m_cWhisperPlayerName);
+					}
+					else {
+						
+						if (m_pClientList[wClientH]->m_iAdminUserLevel == 0) 
+								ZeroMemory(cTemp3, sizeof(cTemp3));
+						
+						if (strcmp(m_pClientList[wClientH]->m_cCharName,cTemp2) == 0)
+							SendNotifyMsg(NULL, wClientH, DEF_NOTIFY_PLAYERONGAME, NULL, NULL, NULL, cTemp, NULL, NULL, NULL, NULL, NULL, NULL, cTemp3);
+					}
+				}
 			}
 			break;
+
+		case GSM_REQUEST_SETFORCERECALLTIME:
+			cp++;
+			wp = (WORD *)cp;
+			m_sForceRecallTime = *wp;
+			cp += 2;
+
+			wsprintf(G_cTxt,"(!) Game Server Force Recall Time (%d)min",m_sForceRecallTime) ;
+			PutLogList(G_cTxt) ;
 
 		default:
 			bFlag = TRUE;
 			break;
 		}
+
+SSMH_LOOPBREAK:;
 	}
 
 	//testcode
@@ -41928,16 +49763,69 @@ void CGame::ServerStockMsgHandler(char *pData)
 	//PutLogList(G_cTxt);
 }
 
+// v2.15 2002-5-21
+void CGame::GSM_RequestShutupPlayer(char * pGMName,WORD wReqServerID, WORD wReqClientH, WORD wTime,char * pPlayer )
+{
+ char * cp, cTemp[120] ,cTxt[20];
+ WORD * wp;
+ register int i;
 
+	for (i = 1; i < DEF_MAXCLIENTS; i++)
+	if ((m_pClientList[i] != NULL) && (strcmp(m_pClientList[i]->m_cCharName, pPlayer) == 0)) {
+		// 찾았다.
+		ZeroMemory(cTemp, sizeof(cTemp));
+		cp = (char *)(cTemp);
+		*cp = GSM_RESPONSE_SHUTUPPLAYER;
+		cp++;
 
-void CGame::GSM_RequestFindCharacter(WORD wReqServerID, WORD wReqClientH, char *pName)
+		wp = (WORD *)cp;
+		*wp = wReqServerID;
+		cp += 2;
+
+		wp = (WORD *)cp;
+		*wp = wReqClientH;
+		cp += 2;
+		
+		memcpy(cp, pGMName, 10);
+		cp += 10;
+
+		wp = (WORD *)cp;
+		*wp = (WORD) wTime;
+		cp += 2;
+
+		memcpy(cp, pPlayer, 10);
+		cp += 10;
+
+					// v2.14 셧업시간을 분으로 수정
+		m_pClientList[i]->m_iTimeLeft_ShutUp = wTime*20; // 1이 3초다. 20이면 1분 
+		
+		SendNotifyMsg(NULL, i, DEF_NOTIFY_PLAYERSHUTUP, wTime, NULL, NULL, pPlayer);
+
+#ifdef DEF_TAIWANLOG
+
+			_bItemLog(DEF_ITEMLOG_SHUTUP,i,pGMName,NULL) ;
+
+			// Admin Log
+			// v2.14 성후니 수정 
+			wsprintf(G_cTxt, "GM Order(%s): Shutup PC(%s) (%d)Min",pGMName, 
+				     m_pClientList[i]->m_cCharName, wTime);
+
+			bSendMsgToLS(MSGID_GAMEMASTERLOG, i, NULL,G_cTxt);
+#endif
+
+		bStockMsgToGateServer(cTemp, 27);
+		return;	
+	}
+}
+
+void CGame::GSM_RequestFindCharacter(WORD wReqServerID, WORD wReqClientH, char *pName,char * cRequestCharName)
 {
  char * cp, cTemp[120];
  WORD * wp;
  register int i;
 
 	for (i = 1; i < DEF_MAXCLIENTS; i++)
-	if ((m_pClientList[i] != NULL)  && (strcmp(m_pClientList[i]->m_cCharName, pName) == 0)) {
+	if ((m_pClientList[i] != NULL) && (strcmp(m_pClientList[i]->m_cCharName, pName) == 0)) {
 		// 찾았다.
 		ZeroMemory(cTemp, sizeof(cTemp));
 		cp = (char *)(cTemp);
@@ -41955,11 +49843,25 @@ void CGame::GSM_RequestFindCharacter(WORD wReqServerID, WORD wReqClientH, char *
 		memcpy(cp, pName, 10);
 		cp += 10;
 
-		bStockMsgToGateServer(cTemp, 15);
+		memcpy(cp, cRequestCharName, 10);
+		cp += 10;
+
+		// v2.14 /fi 기능 
+		memcpy(cp, m_pClientList[i]->m_cMapName, 10) ;
+		cp += 10 ;
+		
+		wp = (WORD *)cp;
+		*wp =(WORD) m_pClientList[i]->m_sX;
+		cp += 2;
+
+		wp = (WORD *)cp;
+		*wp = (WORD) m_pClientList[i]->m_sY;
+		cp += 2;
+
+		bStockMsgToGateServer(cTemp, 39);
 		return;	
 	}
 }
-
 
 void CGame::DoMeteorStrikeDamageHandler(int iMapIndex)
 {
@@ -41974,7 +49876,13 @@ void CGame::DoMeteorStrikeDamageHandler(int iMapIndex)
 		iDamage = iDice(1, m_pClientList[i]->m_iLevel) + m_pClientList[i]->m_iLevel;
 		// 최대 255이상의 대미지는 받지 않는다.
 		if (iDamage > 255) iDamage = 255;
-	
+
+		// v2.04 만약 마방이 걸려 있다면 대미지는 절반 
+		if (m_pClientList[i]->m_cMagicEffectStatus[DEF_MAGICTYPE_PROTECT] == 2) iDamage = iDamage / 2;
+
+		// v2.14 운영자는 메테오 공격을 받았을때 데미지를 받지 않는다.
+		if(m_pClientList[i]->m_iAdminUserLevel > 0 ) iDamage = 0 ;
+
 		m_pClientList[i]->m_iHP -= iDamage;
 		if (m_pClientList[i]->m_iHP <= 0) {
 			// 플레이어가 사망했다.
@@ -42009,19 +49917,26 @@ void CGame::DoMeteorStrikeDamageHandler(int iMapIndex)
 }
 
 
+// v2.15 메테오에 맞을때 남은 건물 HP 를 보여주기 위한 루틴 
+// 주의 현재 건물이 4개인 경우에 맞춰서 루틴이 형성 되어 있다.
 void CGame::CalcMeteorStrikeEffectHandler(int iMapIndex)
 {
- int i, iActiveStructure;
- char * cp, cData[120], cWinnerSide;
+ int i, iActiveStructure, iStructureHP[DEF_MAXSTRIKEPOINTS] ;
+ char * cp, * cp2, cData[120], cWinnerSide, cTempData[120];
  WORD * wp;
 
 	if (m_bIsCrusadeMode == FALSE) return;
+
+	// 사용자에게 남은 건물의 HP를 보여주기 위한 변수 초기화 
+	for(i = 0 ; i < DEF_MAXSTRIKEPOINTS; i++)
+		iStructureHP[i] = 0 ;
 
 	// 폭격의 효과를 계산한다. 모든 건물이 파괴되었다면 전면전 모드 종료. 그렇지 않으면 결과를 모든 서버에 리포트.
 	iActiveStructure = 0;
 	for (i = 1; i <= m_pMapList[iMapIndex]->m_iTotalStrikePoints; i++) {
 		if (m_pMapList[iMapIndex]->m_stStrikePoint[i].iHP > 0) {
 			iActiveStructure++;
+			iStructureHP[i] = m_pMapList[iMapIndex]->m_stStrikePoint[i].iHP ;
 		}
 	}
 	
@@ -42070,9 +49985,7 @@ void CGame::CalcMeteorStrikeEffectHandler(int iMapIndex)
 		cp += 10;
 
 		bStockMsgToGateServer(cData, 18);
-		
-		// 현재 서버에는 스톡 메시지가 오지 않으므로 직접 전달한다.
-		GrandMagicResultHandler(m_pMapList[iMapIndex]->m_cName, m_stMeteorStrikeResult.iCrashedStructureNum, m_stMeteorStrikeResult.iStructureDamageAmount, m_stMeteorStrikeResult.iCasualties, iActiveStructure);
+
 	}
 	else {
 		// 피해 상황을 모든 서버로 리포트.
@@ -42097,17 +50010,31 @@ void CGame::CalcMeteorStrikeEffectHandler(int iMapIndex)
 		cp += 2;
 
 		wp  = (WORD *)cp;
-		*wp = iActiveStructure;
+		*wp = (WORD) iActiveStructure;
 		cp += 2;
+
+		//v2.15 추가  토탈 건물의 갯수 
+		ZeroMemory(cTempData, sizeof(cTempData));
+		cp2 = (char *)(cTempData); 
+
+		wp = (WORD *)cp2;
+		*wp = (WORD) m_pMapList[iMapIndex]->m_iTotalStrikePoints;
+		cp2 += 2;
+
+		for (i = 1; i <= m_pMapList[iMapIndex]->m_iTotalStrikePoints;i++){
+			wp = (WORD *)cp2;
+			*wp = (WORD) iStructureHP[i];
+			cp2 += 2;
+		}
+
+		memcpy(cp,cTempData,2*(m_pMapList[iMapIndex]->m_iTotalStrikePoints+1) ) ;
+
+		// v2.15 
+		bStockMsgToGateServer(cData, 18 + (m_pMapList[iMapIndex]->m_iTotalStrikePoints+1)*2 );
 		
-		bStockMsgToGateServer(cData, 19);
-
-		//testcode
-		wsprintf(G_cTxt, "(!) Reporting Grand Magic Strike Result (%s %d %d %d %d)", m_pMapList[iMapIndex]->m_cName, m_stMeteorStrikeResult.iCrashedStructureNum, m_stMeteorStrikeResult.iStructureDamageAmount, m_stMeteorStrikeResult.iCasualties, iActiveStructure);
-		PutLogList(G_cTxt);
-
 		// 현재 서버에는 스톡 메시지가 오지 않으므로 직접 전달한다.
-		GrandMagicResultHandler(m_pMapList[iMapIndex]->m_cName, m_stMeteorStrikeResult.iCrashedStructureNum, m_stMeteorStrikeResult.iStructureDamageAmount, m_stMeteorStrikeResult.iCasualties, iActiveStructure);
+		// v2.15 건물의 갯수와 HP를 보낸다.
+		GrandMagicResultHandler(m_pMapList[iMapIndex]->m_cName, m_stMeteorStrikeResult.iCrashedStructureNum, m_stMeteorStrikeResult.iStructureDamageAmount, m_stMeteorStrikeResult.iCasualties, iActiveStructure,m_pMapList[iMapIndex]->m_iTotalStrikePoints, cTempData);
 	}
 
 	// 결과 보고용 스트럭춰 클리어
@@ -42117,13 +50044,14 @@ void CGame::CalcMeteorStrikeEffectHandler(int iMapIndex)
 }
 
 
-void CGame::GrandMagicResultHandler(char *cMapName, int iCrashedStructureNum, int iStructureDamageAmount, int iCasualities, int iActiveStructure)
+// v2.15 건물의 HP를 보여주기 위해 변경함 
+void CGame::GrandMagicResultHandler(char *cMapName, int iCrashedStructureNum, int iStructureDamageAmount, int iCasualities, int iActiveStructure, int iSTcount,char * pData)
 {
  int i;
 	
 	for (i = 1; i < DEF_MAXCLIENTS; i++)
 	if (m_pClientList[i] != NULL) {
-		SendNotifyMsg(NULL, i, DEF_NOTIFY_GRANDMAGICRESULT, iCrashedStructureNum, iStructureDamageAmount, iCasualities, cMapName, iActiveStructure);
+		SendNotifyMsg(NULL, i, DEF_NOTIFY_GRANDMAGICRESULT, iCrashedStructureNum, iStructureDamageAmount, iCasualities, cMapName, iActiveStructure,0,0,0,0,iSTcount,pData);
 	}
 }
 
@@ -42205,8 +50133,7 @@ void CGame::SyncMiddlelandMapInfo()
 
 void CGame::GSM_SetGuildTeleportLoc(int iGuildGUID, int dX, int dY, char * pMapName)
 {
- int * ip, i, iIndex;
- char * cp;
+ int i, iIndex;
  DWORD dwTemp, dwTime;
 
 	// 클라이언트로부터의 요청이 아니라 다른 서버로부터의 텔레포트 좌표 설정 요청임. 응답할 필요 없음.
@@ -42276,8 +50203,7 @@ void CGame::GSM_SetGuildTeleportLoc(int iGuildGUID, int dX, int dY, char * pMapN
 
 void CGame::GSM_SetGuildConstructLoc(int iGuildGUID, int dX, int dY, char * pMapName)
 {
- int * ip, i, iIndex;
- char * cp;
+ int i, iIndex;
  DWORD dwTemp, dwTime;
 
 	// 클라이언트로부터의 요청이 아니라 다른 서버로부터의 텔레포트 좌표 설정 요청임. 응답할 필요 없음.
@@ -42349,6 +50275,14 @@ void CGame::GlobalStartCrusadeMode()
 {
  char * cp, cData[120];
  DWORD * dwp, dwCrusadeGUID;
+ SYSTEMTIME SysTime;
+
+	// 오류로 인해 하루에 두번 전면전이 발생하는 것을 막는 코드 
+	GetLocalTime(&SysTime);
+	if (m_iLatestCrusadeDayOfWeek != -1) {
+		if (m_iLatestCrusadeDayOfWeek == SysTime.wDayOfWeek) return;
+	}
+	else m_iLatestCrusadeDayOfWeek = SysTime.wDayOfWeek;
 
 	dwCrusadeGUID = timeGetTime();
 
@@ -42382,7 +50316,8 @@ void CGame::CheckCommanderConstructionPoint(int iClientH)
 			(m_pClientList[i]->m_iGuildGUID == m_pClientList[iClientH]->m_iGuildGUID)) {
 			// 현재 서버 내에 길드마스터 지휘관이 있다. 지휘관의 포인트를 높인 후 
 			m_pClientList[i]->m_iConstructionPoint += m_pClientList[iClientH]->m_iConstructionPoint;
-			m_pClientList[i]->m_iWarContribution   += (m_pClientList[iClientH]->m_iConstructionPoint / 10);
+			// v2.19 2002-12-4 길드 마스터의 경험치를 높힌다.
+			m_pClientList[i]->m_iWarContribution   += (m_pClientList[iClientH]->m_iConstructionPoint / 6);
 
 			if (m_pClientList[i]->m_iConstructionPoint > DEF_MAXCONSTRUCTIONPOINT) 
 				m_pClientList[i]->m_iConstructionPoint = DEF_MAXCONSTRUCTIONPOINT;
@@ -42425,8 +50360,10 @@ void CGame::GSM_ConstructionPoint(int iGuildGUID, int iPoint)
 	if ((m_pClientList[i] != NULL) && (m_pClientList[i]->m_iCrusadeDuty == 3) &&
 		(m_pClientList[i]->m_iGuildGUID == iGuildGUID)) {
 		// 해당 길드마스터 지휘관을 찾았다.
+		// v2.19 2002-12-4 길드 마스터의 경험치를 높힌다.
 		m_pClientList[i]->m_iConstructionPoint += iPoint;
-		m_pClientList[i]->m_iWarContribution   += iPoint/10;
+		m_pClientList[i]->m_iWarContribution   += iPoint/6;
+
 		
 		if (m_pClientList[i]->m_iConstructionPoint > DEF_MAXCONSTRUCTIONPOINT) 
 			m_pClientList[i]->m_iConstructionPoint = DEF_MAXCONSTRUCTIONPOINT;
@@ -42483,7 +50420,6 @@ RCSC_LOOPBREAK:;
 void CGame::_CreateCrusadeGUID(DWORD dwCrusadeGUID, int iWinnerSide)
 {
  char * cp, cTxt[256], cFn[256], cTemp[1024];	
- int iRet;
  FILE * pFile;
 		
 	_mkdir("GameData");
@@ -42526,7 +50462,7 @@ BOOL CGame::bReadCrusadeGUIDFile(char * cFn)
  FILE * pFile;
  HANDLE hFile;
  DWORD  dwFileSize;
- char * cp, * token, cReadMode, cTxt[120];
+ char * cp, * token, cReadMode;
  char seps[] = "= \t\n";
  class CStrTok * pStrTok;
 
@@ -42563,7 +50499,7 @@ BOOL CGame::bReadCrusadeGUIDFile(char * cFn)
 					break;
 
 				case 2:
-					m_iCrusadeWinnerSide = atoi(token);
+					m_iWinnerSide = m_iCrusadeWinnerSide = atoi(token);
 					wsprintf(G_cTxt, "CrusadeWinnerSide = %d", m_iCrusadeWinnerSide);
 					PutLogList(G_cTxt);
 					cReadMode = 0;
@@ -42623,27 +50559,54 @@ void CGame::ManualEndCrusadeMode(int iWinnerSide)
 	bStockMsgToGateServer(cData, 18);
 }
 
+
 int CGame::iGetMapLocationSide(char *pMapName)
 {
-	if (strcmp(pMapName, "cityhall_1") == 0) return 1;
-	if (strcmp(pMapName, "cath_1") == 0) return 1;
-	if (strcmp(pMapName, "gshop_1") == 0) return 1;
-	if (strcmp(pMapName, "bsmith_1") == 0) return 1;
-	if (strcmp(pMapName, "gldhall_1") == 0) return 1;
-	if (strcmp(pMapName, "wrhus_1") == 0) return 1;
-	if (strcmp(pMapName, "arebrk11") == 0) return 1;
-	if (strcmp(pMapName, "wzdtwr_1") == 0) return 1;
-	if (strcmp(pMapName, "aresden") == 0) return 1;
 
-	if (strcmp(pMapName, "cityhall_2") == 0) return 2;
-	if (strcmp(pMapName, "cath_2") == 0) return 2;
-	if (strcmp(pMapName, "gshop_2") == 0) return 2;
-	if (strcmp(pMapName, "bsmith_2") == 0) return 2;
-	if (strcmp(pMapName, "gldhall_2") == 0) return 2;
-	if (strcmp(pMapName, "wrhus_2") == 0) return 2;
-	if (strcmp(pMapName, "arebrk21") == 0) return 2;
-	if (strcmp(pMapName, "wzdtwr_2") == 0) return 2;
-	if (strcmp(pMapName, "elvine") == 0) return 2;
+	// 건물안 혹은 농경지만 검사할때는 필요 없다.
+
+	if (strcmp(pMapName, "aresden") == 0) return 3 ;
+	if (strcmp(pMapName, "elvine") == 0)  return 4 ;
+	if (memcmp(pMapName, "arebrk11", 8) == 0) return 3 ;
+	if (memcmp(pMapName, "elvbrk11", 8) == 0) return 4 ;
+
+
+	if (memcmp(pMapName, "cityhall_1", 10) == 0) return DEF_ARESDEN ;
+	if (memcmp(pMapName, "cityhall_2", 10) == 0)  return DEF_ELVINE ;
+
+	if (memcmp(pMapName, "cath_1", 6) == 0) return DEF_ARESDEN ;
+	if (memcmp(pMapName, "cath_2", 6) == 0) return DEF_ELVINE ;
+
+	if (memcmp(pMapName, "gshop_1", 7) == 0) return DEF_ARESDEN ;
+	if (memcmp(pMapName, "gshop_2", 7) == 0) return DEF_ELVINE ;
+
+	if (memcmp(pMapName, "bsmith_1", 8) == 0) return DEF_ARESDEN ;
+	if (memcmp(pMapName, "bsmith_2", 8) == 0) return DEF_ELVINE ;
+
+	if (memcmp(pMapName, "wrhus_1", 7) == 0) return DEF_ARESDEN ;
+	if (memcmp(pMapName, "wrhus_2", 7) == 0) return DEF_ELVINE ;
+
+	if (memcmp(pMapName, "gldhall_1", 9) == 0) return DEF_ARESDEN ;
+	if (memcmp(pMapName, "gldhall_2", 9) == 0) return DEF_ELVINE ;
+
+	if (memcmp(pMapName, "wzdtwr_1", 8) == 0) return DEF_ARESDEN ;
+	if (memcmp(pMapName, "wzdtwr_2", 8) == 0) return DEF_ELVINE ;
+
+	if (memcmp(pMapName, "arefarm", 7) == 0) return DEF_ARESDEN ;
+	if (memcmp(pMapName, "elvfarm", 7) == 0) return DEF_ELVINE ;
+	
+	if (memcmp(pMapName, "arewrhus", 8) == 0) return DEF_ARESDEN ;
+	if (memcmp(pMapName, "elvwrhus", 8) == 0) return DEF_ELVINE ;
+
+/*  memcmp 를하기 때문에 앞에서 걸린다.
+	if (memcmp(pMapName, "gshop_1f") == 0) return 1;
+	if (memcmp(pMapName, "bsmith_1f") == 0) return 1;
+	if (memcmp(pMapName, "wrhus_1f") == 0) return 1;
+	
+	if (memcmp(pMapName, "gshop_2f") == 0) return 2;
+	if (memcmp(pMapName, "bsmith_2f") == 0) return 2;
+	if (memcmp(pMapName, "wrhus_2f") == 0) return 2; */
+
 
 	return 0;
 }
@@ -42702,3 +50665,2570 @@ BOOL CGame::bCopyItemContents(CItem * pCopy, CItem *pOriginal)
 
 	return TRUE;
 }
+
+void CGame::CrusadeWarStarter()
+{
+ SYSTEMTIME SysTime;
+ int i;
+
+	if (m_bIsCrusadeMode == TRUE) return;
+	if (m_bIsCrusadeWarStarter == FALSE) return;
+
+	// 게임 서버 1번에서만 
+	GetLocalTime(&SysTime);
+	
+	for (i = 0; i < DEF_MAXSCHEDULE; i++)
+	if (m_stCrusadeWarSchedule[i].iDay == SysTime.wDayOfWeek) {
+		if ((m_stCrusadeWarSchedule[i].iHour == SysTime.wHour) && 
+            (m_stCrusadeWarSchedule[i].iMinute == SysTime.wMinute)) {
+			// 리스트에서 찾았다. 전면전 시작 			
+			GlobalStartCrusadeMode();
+			return;
+		}
+	}
+}
+
+BOOL CGame::bReadCrusadeScheduleConfigFile(char *pFn)
+{
+ FILE * pFile;
+ HANDLE hFile;
+ DWORD  dwFileSize;
+ char * cp, * token, cReadModeA, cReadModeB;
+ char seps[] = "= \t\n";
+ class CStrTok * pStrTok;
+ int   iIndex;
+
+	cReadModeA = 0;
+	cReadModeB = 0;
+	iIndex = 0;
+
+	hFile = CreateFile(pFn, GENERIC_READ, NULL, NULL, OPEN_EXISTING, NULL, NULL);
+	dwFileSize = GetFileSize(hFile, NULL);
+	if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
+
+	pFile = fopen(pFn, "rt");
+	if (pFile == NULL) {
+		// 게임서버의 초기화 파일을 읽을 수 없다.
+		PutLogList("(!) Cannot open Crusade Schedule file.");
+		return FALSE;
+	}
+	else {
+		PutLogList("(!) Reading Crusade Schedule file...");
+		cp = new char[dwFileSize+2];
+		ZeroMemory(cp, dwFileSize+2);
+		fread(cp, dwFileSize, 1, pFile);
+
+		pStrTok = new class CStrTok(cp, seps);
+		token = pStrTok->pGet();
+
+		while( token != NULL )   {
+			
+			if (cReadModeA != 0) {
+				switch (cReadModeA) {
+				case 1:
+					if (strcmp(m_cServerName, token) == 0) {
+						PutLogList("(!) This server will schedule crusade total war.");
+						m_bIsCrusadeWarStarter = TRUE;
+					}
+					cReadModeA = 0;
+					break;
+
+				case 2:
+					switch (cReadModeB) {
+					case 1:
+						if (iIndex >= DEF_MAXSCHEDULE) {
+							PutLogList("(!) WARNING! Too many crusade war schedule!"); 
+							return TRUE;
+						}
+						m_stCrusadeWarSchedule[iIndex].iDay = atoi(token);
+						cReadModeB = 2;
+						break;
+					case 2:
+						m_stCrusadeWarSchedule[iIndex].iHour = atoi(token);
+						cReadModeB = 3;
+						break;
+					case 3:
+						m_stCrusadeWarSchedule[iIndex].iMinute = atoi(token);
+						iIndex++;
+						cReadModeA = 0;
+						cReadModeB = 0;
+						break;
+					}
+					break;
+				}
+			}
+			else {
+				if (memcmp(token, "game-server-name", 16) == 0) {
+					cReadModeA = 1;
+					cReadModeB = 1;
+				}
+				if (memcmp(token, "schedule", 8) == 0) {
+					cReadModeA = 2;
+					cReadModeB = 1;
+				}
+			}
+			
+			token = pStrTok->pGet();
+		}
+		delete pStrTok;
+		delete cp;
+	}
+	if (pFile != NULL) fclose(pFile);
+
+	return TRUE;
+}
+
+void CGame::KillCrusadeObjects()
+{
+ int i;
+
+	// 소환된 모든 몬스터를 죽인다. 
+	for (i = 1; i < DEF_MAXNPCS; i++)
+	if (m_pNpcList[i] != NULL) {
+		switch (m_pNpcList[i]->m_sType) {
+		case 43:
+		case 44:
+		case 45:
+		case 46:
+		case 47:
+		case 51:
+			NpcKilledHandler(NULL, NULL, i, 0);
+			break;
+		}
+	}
+}
+
+void CGame::AdminOrder_GetFightzoneTicket(int iClientH)
+{
+ int iReserveTime, iFightzoneTN, iFightzoneN;
+ char cTemp[21];
+ SYSTEMTIME SysTime;
+
+	if (m_pClientList[iClientH] == NULL) return;
+	if (memcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, "fightzone", 9) == 0) {
+		
+		iReserveTime = m_pClientList[iClientH]->m_iReserveTime;
+		GetLocalTime(&SysTime);
+		m_pClientList[iClientH]->m_iReserveTime = SysTime.wMonth*10000 + SysTime.wDay*100 + (SysTime.wHour +3);  
+		
+		ZeroMemory(cTemp, sizeof(cTemp));
+		strcpy(cTemp, (m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName +9));
+		iFightzoneN  = m_pClientList[iClientH]->m_iFightzoneNumber;
+		iFightzoneTN = m_pClientList[iClientH]->m_iFightZoneTicketNumber;
+		m_pClientList[iClientH]->m_iFightZoneTicketNumber = 10;
+		m_pClientList[iClientH]->m_iFightzoneNumber = atoi(cTemp);
+		
+		GetFightzoneTicketHandler(iClientH);
+		GetFightzoneTicketHandler(iClientH);
+		GetFightzoneTicketHandler(iClientH);
+		
+		m_pClientList[iClientH]->m_iFightzoneNumber = iFightzoneN;
+		m_pClientList[iClientH]->m_iFightZoneTicketNumber = iFightzoneTN;
+		m_pClientList[iClientH]->m_iReserveTime = iReserveTime;
+	}
+	else {
+		iReserveTime = m_pClientList[iClientH]->m_iReserveTime;
+		GetLocalTime(&SysTime);
+		m_pClientList[iClientH]->m_iReserveTime = SysTime.wMonth*10000 + SysTime.wDay*100 + (SysTime.wHour +2);  
+		
+		ZeroMemory(cTemp, sizeof(cTemp));
+		strcpy(cTemp, (m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName +9));
+		iFightzoneN  = m_pClientList[iClientH]->m_iFightzoneNumber;
+		iFightzoneTN = m_pClientList[iClientH]->m_iFightZoneTicketNumber;
+		m_pClientList[iClientH]->m_iFightZoneTicketNumber = 10;
+		m_pClientList[iClientH]->m_iFightzoneNumber = 1;
+		
+		GetFightzoneTicketHandler(iClientH);
+		GetFightzoneTicketHandler(iClientH);
+		GetFightzoneTicketHandler(iClientH);
+
+		m_pClientList[iClientH]->m_iFightzoneNumber = iFightzoneN;
+		m_pClientList[iClientH]->m_iFightZoneTicketNumber = iFightzoneTN;
+		m_pClientList[iClientH]->m_iReserveTime = iReserveTime;
+	}
+}
+
+
+
+void CGame::ResurrectPlayer(int iClientH)
+{
+	//testcode
+	PutLogList("(*) Resurrect Player!");
+
+	// 캐릭터를 부활시킨다.
+	// 현재 이 플레이어를 목표로 삼고 있는 몹들의 공격행동을 멈추게 한다. 
+	RemoveFromTarget(iClientH, DEF_OWNERTYPE_PLAYER);
+	// 현재 맵 위치에서 지운다.
+	m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->ClearOwner(13, iClientH, DEF_OWNERTYPE_PLAYER, m_pClientList[iClientH]->m_sX,  m_pClientList[iClientH]->m_sY);
+	// 다른 클라이언트들에게 플레이어가 현 위치에서 사라짐을 알린다. 
+	SendEventToNearClient_TypeA(iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_LOG, DEF_MSGTYPE_REJECT, NULL, NULL, NULL);
+
+	// 플레이어의 위치를 확정한다. 맵의 디폴트 위치로 이동 
+	GetMapInitialPoint(m_pClientList[iClientH]->m_cMapIndex, &m_pClientList[iClientH]->m_sX, &m_pClientList[iClientH]->m_sY);
+
+	m_pClientList[iClientH]->m_iHP = iGetMaxHP(iClientH);
+	m_pClientList[iClientH]->m_iMP = (2*m_pClientList[iClientH]->m_iMag) + (2*m_pClientList[iClientH]->m_iLevel) + (m_pClientList[iClientH]->m_iInt/2);
+	m_pClientList[iClientH]->m_iSP = (2*m_pClientList[iClientH]->m_iStr) + (2*m_pClientList[iClientH]->m_iLevel);
+	m_pClientList[iClientH]->m_bIsKilled = FALSE;
+
+	RequestInitDataHandler(iClientH, NULL, NULL, TRUE);
+	return;
+}
+
+BOOL CGame::bCheckAndConvertPlusWeaponItem(int iClientH, int iItemIndex)
+{
+	// 이 아이템이 +1, +2 이름이 붙은 아이템이라면 Attribute 플래그로 특성치를 이동시키고 일반 아이템으로 변형시킨다.
+	if (m_pClientList[iClientH] == NULL) return FALSE;
+	if (m_pClientList[iClientH]->m_pItemList[iItemIndex] == NULL) return FALSE;
+
+	switch (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sIDnum) {
+	case 4:  // 단검 +1
+	case 9:  // 쇼트 소드 +1
+	case 13: // 망고슈 +1
+	case 16: // 그라디우스 +1
+	case 18: // 롱소드 +1
+	case 19: // 롱소드 +2
+	case 21: // 엑스칼리버 +1
+	case 24: // 세이버 +1
+	case 26: // 시미타 +1
+	case 27: // 시미타 +2
+	case 29: // 팔치온 +1
+	case 30: // 팔치온 +2
+	case 32: // 에스터크 +1
+	case 33: // 에스터크 +2
+	case 35: // 레이피어 +1
+	case 36: // 레이피어 +2
+	case 39: // 브로드 소드 +1
+	case 40: // 브로드 소드 +2
+	case 43: // 바스타드 소드 +1
+	case 44: // 바스타드 소드 +2
+	case 47: // 클레이모어 +1
+	case 48: // 클레이모어 +2
+	case 51: // 그레이트 소드 +1
+	case 52: // 그레이트 소드 +2
+	case 55: // 플램버그 +1
+	case 56: // 플램버그 +2
+	case 60: // 라이트 액스 +1
+	case 61: // 라이트 액스 +2
+	case 63: // 토마호크 +1
+	case 64: // 토마호크 +2
+	case 66: // 색슨액스 +1
+	case 67: // 색슨액스 +2
+	case 69: // 더블액스 +1
+	case 70: // 더블액스 +2
+	case 72: // 워액스 +1
+	case 73: // 워액스 +2
+	
+	case 580: // 배틀액스 +1
+	case 581: // 배틀액스 +2
+	case 582: // 세이버 +2
+		break;
+	}
+}
+
+void CGame::RequestCreatePartyHandler(int iClientH)
+{
+ char *cp, cData[120];
+ DWORD * dwp;
+ WORD * wp;
+
+	if (m_pClientList[iClientH] == NULL) return;
+	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE) return;
+	
+	if (m_pClientList[iClientH]->m_iPartyStatus != DEF_PARTYSTATUS_NULL) {
+		// 파티 상태가 이미 존재하면 파티를 만들 수 없다.
+		return;
+	}
+
+	m_pClientList[iClientH]->m_iPartyStatus = DEF_PARTYSTATUS_PROCESSING;
+
+	// Gate Server에 파티 생성후 PartyID를 알려줄 것을 요청한다. 
+	ZeroMemory(cData, sizeof(cData));
+	cp = (char *)cData;
+
+	dwp = (DWORD *)cp;
+	*dwp = MSGID_PARTYOPERATION;
+	cp += 4;
+	wp = (WORD*)cp;
+	*wp = 1; // 1, request
+	cp += 2;
+
+	wp = (WORD *)cp;
+	*wp = iClientH;
+	cp += 2;
+
+	memcpy(cp, m_pClientList[iClientH]->m_cCharName, 10);
+	cp += 10;
+
+	SendMsgToGateServer(MSGID_PARTYOPERATION, iClientH, cData);
+
+	//testcode
+	wsprintf(G_cTxt, "Request Create Party: %d", iClientH);
+	PutLogList(G_cTxt);
+}
+
+
+
+void CGame::PartyOperationResultHandler(char *pData)
+{
+ char * cp, cResult, cName[12];
+ WORD * wp;
+ int i, iClientH, iPartyID, iTotal;
+
+	cp = (char *)(pData + 4);
+	wp = (WORD *)cp;
+	cp += 2;
+
+	// 응답 종류에 따라 처리 
+	switch (*wp) {
+	case 1: // 파티 생성 요청에 대한 응답 
+		cResult = *cp;
+		cp++;
+		wp = (WORD *)cp;
+		iClientH = (int)*wp;
+		cp += 2;
+		ZeroMemory(cName, sizeof(cName));
+		memcpy(cName, cp, 10);
+		cp += 10;
+		wp = (WORD *)cp;
+		iPartyID = (int)*wp;
+		cp += 2;
+		PartyOperationResult_Create(iClientH, cName, cResult, iPartyID);
+		//testcode
+		wsprintf(G_cTxt, "party Operation Result: Create(ClientH:%d PartyID:%d)", iClientH, iPartyID);
+		PutLogList(G_cTxt);
+		break;
+
+	case 2: // 파티가 해산되었다.
+		wp = (WORD *)cp;
+		iPartyID = *wp;
+		cp += 2;
+		PartyOperationResult_Delete(iPartyID);
+
+		//testcode
+		wsprintf(G_cTxt, "party Operation Result: Delete(PartyID:%d)", iPartyID);
+		PutLogList(G_cTxt);
+		break;
+
+	case 3: // 캐릭터의 파티 상태를 클리어한다.
+		wp = (WORD *)cp;
+		iClientH = *wp;
+		cp += 2;
+		ZeroMemory(cName, sizeof(cName));
+		memcpy(cName, cp, 10);
+		cp += 10;
+
+		if ((iClientH < 0) && (iClientH > DEF_MAXCLIENTS)) return;
+		if (m_pClientList[iClientH] == NULL) return;
+		if (strcmp(m_pClientList[iClientH]->m_cCharName, cName) != 0) return;
+		
+		// 게임 서버의 파티 리스트에서 등록해제.
+		for (i = 0; i < DEF_MAXPARTYMEMBERS; i++)
+		if (m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i] == iClientH) {
+			m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i] = 0;
+			m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers--;
+			//testcode
+			wsprintf(G_cTxt, "PartyID:%d member:%d Out(Clear) Total:%d", m_pClientList[iClientH]->m_iPartyID, iClientH, m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers);
+			PutLogList(G_cTxt);
+			goto PORH_LOOPBREAK1;
+		}
+PORH_LOOPBREAK1:;
+		// 리스트 인덱스의 빈공간을 제거한다.
+		for (i = 0; i < DEF_MAXPARTYMEMBERS-1; i++)
+		if ((m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i] == 0) && (m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i+1] != 0)) {
+			m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i]   = m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i+1];
+			m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i+1] = 0;
+		}
+
+		m_pClientList[iClientH]->m_iPartyID = NULL;
+		m_pClientList[iClientH]->m_iPartyStatus = DEF_PARTYSTATUS_NULL;
+
+		//testcode
+		wsprintf(G_cTxt, "Party Status NULL: %s", m_pClientList[iClientH]->m_cCharName);
+		PutLogList(G_cTxt);
+
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PARTY, 8, 0, NULL, NULL);
+		break;
+
+	case 4: // 파티 가입 요청에 대한 응답
+		cResult = *cp;
+		cp++;
+		wp = (WORD *)cp;
+		iClientH = (int)*wp;
+		cp += 2;
+		ZeroMemory(cName, sizeof(cName));
+		memcpy(cName, cp, 10);
+		cp += 10;
+		wp = (WORD *)cp;
+		iPartyID = (int)*wp;
+		cp += 2;
+		PartyOperationResult_Join(iClientH, cName, cResult, iPartyID);
+		//testcode
+		wsprintf(G_cTxt, "party Operation Result: Join(ClientH:%d PartyID:%d)", iClientH, iPartyID);
+		PutLogList(G_cTxt);
+		break;
+
+	case 5: // 파티 정보 
+		wp = (WORD *)cp;
+		iClientH = (int)*wp;
+		cp += 2;
+		ZeroMemory(cName, sizeof(cName));
+		memcpy(cName, cp, 10);
+		cp += 10;
+		wp = (WORD *)cp;
+		iTotal = (int)*wp;
+		cp += 2;
+		PartyOperationResult_Info(iClientH, cName, iTotal, cp);
+		//testcode
+		wsprintf(G_cTxt, "party Operation Result: Info(ClientH:%d Total:%d)", iClientH, iTotal);
+		PutLogList(G_cTxt);
+		break;
+
+	case 6: // 파티 멤버 제거됨 
+		cResult = *cp;
+		cp++;
+		wp = (WORD *)cp;
+		iClientH = (int)*wp;
+		cp += 2;
+		ZeroMemory(cName, sizeof(cName));
+		memcpy(cName, cp, 10);
+		cp += 10;
+		wp = (WORD *)cp;
+		iPartyID = (int)*wp;
+		cp += 2;
+		PartyOperationResult_Dismiss(iClientH, cName, cResult, iPartyID);
+		//testcode
+		wsprintf(G_cTxt, "party Operation Result: Dismiss(ClientH:%d PartyID:%d)", iClientH, iPartyID);
+		PutLogList(G_cTxt);
+		break;
+	}
+}
+
+void CGame::PartyOperationResult_Create(int iClientH, char *pName, int iResult, int iPartyID)
+{
+ char * cp, cData[120];
+ DWORD * dwp;
+ WORD * wp;
+ int i;
+
+	if (m_pClientList[iClientH] == NULL) return;
+	if (strcmp(m_pClientList[iClientH]->m_cCharName, pName) != 0) return;
+
+	switch (iResult) {
+	case 0: // 파티 생성 실패 
+		if (m_pClientList[iClientH]->m_iPartyStatus != DEF_PARTYSTATUS_PROCESSING) return;
+		if (strcmp(m_pClientList[iClientH]->m_cCharName, pName) != 0) return;
+
+		m_pClientList[iClientH]->m_iPartyID = NULL;
+		m_pClientList[iClientH]->m_iPartyStatus = DEF_PARTYSTATUS_NULL;
+		m_pClientList[iClientH]->m_iReqJoinPartyClientH = NULL;
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PARTY, 1, 0, NULL, NULL);
+		break;
+
+	case 1: // 파티 생성 성공 
+		if (m_pClientList[iClientH]->m_iPartyStatus != DEF_PARTYSTATUS_PROCESSING) return;
+		if (strcmp(m_pClientList[iClientH]->m_cCharName, pName) != 0) return;
+
+		m_pClientList[iClientH]->m_iPartyID = iPartyID;
+		m_pClientList[iClientH]->m_iPartyStatus = DEF_PARTYSTATUS_CONFIRM;
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PARTY, 1, 1, NULL, NULL);
+
+		// 게임 서버의 파티 리스트에 등록.
+		for (i = 0; i < DEF_MAXPARTYMEMBERS; i++)
+		if (m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i] == 0) {
+			m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i] = iClientH;
+			m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers++;
+			//testcode
+			wsprintf(G_cTxt, "PartyID:%d member:%d New Total:%d", m_pClientList[iClientH]->m_iPartyID, iClientH, m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers);
+			PutLogList(G_cTxt);
+			goto PORC_LOOPBREAK1;
+		}
+PORC_LOOPBREAK1:;
+
+		// 만약 파티 가입을 신청한 플레이어가 있다면 
+		if ((m_pClientList[iClientH]->m_iReqJoinPartyClientH != NULL) && (strlen(m_pClientList[iClientH]->m_cReqJoinPartyName) != NULL)) {
+			ZeroMemory(cData, sizeof(cData));
+			cp = (char *)cData;
+			dwp = (DWORD *)cp;
+			*dwp = MSGID_PARTYOPERATION;
+			cp += 4;
+			wp = (WORD*)cp;
+			*wp = 3; // 파티 멤버 추가 요청
+			cp += 2;
+			wp = (WORD *)cp;
+			*wp = m_pClientList[iClientH]->m_iReqJoinPartyClientH;
+			cp += 2;
+			memcpy(cp, m_pClientList[iClientH]->m_cReqJoinPartyName, 10);
+			cp += 10;
+			wp = (WORD *)cp;
+			*wp = m_pClientList[iClientH]->m_iPartyID;
+			cp += 2;
+			SendMsgToGateServer(MSGID_PARTYOPERATION, iClientH, cData);
+			// 메시지를 보냈으니 클리어
+			m_pClientList[iClientH]->m_iReqJoinPartyClientH = NULL;
+			ZeroMemory(m_pClientList[iClientH]->m_cReqJoinPartyName, sizeof(m_pClientList[iClientH]->m_cReqJoinPartyName));
+		}
+		break;
+	}
+}
+
+void CGame::PartyOperationResult_Join(int iClientH, char *pName, int iResult, int iPartyID)
+{
+ int i;
+
+	if (m_pClientList[iClientH] == NULL) return;
+	
+	switch (iResult) {
+	case 0: // 파티 조인 실패 
+		if (m_pClientList[iClientH]->m_iPartyStatus != DEF_PARTYSTATUS_PROCESSING) return;
+		if (strcmp(m_pClientList[iClientH]->m_cCharName, pName) != 0) return;
+		
+		m_pClientList[iClientH]->m_iPartyID = NULL;
+		m_pClientList[iClientH]->m_iPartyStatus = DEF_PARTYSTATUS_NULL;
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PARTY, 4, 0, NULL, pName);
+
+		m_pClientList[iClientH]->m_iReqJoinPartyClientH = NULL;
+		ZeroMemory(m_pClientList[iClientH]->m_cReqJoinPartyName, sizeof(m_pClientList[iClientH]->m_cReqJoinPartyName));
+		break;
+
+	case 1: // 파티 조인 성공 
+		if (m_pClientList[iClientH]->m_iPartyStatus != DEF_PARTYSTATUS_PROCESSING) return;
+		if (strcmp(m_pClientList[iClientH]->m_cCharName, pName) != 0) return;
+
+		m_pClientList[iClientH]->m_iPartyID = iPartyID;
+		m_pClientList[iClientH]->m_iPartyStatus = DEF_PARTYSTATUS_CONFIRM;
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PARTY, 4, 1, NULL, pName);
+
+		m_pClientList[iClientH]->m_iReqJoinPartyClientH = NULL;
+		ZeroMemory(m_pClientList[iClientH]->m_cReqJoinPartyName, sizeof(m_pClientList[iClientH]->m_cReqJoinPartyName));
+
+		// 게임 서버의 파티 리스트에 등록.
+		for (i = 0; i < DEF_MAXPARTYMEMBERS; i++)
+		if (m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i] == 0) {
+			m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i] = iClientH;
+			m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers++;
+			//testcode
+			wsprintf(G_cTxt, "PartyID:%d member:%d In(Join) Total:%d", m_pClientList[iClientH]->m_iPartyID, iClientH, m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers);
+			PutLogList(G_cTxt);
+			goto PORC_LOOPBREAK1;
+		}
+PORC_LOOPBREAK1:;
+
+		// 다른 파티원들에게도 알려준다.
+		for (i = 1; i < DEF_MAXCLIENTS; i++)
+		if ((i != iClientH) && (m_pClientList[i] != NULL) && (m_pClientList[i]->m_iPartyID != NULL) && (m_pClientList[i]->m_iPartyID == iPartyID)) {
+			SendNotifyMsg(NULL, i, DEF_NOTIFY_PARTY, 4, 1, NULL, pName);
+		}
+		break;
+	}
+}
+
+void CGame::PartyOperationResult_Dismiss(int iClientH, char *pName, int iResult, int iPartyID)
+{
+ int i;
+	// iClientH는 이미 사라지고 없는 캐릭터일수도 있다.
+		
+	switch (iResult) {
+	case 0: // 파티 탈퇴 실패 ? 이런 일이?
+		break;
+
+	case 1: // 파티 탈퇴 성공 
+		if (iClientH == NULL) {
+			// iClientH 가 NULL이면 서버 이동중 접속 종료되어 강제 제거 요청된 것임.
+			for (i = 1; i < DEF_MAXCLIENTS; i++)
+			if ((m_pClientList[i] != NULL) && (strcmp(m_pClientList[i]->m_cCharName, pName) == 0)) {
+				iClientH = i;
+				goto PORD_LOOPBREAK;
+			}
+PORD_LOOPBREAK:;
+
+		   // 게임 서버의 파티 리스트에서 해제.
+			for (i = 0; i < DEF_MAXPARTYMEMBERS; i++)
+			if (m_stPartyInfo[iPartyID].iIndex[i] == iClientH) {
+				m_stPartyInfo[iPartyID].iIndex[i] = 0;
+				m_stPartyInfo[iPartyID].iTotalMembers--;
+				//testcode
+				wsprintf(G_cTxt, "PartyID:%d member:%d Out Total:%d", iPartyID, iClientH, m_stPartyInfo[iPartyID].iTotalMembers);
+				PutLogList(G_cTxt);
+				goto PORC_LOOPBREAK1;
+			}
+PORC_LOOPBREAK1:;
+			// 리스트 인덱스의 빈공간을 제거한다.
+			for (i = 0; i < DEF_MAXPARTYMEMBERS-1; i++)
+			if ((m_stPartyInfo[iPartyID].iIndex[i] == 0) && (m_stPartyInfo[iPartyID].iIndex[i+1] != 0)) {
+				m_stPartyInfo[iPartyID].iIndex[i]   = m_stPartyInfo[iPartyID].iIndex[i+1];
+				m_stPartyInfo[iPartyID].iIndex[i+1] = 0;
+			}
+		
+			if (m_pClientList[iClientH] != NULL) {
+				m_pClientList[iClientH]->m_iPartyID = NULL;
+				m_pClientList[iClientH]->m_iPartyStatus = DEF_PARTYSTATUS_NULL;
+				m_pClientList[iClientH]->m_iReqJoinPartyClientH = NULL;
+			}
+
+			// 모든 파티원들에게 알려준다.
+			for (i = 1; i < DEF_MAXCLIENTS; i++)
+			if ((m_pClientList[i] != NULL) && (m_pClientList[i]->m_iPartyID != NULL) && (m_pClientList[i]->m_iPartyID == iPartyID)) {
+				SendNotifyMsg(NULL, i, DEF_NOTIFY_PARTY, 6, 1, NULL, pName);
+			}
+			return;
+		}
+
+		if ((m_pClientList[iClientH] != NULL) && (m_pClientList[iClientH]->m_iPartyStatus != DEF_PARTYSTATUS_PROCESSING)) return;
+		if ((m_pClientList[iClientH] != NULL) && (strcmp(m_pClientList[iClientH]->m_cCharName, pName) != 0)) return;
+
+		// 모든 파티원들에게 알려준다.
+		for (i = 1; i < DEF_MAXCLIENTS; i++)
+		if ((m_pClientList[i] != NULL) && (m_pClientList[i]->m_iPartyID != NULL) && (m_pClientList[i]->m_iPartyID == iPartyID)) {
+			SendNotifyMsg(NULL, i, DEF_NOTIFY_PARTY, 6, 1, NULL, pName);
+		}
+
+		// 게임 서버의 파티 리스트에서 해제.
+		for (i = 0; i < DEF_MAXPARTYMEMBERS; i++)
+		if (m_stPartyInfo[iPartyID].iIndex[i] == iClientH) {
+			m_stPartyInfo[iPartyID].iIndex[i] = 0;
+			m_stPartyInfo[iPartyID].iTotalMembers--;
+			//testcode
+			wsprintf(G_cTxt, "PartyID:%d member:%d Out Total:%d", iPartyID, iClientH, m_stPartyInfo[iPartyID].iTotalMembers);
+			PutLogList(G_cTxt);
+			goto PORC_LOOPBREAK2;
+		}
+PORC_LOOPBREAK2:;
+		// 리스트 인덱스의 빈공간을 제거한다.
+		for (i = 0; i < DEF_MAXPARTYMEMBERS-1; i++)
+		if ((m_stPartyInfo[iPartyID].iIndex[i] == 0) && (m_stPartyInfo[iPartyID].iIndex[i+1] != 0)) {
+			m_stPartyInfo[iPartyID].iIndex[i]   = m_stPartyInfo[iPartyID].iIndex[i+1];
+			m_stPartyInfo[iPartyID].iIndex[i+1] = 0;
+		}
+		
+		if (m_pClientList[iClientH] != NULL) {
+			m_pClientList[iClientH]->m_iPartyID = NULL;
+			m_pClientList[iClientH]->m_iPartyStatus = DEF_PARTYSTATUS_NULL;
+			m_pClientList[iClientH]->m_iReqJoinPartyClientH = NULL;
+		}
+		break;
+	}
+}
+
+void CGame::PartyOperationResult_Delete(int iPartyID)
+{
+ int i;
+
+	for (i = 0; i < DEF_MAXPARTYMEMBERS; i++)
+	{
+		m_stPartyInfo[iPartyID].iIndex[i] = 0;
+		m_stPartyInfo[iPartyID].iTotalMembers = 0;
+	}
+	
+	// 파티 해산됨 
+	for (i = 1; i < DEF_MAXCLIENTS; i++)
+	if ((m_pClientList[i] != NULL) && (m_pClientList[i]->m_iPartyID == iPartyID)) {
+		SendNotifyMsg(NULL, i, DEF_NOTIFY_PARTY, 2, 0, NULL, NULL);
+		m_pClientList[i]->m_iPartyID = NULL;
+		m_pClientList[i]->m_iPartyStatus = DEF_PARTYSTATUS_NULL;
+		m_pClientList[i]->m_iReqJoinPartyClientH = NULL;
+		//testcode
+		wsprintf(G_cTxt, "Notify delete party: %d", i);
+		PutLogList(G_cTxt);
+	}
+}
+
+
+
+void CGame::RequestJoinPartyHandler(int iClientH, char *pData, DWORD dwMsgSize)
+{
+ char   seps[] = "= \t\n";
+ char   * cp, * token, cBuff[256], cData[120], cName[12];
+ class  CStrTok * pStrTok;
+ DWORD * dwp;
+ WORD  * wp;
+ int i;
+
+	// 파티 가입 여부를 묻고 있다.
+	if (m_pClientList[iClientH] == NULL) return;
+	if (m_pClientList[iClientH]->m_iPartyStatus != DEF_PARTYSTATUS_NULL) return;
+	if ((dwMsgSize)	<= 0) return;
+
+	ZeroMemory(cBuff, sizeof(cBuff));
+	memcpy(cBuff, pData, dwMsgSize);
+
+	pStrTok = new class CStrTok(cBuff, seps);
+	token = pStrTok->pGet();
+	
+	token = pStrTok->pGet();
+	if (token != NULL) {
+		ZeroMemory(cName, sizeof(cName));
+		strcpy(cName, token);
+	}
+	else return;
+
+	for (i = 1; i < DEF_MAXCLIENTS; i++)
+	if ((m_pClientList[i] != NULL) && (strcmp(m_pClientList[i]->m_cCharName, cName) == 0)) {
+		// 게이트 서버로 파티 멤버 가입을 신청한다.
+		if ((m_pClientList[i]->m_iPartyID == NULL) || (m_pClientList[i]->m_iPartyStatus != DEF_PARTYSTATUS_CONFIRM)) {
+			// 파티에 가입하고자 한 캐릭터가 파티 마스터가 아니다.
+			return;
+		}
+		
+		ZeroMemory(cData, sizeof(cData));
+		cp = (char *)cData;
+		dwp = (DWORD *)cp;
+		*dwp = MSGID_PARTYOPERATION;
+		cp += 4;
+		wp = (WORD*)cp;
+		*wp = 3; // 파티 멤버 추가 요청
+		cp += 2;
+		wp = (WORD *)cp;
+		*wp = iClientH;
+		cp += 2;
+		memcpy(cp, m_pClientList[iClientH]->m_cCharName, 10);
+		cp += 10;
+		wp = (WORD *)cp;
+		*wp = m_pClientList[i]->m_iPartyID;
+		cp += 2;
+		SendMsgToGateServer(MSGID_PARTYOPERATION, iClientH, cData);
+		return;
+	}
+
+	// 가입하고자 하는 파티 마스터가 현재 서버에 존재하지 않는다.
+	SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PLAYERNOTONGAME, NULL, NULL, NULL, cName);
+}
+
+
+
+void CGame::RequestDismissPartyHandler(int iClientH)
+{
+ char * cp, cData[120];
+ DWORD * dwp;
+ WORD  * wp;
+
+	if (m_pClientList[iClientH] == NULL) return;
+	if (m_pClientList[iClientH]->m_iPartyStatus != DEF_PARTYSTATUS_CONFIRM) return;
+
+	ZeroMemory(cData, sizeof(cData));
+	cp = (char *)cData;
+	dwp = (DWORD *)cp;
+	*dwp = MSGID_PARTYOPERATION;
+	cp += 4;
+	wp = (WORD*)cp;
+	*wp = 4; // 멤버 제거 요청
+	cp += 2;
+	wp = (WORD *)cp;
+	*wp = iClientH;
+	cp += 2;
+	memcpy(cp, m_pClientList[iClientH]->m_cCharName, 10);
+	cp += 10;
+	wp = (WORD *)cp;
+	*wp = m_pClientList[iClientH]->m_iPartyID;
+	cp += 2;
+	SendMsgToGateServer(MSGID_PARTYOPERATION, iClientH, cData);
+
+	m_pClientList[iClientH]->m_iPartyStatus = DEF_PARTYSTATUS_PROCESSING;
+}
+
+
+void CGame::GetPartyInfoHandler(int iClientH)
+{
+ char * cp, cData[120];
+ DWORD * dwp;
+ WORD  * wp;
+
+	if (m_pClientList[iClientH] == NULL) return;
+	if (m_pClientList[iClientH]->m_iPartyStatus != DEF_PARTYSTATUS_CONFIRM) return;
+
+	ZeroMemory(cData, sizeof(cData));
+	cp = (char *)cData;
+	dwp = (DWORD *)cp;
+	*dwp = MSGID_PARTYOPERATION;
+	cp += 4;
+	wp = (WORD*)cp;
+	*wp = 6; // 파티 정보 요청
+	cp += 2;
+	wp = (WORD *)cp;
+	*wp = iClientH;
+	cp += 2;
+	memcpy(cp, m_pClientList[iClientH]->m_cCharName, 10);
+	cp += 10;
+	wp = (WORD *)cp;
+	*wp = m_pClientList[iClientH]->m_iPartyID;
+	cp += 2;
+	SendMsgToGateServer(MSGID_PARTYOPERATION, iClientH, cData);
+}
+
+
+void CGame::PartyOperationResult_Info(int iClientH, char * pName, int iTotal, char *pNameList)
+{
+	if (m_pClientList[iClientH] == NULL) return;
+	if (strcmp(m_pClientList[iClientH]->m_cCharName, pName) != 0) return;
+	if (m_pClientList[iClientH]->m_iPartyStatus != DEF_PARTYSTATUS_CONFIRM) return;
+	
+	SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_PARTY, 5, 1, iTotal, pNameList);
+}
+
+void CGame::RequestDeletePartyHandler(int iClientH)
+{
+ char * cp, cData[120];
+ DWORD * dwp;
+ WORD * wp;
+
+	if (m_pClientList[iClientH] == NULL) return;
+	if (m_pClientList[iClientH]->m_iPartyID != NULL) {
+		ZeroMemory(cData, sizeof(cData));
+		cp = (char *)cData;
+		dwp = (DWORD *)cp;
+		*dwp = MSGID_PARTYOPERATION;
+		cp += 4;
+		wp = (WORD*)cp;
+		*wp = 4; // 멤버 제거 요청
+		cp += 2;
+		wp = (WORD *)cp;
+		*wp = iClientH;
+		cp += 2;
+		memcpy(cp, m_pClientList[iClientH]->m_cCharName, 10);
+		cp += 10;
+		wp = (WORD *)cp;
+		*wp = m_pClientList[iClientH]->m_iPartyID;
+		cp += 2;
+		SendMsgToGateServer(MSGID_PARTYOPERATION, iClientH, cData);
+		// 상태 변환
+		m_pClientList[iClientH]->m_iPartyStatus = DEF_PARTYSTATUS_PROCESSING;
+	}
+}
+
+void CGame::RequestAcceptJoinPartyHandler(int iClientH, int iResult)
+{
+ char *cp, cData[120];
+ DWORD * dwp;
+ WORD * wp;
+ int iH;
+
+	if (m_pClientList[iClientH] == NULL) return;
+	
+	switch (iResult) {
+	case 0: // 파티 가입 신청 거부되었음을 알려준다.
+		iH = m_pClientList[iClientH]->m_iReqJoinPartyClientH;
+		if (m_pClientList[iH] == NULL) {
+			// 가입을 신청했던 플레이어가 서버상에 없다.
+			return;
+		}
+		if (strcmp(m_pClientList[iH]->m_cCharName, m_pClientList[iClientH]->m_cReqJoinPartyName) != 0) {
+			// 가입을 신청했던 플레이어가 서버상에 없다.
+			return;
+		}
+		if (m_pClientList[iH]->m_iPartyStatus != DEF_PARTYSTATUS_PROCESSING) {
+			// 가입을 신청했던 플레이어의 상태가 변경되었다.
+			return;
+		}
+		if ((m_pClientList[iH]->m_iReqJoinPartyClientH != iClientH) || (strcmp(m_pClientList[iH]->m_cReqJoinPartyName, m_pClientList[iClientH]->m_cCharName) != 0)) {
+			// 가입을 신청했던 그때 그 플레이어가 아니다.
+			return;
+		}
+
+		SendNotifyMsg(NULL, iH, DEF_NOTIFY_PARTY, 7, 0, NULL, NULL);
+		//testcode
+		wsprintf(G_cTxt, "Party join reject(3) ClientH:%d ID:%d", iH, m_pClientList[iH]->m_iPartyID);
+		PutLogList(G_cTxt);
+
+		m_pClientList[iH]->m_iPartyID = NULL;
+		m_pClientList[iH]->m_iPartyStatus = DEF_PARTYSTATUS_NULL;
+		m_pClientList[iH]->m_iReqJoinPartyClientH = NULL;
+		ZeroMemory(m_pClientList[iH]->m_cReqJoinPartyName, sizeof(m_pClientList[iH]->m_cReqJoinPartyName));
+
+		m_pClientList[iClientH]->m_iReqJoinPartyClientH = NULL;
+		ZeroMemory(m_pClientList[iClientH]->m_cReqJoinPartyName, sizeof(m_pClientList[iClientH]->m_cReqJoinPartyName));
+		break;
+
+	case 1: // 파티 가입 신청 승인
+		if ((m_pClientList[iClientH]->m_iPartyStatus == DEF_PARTYSTATUS_CONFIRM) && (m_pClientList[iClientH]->m_iPartyID != NULL)) {
+			iH = m_pClientList[iClientH]->m_iReqJoinPartyClientH;
+			if (m_pClientList[iH] == NULL) {
+				// 가입을 신청했던 플레이어가 서버상에 없다.
+				return;
+			}
+			if (strcmp(m_pClientList[iH]->m_cCharName, m_pClientList[iClientH]->m_cReqJoinPartyName) != 0) {
+				// 가입을 신청했던 플레이어가 서버상에 없다.
+				return;
+			}
+			if (m_pClientList[iH]->m_iPartyStatus != DEF_PARTYSTATUS_PROCESSING) {
+				// 가입을 신청했던 플레이어의 상태가 변경되었다.
+				return;
+			}
+			if ((m_pClientList[iH]->m_iReqJoinPartyClientH != iClientH) || (strcmp(m_pClientList[iH]->m_cReqJoinPartyName, m_pClientList[iClientH]->m_cCharName) != 0)) {
+				// 가입을 신청했던 그때 그 플레이어가 아니다.
+				return;
+			}
+
+			// 가입 처리 한다.
+			ZeroMemory(cData, sizeof(cData));
+			cp = (char *)cData;
+			dwp = (DWORD *)cp;
+			*dwp = MSGID_PARTYOPERATION;
+			cp += 4;
+			wp = (WORD*)cp;
+			*wp = 3; // 파티 멤버 추가 요청
+			cp += 2;
+			wp = (WORD *)cp;
+			*wp = m_pClientList[iClientH]->m_iReqJoinPartyClientH;
+			cp += 2;
+			memcpy(cp, m_pClientList[iClientH]->m_cReqJoinPartyName, 10);
+			cp += 10;
+			wp = (WORD *)cp;
+			*wp = m_pClientList[iClientH]->m_iPartyID;
+			cp += 2;
+			SendMsgToGateServer(MSGID_PARTYOPERATION, iClientH, cData);
+		}
+		else {
+			iH = m_pClientList[iClientH]->m_iReqJoinPartyClientH;
+			if (m_pClientList[iH] == NULL) {
+				// 가입을 신청했던 플레이어가 서버상에 없다.
+				return;
+			}
+			if (strcmp(m_pClientList[iH]->m_cCharName, m_pClientList[iClientH]->m_cReqJoinPartyName) != 0) {
+				// 가입을 신청했던 플레이어가 서버상에 없다.
+				return;
+			}
+			if (m_pClientList[iH]->m_iPartyStatus != DEF_PARTYSTATUS_PROCESSING) {
+				// 가입을 신청했던 플레이어의 상태가 변경되었다.
+				return;
+			}
+			if ((m_pClientList[iH]->m_iReqJoinPartyClientH != iClientH) || (strcmp(m_pClientList[iH]->m_cReqJoinPartyName, m_pClientList[iClientH]->m_cCharName) != 0)) {
+				// 가입을 신청했던 그때 그 플레이어가 아니다.
+				return;
+			}
+			
+			if (m_pClientList[iClientH]->m_iPartyStatus == DEF_PARTYSTATUS_NULL) {
+				// 신청 받은 플레이어가 아무런 파티에도 가입하고 있지 않다. 이 캐릭터를 파티 마스터로 신청한다.
+				RequestCreatePartyHandler(iClientH);
+			}
+			else {
+				// 처리 불가
+			}
+		}
+		break;
+
+	case 2: // 파티 가입 신청 취소
+		// 이 메시지를 받기 전에 이미 파티에 가입되었다면 탈퇴 처리를 한다.
+		if ((m_pClientList[iClientH]->m_iPartyID != NULL) && (m_pClientList[iClientH]->m_iPartyStatus == DEF_PARTYSTATUS_CONFIRM)) {
+			// 멤버 제거를 요청한다.
+			RequestDismissPartyHandler(iClientH);
+		}
+		else {
+			// 가입 신청 상태였던 값들을 초기화 한다.
+			iH = m_pClientList[iClientH]->m_iReqJoinPartyClientH;
+
+			// 신청했던 캐릭터가 접속을 끊은 상태라면 NULL일 수 있다.
+			if ((m_pClientList[iH] != NULL) && (m_pClientList[iH]->m_iReqJoinPartyClientH == iClientH) && 
+				(strcmp(m_pClientList[iH]->m_cReqJoinPartyName, m_pClientList[iClientH]->m_cCharName) == 0)) {
+				// 신청했던 캐릭터의 파티 아이디와 상태는 건드리지 않는다.
+				m_pClientList[iH]->m_iReqJoinPartyClientH = NULL;
+				ZeroMemory(m_pClientList[iH]->m_cReqJoinPartyName, sizeof(m_pClientList[iH]->m_cReqJoinPartyName));
+			}
+
+			m_pClientList[iClientH]->m_iPartyID = NULL;
+			m_pClientList[iClientH]->m_iPartyStatus = DEF_PARTYSTATUS_NULL;
+			m_pClientList[iClientH]->m_iReqJoinPartyClientH = NULL;
+			ZeroMemory(m_pClientList[iClientH]->m_cReqJoinPartyName, sizeof(m_pClientList[iClientH]->m_cReqJoinPartyName));
+		}
+		break;
+	}
+}
+
+void CGame::GetExp(int iClientH, int iExp, BOOL bIsAttackerOwn)
+{
+ double dV1, dV2, dV3;
+ int i, iH, iUnitValue, iPartyTotalMember = 0 ;
+ DWORD dwTime = timeGetTime();
+ char cMapName[12] ;
+	
+	// v2.1 파티제에 맞추어 경험치를 나누고, 레벨이 80 미만인 경우 경험치를 더 얻는다.
+	if (m_pClientList[iClientH] == NULL) return;
+	if (iExp <= 0) return;
+
+	// 레벨 80 이하는 보너스 경험치가 적용된다.
+	if (m_pClientList[iClientH]->m_iLevel <= 80) {
+		dV1 = (double)(80 - m_pClientList[iClientH]->m_iLevel);
+		dV2 = dV1 * 0.025f;
+		dV3 = (double)iExp;
+		dV1 = (dV2 + 1.025f)*dV3;
+		// v2.181 2002-10-25 초보용 미들이면 경치가 두배
+#ifdef DEF_BEGINNEREVENTMODE
+		ZeroMemory(cMapName, sizeof(cMapName));
+		strcpy(cMapName, m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName) ;
+		if((memcmp(cMapName, "arefarm",7) == 0) || (memcmp(cMapName, "elvfarm",7) == 0)
+		|| (memcmp(cMapName, "arebrk", 6) == 0) || (memcmp(cMapName, "elvbrk", 6) == 0)
+		|| (memcmp(cMapName, "middled1n", 9) == 0) )
+		{
+			dV1 = (int)(dV1) * 2;
+		}
+#endif
+		iExp = (int)dV1;
+	}
+	else {
+		// v2.16 2002-5-27 레벨 100 보다 크고 농경지이면 경험치의 1/10
+		if ((m_pClientList[iClientH]->m_iLevel >= 100) &&((strcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, "arefarm") == 0) 
+			|| (strcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, "elvfarm") == 0))) {
+				iExp = (iExp/10) ;
+		} // v2.16 2002-5-27 레벨 80 과 100 사이고 농경지이면 경험치의 1/4 
+		else if ((strcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, "arefarm") == 0) 
+			|| (strcmp(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cName, "elvfarm") == 0)) {
+				iExp = (iExp*1/4) ;
+		}
+	}
+		
+	if ((m_pClientList[iClientH]->m_iPartyID != NULL) && (m_pClientList[iClientH]->m_iPartyStatus == DEF_PARTYSTATUS_CONFIRM) && 
+		((dwTime - m_pClientList[iClientH]->m_dwLastActionTime) < 1000*60*5)) {
+		// 파티가 맺어져 있다면 경험치 분배 방법이 달라진다.
+		if ((iExp >= 10) && (m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers > 1)) {
+			// 일단 얻은 경험치가 10이상으면 파티원에게 동등하게 분배 
+			// 죽은 파티원에게는 경험치가 가지 않는다. 
+			iPartyTotalMember  = 0 ;
+
+			for (i = 0; i < m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers; i++) {
+				iH = m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i];
+				if ((m_pClientList[iH] != NULL) && (m_pClientList[iH]->m_iHP > 0))
+				{
+					iPartyTotalMember++ ;
+				}
+			}
+
+			// 에라 상황 
+			if (iPartyTotalMember > 8) 
+			{
+				wsprintf(G_cTxt,"(X) Party Bug !! partyMember %d XXXXXXXXXX",iPartyTotalMember) ;
+				PutLogFileList(G_cTxt);
+				iPartyTotalMember = 8 ;
+			}
+
+			// v2.19 2002-11-17 파티를 하면 기본으로 10%가 오르고 최대 130% 까지 얻을 수 있다.
+			// 속도를 위해 복잡한 수식을 단순화 시켰다.
+			dV1 = (double)iExp;
+
+			switch(iPartyTotalMember)
+			{
+#ifdef DEF_V219  
+			case 1:  dV2 = dV1 ;  break ;
+			case 2:  dV2 = (dV1 + (dV1 * 0.02))  / 2 ; break ;
+			case 3:  dV2 = (dV1 + (dV1 * 0.05)) / 3 ; break ;
+			case 4:  dV2 = (dV1 + (dV1 * 0.07)) / 4 ; break ;
+			case 5:  dV2 = (dV1 + (dV1 * 0.1))  / 5 ; break ;
+			case 6:  dV2 = (dV1 + (dV1 * 0.14)) / 6 ; break ;
+			case 7:  dV2 = (dV1 + (dV1 * 0.17)) / 7 ; break ;
+			case 8:  dV2 = (dV1 + (dV1 * 0.2))  / 8 ; break ;
+#else
+			case 1:  dV2 = dV1 ;  break ;
+			case 2:  dV2 = (dV1 + (dV1 * 0.1))  / 2 ; break ;
+			case 3:  dV2 = (dV1 + (dV1 * 0.14)) / 3 ; break ;
+			case 4:  dV2 = (dV1 + (dV1 * 0.17)) / 4 ; break ;
+			case 5:  dV2 = (dV1 + (dV1 * 0.2))  / 5 ; break ;
+			case 6:  dV2 = (dV1 + (dV1 * 0.24)) / 6 ; break ;
+			case 7:  dV2 = (dV1 + (dV1 * 0.27)) / 7 ; break ;
+			case 8:  dV2 = (dV1 + (dV1 * 0.3))  / 8 ; break ;
+#endif
+			}
+
+			// 인트로 변환하기 위해 반올림 해준다.
+			dV3 = dV2 + 0.5f ;
+			iUnitValue = (int) dV3 ;
+
+/*			// 파티원들 수에 따라 경험치 량 증가
+			dV1 = (double)m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers;
+			dV2 = 2.5f * dV1;
+			dV3 = (double)iExp;
+			dV1 = ((dV2/100.0f) * dV3) +0.5f;
+			iExp += (int)dV1;
+
+			dV1 = (double)iExp;
+			if (m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers <= 0)
+				 dV2 = 1.0f;
+			else dV2 = (double)m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers;
+			dV3 = (dV1 / dV2) + 0.5f;
+			iUnitValue = (int)dV3; */
+
+#ifdef DEF_TESTSERVER
+			iUnitValue = iUnitValue * 30;
+#endif
+			
+			// 경험치를 나누어 준다.
+			for (i = 0; i < m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iTotalMembers; i++) {
+				iH = m_stPartyInfo[m_pClientList[iClientH]->m_iPartyID].iIndex[i];
+				if ((m_pClientList[iH] != NULL) && (m_pClientList[iH]->m_iHP > 0))
+				{
+					m_pClientList[iH]->m_iExpStock += iUnitValue;
+				}
+			}
+			// 공격자 자신이면
+			if ((bIsAttackerOwn == TRUE) && (iPartyTotalMember > 1))
+				m_pClientList[iClientH]->m_iExpStock += (iUnitValue/10);
+
+		}
+#ifdef DEF_TESTSERVER
+		else m_pClientList[iClientH]->m_iExpStock += (iExp * 70);
+#else
+		else m_pClientList[iClientH]->m_iExpStock += iExp;
+#endif
+	} // if
+#ifdef DEF_TESTSERVER
+	else m_pClientList[iClientH]->m_iExpStock += (iExp * 70);
+#else
+	else m_pClientList[iClientH]->m_iExpStock += iExp;
+#endif
+}
+
+
+BOOL CGame::bSerchMaster(int iNpcH)
+{
+ int ix, iy, rX, rY;
+ short sOwnerH, sMasterH;
+ char cOwnerType;
+
+	// 인덱스 iNpcH에 해당하는 NPC가 Master를 찾는다.
+	rX = m_pNpcList[iNpcH]->m_sX - m_pNpcList[iNpcH]->m_cTargetSearchRange;
+	rY = m_pNpcList[iNpcH]->m_sY - m_pNpcList[iNpcH]->m_cTargetSearchRange;
+
+	sMasterH = NULL;
+
+	for (ix = rX; ix < rX + m_pNpcList[iNpcH]->m_cTargetSearchRange*2 + 1; ix++)
+	for (iy = rY; iy < rY + m_pNpcList[iNpcH]->m_cTargetSearchRange*2 + 1; iy++) {
+		m_pMapList[m_pNpcList[iNpcH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, ix, iy);
+		switch (cOwnerType) {
+		case DEF_OWNERTYPE_NPC:
+			if ((sOwnerH != iNpcH) && (m_pNpcList[sOwnerH] != NULL) && (m_pNpcList[sOwnerH]->m_sType == m_pNpcList[iNpcH]->m_sType) &&
+				(m_pNpcList[sOwnerH]->m_cMoveType == DEF_MOVETYPE_RANDOM)) {
+				// 타입이 같고 랜덤하게 움직이고 있는 몹이 있었다면 
+				m_pNpcList[sOwnerH]->m_bIsMaster = TRUE;
+				m_pNpcList[iNpcH]->m_cMoveType = DEF_MOVETYPE_FOLLOW;
+				m_pNpcList[iNpcH]->m_cFollowOwnerType = DEF_OWNERTYPE_NPC; 
+				m_pNpcList[iNpcH]->m_iFollowOwnerIndex = sOwnerH;
+				return TRUE;
+			}
+			break;
+		}
+	}
+
+	return FALSE;
+}
+
+// v2.16 2002-5-21 고광현수정 : 함수 모두 변경됨 
+void CGame::RequestItemUpgradeHandler(int iClientH, int iItemIndex)
+{
+ int i, iValue,  iItemX,iItemY, iSoM, iSoX, iSomH, iSoxH, iVaule; // v2.172
+ DWORD dwTemp, dwSWEType;
+ double dV1, dV2, dV3;
+ short sItemUpgrade = 2;
+
+
+	if (m_pClientList[iClientH] == NULL) return;
+	if ((iItemIndex < 0) || (iItemIndex >= DEF_MAXITEMS)) return;
+	if (m_pClientList[iClientH]->m_pItemList[iItemIndex] == NULL) return;
+
+	iValue = (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0xF0000000) >> 28;
+	if (iValue >= 15 || iValue < 0 ) {
+		// 최대치이다. 더이상 업그레이드 불가능
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 1, NULL, NULL, NULL); // 더이상 아이템 업그레이드가 불가능 합니다.
+		return;
+	}
+	
+	//v2.19 2002-12-7 지존 아이템 관련
+	if( m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sIDnum == 717)  //흑기사의 레이피어의 경우 
+	{
+		if (iValue >= 7 || iValue < 0 ) {
+		// 최대치이다. 더이상 업그레이드 불가능
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 1, NULL, NULL, NULL); // 더이상 아이템 업그레이드가 불가능 합니다.
+		return;
+	}
+
+
+	}
+	switch (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_cCategory) {
+	case 1: // 검, 도끼
+		switch (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sIDnum) {
+		case 20 : // 엑스칼리버 
+		case 610: // 제리마-블레이드
+		case 611: // 제리마-액스
+		case 612: // 제리마-레이피어
+		case 613: // 소드-오브-메두사
+		case 614: // 소드-오브-아이스 
+		case 616: // 데몬-슬레이어                         
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 2, NULL, NULL, NULL); // 아이템 업그레이드 불가능한 아이템입니다.
+			return; 
+
+		case 703: // 상어의 플램버그 
+		case 709: // 흑기사의 플램버그 
+		case 727: // 훅여기사의 플램버그 
+		case 736: // 새로운 상어의 자이언트소드
+		case 737: // 새로운 흑기사의 자이언트소드
+		case 718: // 흑기사의그레이트소드
+			if (m_pClientList[iClientH]->m_iGizonItemUpgradeLeft <= 0) 
+			{ 
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 3, NULL, NULL, NULL); // 필요한 아이템 업그레이드 수치가 없습니다.
+				return; 
+			}
+			// 아이템 레벨업이 높아질수록 아이템 레벨업하기가 어렵다.
+			// v2.15 지존 아이템 업그레이드 공식 x(x+6)/8 +2 
+
+			sItemUpgrade = (iValue*(iValue+6)/8) + 2 ;
+
+			if ((m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue1 != m_pClientList[iClientH]->m_sCharIDnum1) ||
+			(m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue2 != m_pClientList[iClientH]->m_sCharIDnum2) ||
+			(m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue3 != m_pClientList[iClientH]->m_sCharIDnum3))
+			{
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 2, NULL, NULL, NULL); // 아이템 업그레이드 불가능한 아이템입니다.
+				return; 
+			}
+
+			if (( m_pClientList[iClientH]->m_iGizonItemUpgradeLeft - sItemUpgrade ) < 0) 
+			{ 
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 3, NULL, NULL, NULL); // 필요한 아이템 업그레이드 수치가 없습니다.
+				return; 
+			}
+
+			m_pClientList[iClientH]->m_iGizonItemUpgradeLeft -= sItemUpgrade ; 
+
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_GIZONITEMUPGRADELEFT, m_pClientList[iClientH]->m_iGizonItemUpgradeLeft, NULL, NULL, NULL);
+			
+			if((iValue == 0) && m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sIDnum == 703) 
+			{
+				iItemX = m_pClientList[iClientH]->m_ItemPosList[iItemIndex].x ;
+				iItemY = m_pClientList[iClientH]->m_ItemPosList[iItemIndex].y ;
+
+				// 기존의 아이템을 삭제한다.
+				delete m_pClientList[iClientH]->m_pItemList[iItemIndex];
+				m_pClientList[iClientH]->m_pItemList[iItemIndex] = NULL;
+
+				m_pClientList[iClientH]->m_pItemList[iItemIndex] = new class CItem;
+				m_pClientList[iClientH]->m_ItemPosList[iItemIndex].x = iItemX ;
+				m_pClientList[iClientH]->m_ItemPosList[iItemIndex].y = iItemY ;
+
+				// v2.20 2002-3-3  지존 아이템 업그레이드에 아이템 이름으로 들어가 있어서 수정함 
+				// 상어의 자이언트 소드 
+				if (_bInitItemAttr(m_pClientList[iClientH]->m_pItemList[iItemIndex] , 736) == FALSE) {
+					// 업그레이드 하고자 하는 아이템이 아이템 리스트상에 없다. 업그레이드가 불가능하다.
+					SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, NULL, NULL);
+					return;
+				}
+		
+				// 아이템에 사용자 고유 번호를 입력한다. 다른 캐릭터는 이 아이템을 사용할 수가 없다.
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectType = DEF_ITET_UNIQUE_OWNER;
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue1 = m_pClientList[iClientH]->m_sCharIDnum1;
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue2 = m_pClientList[iClientH]->m_sCharIDnum2;
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue3 = m_pClientList[iClientH]->m_sCharIDnum3;
+
+				iValue += 2;
+				if (iValue > 15) iValue = 15;
+				dwTemp = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute;
+				dwTemp = dwTemp & 0x0FFFFFFF; // 비트 클리어 
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute = dwTemp | (iValue << 28); // 업그레이드된 비트값 입력
+
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_GIZONITEMCANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_cItemType,
+				          m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_wCurLifeSpan, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_cName,
+						  m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sSprite,
+						  m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sSpriteFrame,
+						  m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_cItemColor,
+						  m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue2,
+						  m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute ) ;
+				_bItemLog(DEF_ITEMLOG_UPGRADESUCCESS, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[iItemIndex]);
+				break ;
+
+			} 
+			else if( (iValue == 0) && ((m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sIDnum == 709) || (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sIDnum == 727))) 
+			{
+
+				iItemX = m_pClientList[iClientH]->m_ItemPosList[iItemIndex].x ;
+				iItemY = m_pClientList[iClientH]->m_ItemPosList[iItemIndex].y ;
+
+				// 기존의 아이템을 삭제한다.
+				delete m_pClientList[iClientH]->m_pItemList[iItemIndex];
+				m_pClientList[iClientH]->m_pItemList[iItemIndex] = NULL;
+
+				m_pClientList[iClientH]->m_pItemList[iItemIndex] = new class CItem;
+				m_pClientList[iClientH]->m_ItemPosList[iItemIndex].x = iItemX ;
+				m_pClientList[iClientH]->m_ItemPosList[iItemIndex].y = iItemY ;
+
+
+				// v2.20 2002-3-3  지존 아이템 업그레이드에 아이템 이름으로 들어가 있어서 수정함 
+				// 새로운 흑기사의 자이언트소드
+				if (_bInitItemAttr(m_pClientList[iClientH]->m_pItemList[iItemIndex] , 737 ) == FALSE) {
+					// 업그레이드 하고자 하는 아이템이 아이템 리스트상에 없다. 업그레이드가 불가능하다.
+					SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, NULL, NULL);
+					return;
+				}
+				
+	
+				// 아이템에 사용자 고유 번호를 입력한다. 다른 캐릭터는 이 아이템을 사용할 수가 없다.
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectType = DEF_ITET_UNIQUE_OWNER;
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue1 = m_pClientList[iClientH]->m_sCharIDnum1;
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue2 = m_pClientList[iClientH]->m_sCharIDnum2;
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue3 = m_pClientList[iClientH]->m_sCharIDnum3;
+
+				iValue += 2;
+				if (iValue > 15) iValue = 15;
+				dwTemp = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute;
+				dwTemp = dwTemp & 0x0FFFFFFF; // 비트 클리어 
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute = dwTemp | (iValue << 28); // 업그레이드된 비트값 입력
+
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_GIZONITEMCANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_cItemType,
+				          m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_wCurLifeSpan, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_cName,
+						  m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sSprite,
+						  m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sSpriteFrame,
+						  m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_cItemColor,
+						  m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue2,
+						  m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute ) ;
+				
+				_bItemLog(DEF_ITEMLOG_UPGRADESUCCESS, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[iItemIndex]);
+				break;
+			} else 
+			{
+				iValue += 2;
+				if (iValue > 15) iValue = 15;
+				dwTemp = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute;
+				dwTemp = dwTemp & 0x0FFFFFFF; // 비트 클리어 
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute = dwTemp | (iValue << 28); // 업그레이드된 비트값 입력
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, NULL, NULL);
+				_bItemLog(DEF_ITEMLOG_UPGRADESUCCESS, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[iItemIndex]);
+			}
+			break;
+		case 717:  //흑기사의레이피어 //v2.19 2002-12-7 지존 아이템 관련 추가 레이피어 경우 15까지 올리면 너무 쎄다 7로 세팅
+
+			if (m_pClientList[iClientH]->m_iGizonItemUpgradeLeft <= 0) 
+			{ 
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 3, NULL, NULL, NULL); // 필요한 아이템 업그레이드 수치가 없습니다.
+				return; 
+			}
+			// 아이템 레벨업이 높아질수록 아이템 레벨업하기가 어렵다.
+			// v2.15 지존 아이템 업그레이드 공식 x(x+6)/8 +2 
+			
+			sItemUpgrade = (iValue*(iValue+6)/8) + 2 ;
+			
+			if ((m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue1 != m_pClientList[iClientH]->m_sCharIDnum1) ||
+				(m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue2 != m_pClientList[iClientH]->m_sCharIDnum2) ||
+				(m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue3 != m_pClientList[iClientH]->m_sCharIDnum3))
+			{
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 2, NULL, NULL, NULL); // 아이템 업그레이드 불가능한 아이템입니다.
+				return; 
+			}
+			
+			if (( m_pClientList[iClientH]->m_iGizonItemUpgradeLeft - sItemUpgrade ) < 0) 
+			{ 
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 3, NULL, NULL, NULL); // 필요한 아이템 업그레이드 수치가 없습니다.
+				return; 
+			}
+			
+			m_pClientList[iClientH]->m_iGizonItemUpgradeLeft -= sItemUpgrade ; 
+			
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_GIZONITEMUPGRADELEFT, m_pClientList[iClientH]->m_iGizonItemUpgradeLeft, NULL, NULL, NULL);
+			iValue += 1;
+			if (iValue > 7) iValue = 7;
+			dwTemp = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute;
+			dwTemp = dwTemp & 0x0FFFFFFF; // 비트 클리어 
+			m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute = dwTemp | (iValue << 28); // 업그레이드된 비트값 입력
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, NULL, NULL);
+			_bItemLog(DEF_ITEMLOG_UPGRADESUCCESS, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[iItemIndex]);
+
+			break;
+		default:
+
+			// v2.16 2002-5-21 고광현수정
+			// 고대의~ 접두사가 붙는 무기는 업그레이드 불가능
+			if ((m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0x00F00000) != NULL) {
+				dwSWEType  = (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0x00F00000) >> 20;  
+				if (dwSWEType == 9) {
+					SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 2, NULL, NULL, NULL); // 아이템 업그레이드 불가능한 아이템입니다.
+					return;
+				}
+			}
+			// 일반 무기 아이템
+			// v2.16 2002-5-21 고광현수정
+			iSoX = iSoM = 0;
+			for (i = 0; i < DEF_MAXITEMS; i++)
+			if (m_pClientList[iClientH]->m_pItemList[i] != NULL) {
+				switch (m_pClientList[iClientH]->m_pItemList[i]->m_sIDnum) {
+				case 656: iSoX++; iSoxH = i; break; // 스톤 오브 제리마 
+				case 657: iSoM++; iSomH = i; break; // 스톤 오브 메리엔 
+				}
+			}
+			// 스톤 오브 제리마가 있다.
+			if (iSoX > 0) {
+				if (bCheckIsItemUpgradeSuccess(iClientH, iItemIndex, iSoxH) == FALSE) {
+					// 업그레이드 실패 
+					SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, NULL, NULL);
+					// 실패한 아이템 없앤다.
+					iValue = (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0xF0000000) >> 28; // v2.172
+					if (iValue >= 1) ItemDepleteHandler(iClientH, iItemIndex, FALSE); // v2.172 +1 -> +2 단계에서 실패하면 사라짐 
+					// 스톤 오브 제리마 없앤다.
+					ItemDepleteHandler(iClientH, iSoxH, FALSE);	
+					return;
+				}
+
+				if ((m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0x00000001) != NULL) {
+					// 제작된 무기 업그레이드 최대 +10
+					iValue++;
+					if (iValue > 10) 
+						iValue = 10;
+					else {
+						// 업그레이드 성공. 아이템 특성 바꾸고
+						dwTemp = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute;
+						dwTemp = dwTemp & 0x0FFFFFFF; // 비트 클리어 
+						m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute = dwTemp | (iValue << 28); // 업그레이드된 비트값 입력	
+						// 스톤 오브 제리마 없앤다.
+						ItemDepleteHandler(iClientH, iSoxH, FALSE);
+					}
+				}
+				else {
+					// 일반 무기 업그레이드 최대 +7
+					iValue++;
+					if (iValue > 7) 
+						iValue = 7;
+					else {
+						// 업그레이드 성공. 아이템 특성 바꾸고
+						dwTemp = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute;
+						dwTemp = dwTemp & 0x0FFFFFFF; // 비트 클리어 
+						m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute = dwTemp | (iValue << 28); // 업그레이드된 비트값 입력	
+						// 스톤 오브 제리마 없앤다.
+						ItemDepleteHandler(iClientH, iSoxH, FALSE);
+					}
+				}
+			}
+			
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, NULL, NULL);
+			break;
+		}
+		break;
+
+	case 3: // 활 
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, NULL, NULL);
+		break;
+
+	case 5: // 방패
+		// 모두 일반 아이템
+		// v2.16 2002-5-21 고광현수정
+		// 강화된~ 접두사가 붙는 방어구는 업그레이드 불가능
+		if ((m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0x00F00000) != NULL) {
+			dwSWEType  = (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0x00F00000) >> 20;  
+			if (dwSWEType == 8) {
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 2, NULL, NULL, NULL); // 아이템 업그레이드 불가능한 아이템입니다.
+				return;
+			}
+		}
+		switch (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sIDnum) {
+			case 620: // 메리엔-실드
+			case 623: // GM-실드
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 2, NULL, NULL, NULL); // 아이템 업그레이드 불가능한 아이템입니다.
+				return;
+			default: break;
+		}
+
+
+		iSoX = iSoM = 0;
+		for (i = 0; i < DEF_MAXITEMS; i++)
+		if (m_pClientList[iClientH]->m_pItemList[i] != NULL) {
+			switch (m_pClientList[iClientH]->m_pItemList[i]->m_sIDnum) {
+			case 656: iSoX++; iSoxH = i; break; // 스톤 오브 제리마 
+			case 657: iSoM++; iSomH = i; break; // 스톤 오브 메리엔 
+			}
+		}
+		
+		// 스톤 오브 메리엔이 있다.			
+		if (iSoM > 0) {
+			// 업그레이드 성공 확률 계산.
+			if (bCheckIsItemUpgradeSuccess(iClientH, iItemIndex, iSomH,TRUE) == FALSE) {
+				// 업그레이드 실패 
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, NULL, NULL);
+				iValue = (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0xF0000000) >> 28; // v2.172
+				if (iValue >= 1) ItemDepleteHandler(iClientH, iItemIndex, FALSE); // v2.172 +1 -> +2 단계에서 실패하면 사라짐 
+				// 스톤 오브 메리엔 없앤다.
+				ItemDepleteHandler(iClientH, iSomH, FALSE);	
+				return;
+			}
+			
+			// 업그레이드 성공!
+			iValue++;
+			if (iValue > 10) 
+				iValue = 10; // 업그레이드 한계 
+			else {
+				dwTemp = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute;
+				dwTemp = dwTemp & 0x0FFFFFFF; // 비트 클리어 
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute = dwTemp | (iValue << 28); // 업그레이드된 비트값 입력	
+
+				if ((m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0x00000001) != NULL) {
+					// 제작 방어구 이므로 수명 +20%
+					dV1 = (double)m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_wMaxLifeSpan;
+					dV2 = 0.2f * dV1;
+					dV3 = dV1 + dV2;
+				}
+				else {
+					// 일반 방어구 이므로 수명 +15%
+					dV1 = (double)m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_wMaxLifeSpan;
+					dV2 = 0.15f * dV1;
+					dV3 = dV1 + dV2;
+				}
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue1 = (short)dV3;
+				// 에러 방지용 코드 
+				if (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue1 < 0) 
+					m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue1 = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_wMaxLifeSpan;
+
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_wMaxLifeSpan = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue1;
+				// 스톤 오브 메리엔 없앤다.
+				ItemDepleteHandler(iClientH, iSomH, FALSE);	
+			}
+		}
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue1, NULL, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue2);
+		break;
+
+	case 15: //v2.19 2002-12-7 산타복 관련 지존 업그레이드가 안된다.
+	case 6: // 방어구 
+		switch (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sIDnum) {
+		case 621: // 메리엔-플레이트메일M
+		case 622: // 메리엔-플레이트메일W
+		case 700: // 상어의 호버크
+		case 701: // 상어의풀-헬름 
+		case 702: // 상어의레깅스 
+		case 704: // 상어의 플레이트 메일 
+		case 706: // 흑기사의...
+		case 707:
+		case 708:
+		case 710:
+		case 711: // 흑마법사의 호버크
+		case 712: // 체인메일
+		case 713: // 레깅스 
+		case 724: // 흑여기사의...
+		case 725:
+		case 726:
+		case 728:
+		case 729: // 흑여마법사의...
+		case 730:
+		case 731:
+		case 716: // 흑마법사레더아머
+		case 719: // 흑기사의스케일메일
+		case 775: // 흑여마법사레더아머 
+		case 776: // 흑여기사의스케일메일
+		
+
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 2, NULL, NULL, NULL); // 아이템 업그레이드 불가능한 아이템입니다.
+			return;
+			
+		default:
+			// 모두 일반 아이템
+			// v2.16 2002-5-21 고광현수정
+			// 강화된~ 접두사가 붙는 방어구는 업그레이드 불가능
+			if ((m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0x00F00000) != NULL) {
+				dwSWEType  = (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0x00F00000) >> 20;  
+				if (dwSWEType == 8) {
+					SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 2, NULL, NULL, NULL); // 아이템 업그레이드 불가능한 아이템입니다.
+					return;
+				}
+			}
+			iSoX = iSoM = 0;
+			for (i = 0; i < DEF_MAXITEMS; i++)
+			if (m_pClientList[iClientH]->m_pItemList[i] != NULL) {
+				switch (m_pClientList[iClientH]->m_pItemList[i]->m_sIDnum) {
+				case 656: iSoX++; iSoxH = i; break; // 스톤 오브 제리마 
+				case 657: iSoM++; iSomH = i; break; // 스톤 오브 메리엔 
+				}
+			}
+			
+			// 스톤 오브 메리엔이 있다.			
+			if (iSoM > 0) {
+				// 업그레이드 성공 확률 계산.
+				if (bCheckIsItemUpgradeSuccess(iClientH, iItemIndex, iSomH,TRUE) == FALSE) {
+					// 업그레이드 실패 
+					SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, NULL, NULL);
+					iValue = (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0xF0000000) >> 28; // v2.172
+					if (iValue >= 1) ItemDepleteHandler(iClientH, iItemIndex, FALSE); // v2.172 +1 -> +2 단계에서 실패하면 사라짐 
+					// 스톤 오브 메리엔 없앤다.
+					ItemDepleteHandler(iClientH, iSomH, FALSE);	
+					return;
+				}
+					
+				// 업그레이드 성공!
+				iValue++;
+				if (iValue > 10) 
+					iValue = 10; // 업그레이드 한계 
+				else {
+					dwTemp = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute;
+					dwTemp = dwTemp & 0x0FFFFFFF; // 비트 클리어 
+					m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute = dwTemp | (iValue << 28); // 업그레이드된 비트값 입력	
+						
+					if ((m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0x00000001) != NULL) {
+						// 제작 방어구 이므로 수명 +20%
+						dV1 = (double)m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_wMaxLifeSpan;
+						dV2 = 0.2f * dV1;
+						dV3 = dV1 + dV2;
+					}
+					else {
+						// 일반 방어구 이므로 수명 +15%
+						dV1 = (double)m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_wMaxLifeSpan;
+						dV2 = 0.15f * dV1;
+						dV3 = dV1 + dV2;
+					}
+					m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue1 = (short)dV3;
+					// 에러 방지용 코드 
+					if (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue1 < 0) 
+						m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue1 = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_wMaxLifeSpan;
+					
+					m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_wMaxLifeSpan = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue1;
+					// 스톤 오브 메리엔 없앤다.
+					ItemDepleteHandler(iClientH, iSomH, FALSE);	
+					}
+			}
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue1, NULL, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue2);
+			break;
+		}
+		break;
+
+	case 8: // 지팡이 
+		switch (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sIDnum) {
+		case 291: // 매직원드(LLF)
+
+		case 714: // 흑마법사의 지팡이 
+		case 732: // 흑여마법사의 지팡이
+		case 738: // 흑마법사의 매직원드
+
+			if ((m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue1 != m_pClientList[iClientH]->m_sCharIDnum1) ||
+			(m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue2 != m_pClientList[iClientH]->m_sCharIDnum2) ||
+			(m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue3 != m_pClientList[iClientH]->m_sCharIDnum3))
+			{
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 2, NULL, NULL, NULL); // 아이템 업그레이드 불가능한 아이템입니다.
+				return; 
+			}
+
+			if (m_pClientList[iClientH]->m_iGizonItemUpgradeLeft <= 0)
+			{ 
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 3, NULL, NULL, NULL); // 필요한 아이템 업그레이드 수치가 없습니다.
+				return; 
+			}
+			// 아이템 레벨업이 높아질수록 아이템 레벨업하기가 어렵다.
+			// v2.15 지존 아이템 업그레이드 공식 x(x+6)/8 +2 
+			sItemUpgrade = (iValue*(iValue+6)/8) + 2 ;
+
+			if ((m_pClientList[iClientH]->m_iGizonItemUpgradeLeft - sItemUpgrade ) < 0) 
+			{ 
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMUPGRADEFAIL, 3, NULL, NULL, NULL); // 필요한 아이템 업그레이드 수치가 없습니다.
+				return; 
+			}
+
+			m_pClientList[iClientH]->m_iGizonItemUpgradeLeft -= sItemUpgrade; 
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_GIZONITEMUPGRADELEFT, m_pClientList[iClientH]->m_iGizonItemUpgradeLeft, NULL, NULL, NULL);
+
+			if (iValue == 0 ){
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectType = DEF_ITET_UNIQUE_OWNER;
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue1 = m_pClientList[iClientH]->m_sCharIDnum1;
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue2 = m_pClientList[iClientH]->m_sCharIDnum2;
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue3 = m_pClientList[iClientH]->m_sCharIDnum3;
+			}
+
+			if( (iValue == 4) && ((m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sIDnum == 714) || (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sIDnum == 732))) 
+			{
+				iItemX = m_pClientList[iClientH]->m_ItemPosList[iItemIndex].x ;
+				iItemY = m_pClientList[iClientH]->m_ItemPosList[iItemIndex].y ;
+
+				// 기존의 아이템을 삭제한다.
+				delete m_pClientList[iClientH]->m_pItemList[iItemIndex];
+				m_pClientList[iClientH]->m_pItemList[iItemIndex] = NULL;
+
+				m_pClientList[iClientH]->m_pItemList[iItemIndex] = new class CItem;
+
+				m_pClientList[iClientH]->m_ItemPosList[iItemIndex].x = iItemX ;
+				m_pClientList[iClientH]->m_ItemPosList[iItemIndex].y = iItemY ;
+
+				
+				// v2.20 2002-3-3  지존 아이템 업그레이드에 아이템 이름으로 들어가 있어서 수정함 
+				// 흑마법사의 매직원드
+				if (_bInitItemAttr(m_pClientList[iClientH]->m_pItemList[iItemIndex] , 738) == FALSE) {
+					// 업그레이드 하고자 하는 아이템이 아이템 리스트상에 없다. 업그레이드가 불가능하다.
+					SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, NULL, NULL);
+					return;
+				}
+		
+				// 아이템에 사용자 고유 번호를 입력한다. 다른 캐릭터는 이 아이템을 사용할 수가 없다.
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectType = DEF_ITET_UNIQUE_OWNER;
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue1 = m_pClientList[iClientH]->m_sCharIDnum1;
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue2 = m_pClientList[iClientH]->m_sCharIDnum2;
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sTouchEffectValue3 = m_pClientList[iClientH]->m_sCharIDnum3;
+
+				iValue += 2;
+				if (iValue > 15) iValue = 15;
+				dwTemp = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute;
+				dwTemp = dwTemp & 0x0FFFFFFF; // 비트 클리어 
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute = dwTemp | (iValue << 28); // 업그레이드된 비트값 입력
+
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_GIZONITEMCANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_cItemType,
+				          m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_wCurLifeSpan, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_cName,
+						  m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sSprite,
+						  m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sSpriteFrame,
+						  m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_cItemColor,
+						  m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue2,
+						  m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute ) ;
+				_bItemLog(DEF_ITEMLOG_UPGRADESUCCESS, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[iItemIndex]);
+				break;
+
+
+			} else
+			{
+				iValue += 2;
+				if (iValue > 15) iValue = 15; 
+				dwTemp = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute;
+				dwTemp = dwTemp & 0x0FFFFFFF; // 비트 클리어 
+				m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute = dwTemp | (iValue << 28); // 업그레이드된 비트값 입력
+				SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, NULL, NULL);
+				_bItemLog(DEF_ITEMLOG_UPGRADESUCCESS, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[iItemIndex]);
+				break;
+			}
+
+		default:
+			// 일반 아이템
+			// v2.16 2002-5-21 고광현수정
+			iSoX = iSoM = 0;
+			for (i = 0; i < DEF_MAXITEMS; i++)
+			if (m_pClientList[iClientH]->m_pItemList[i] != NULL) {
+				switch (m_pClientList[iClientH]->m_pItemList[i]->m_sIDnum) {
+				case 656: iSoX++; iSoxH = i; break; // 스톤 오브 제리마 
+				case 657: iSoM++; iSomH = i; break; // 스톤 오브 메리엔 
+				}
+			}
+			// 스톤 오브 제리마가 있다.
+			if (iSoX > 0) {
+				// 업그레이드 성공 확률 계산.
+				if (bCheckIsItemUpgradeSuccess(iClientH, iItemIndex, iSoxH) == FALSE) {
+					// 업그레이드 실패 
+					SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, NULL, NULL);
+					iValue = (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0xF0000000) >> 28; // v2.172
+					if (iValue >= 1) ItemDepleteHandler(iClientH, iItemIndex, FALSE); // v2.172 +1 -> +2 단계에서 실패하면 사라짐 
+					// 스톤 오브 제리마 없앤다.
+					ItemDepleteHandler(iClientH, iSoxH, FALSE);	
+					return;
+				}
+				
+				iValue++;
+				if (iValue > 7) 
+					iValue = 7;
+				else {
+					// 업그레이드 성공. 아이템 특성 바꾸고
+					dwTemp = m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute;
+					dwTemp = dwTemp & 0x0FFFFFFF; // 비트 클리어 
+					m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute = dwTemp | (iValue << 28); // 업그레이드된 비트값 입력	
+					// 스톤 오브 제리마 없앤다.
+					ItemDepleteHandler(iClientH, iSoxH, FALSE);
+				}
+			}
+			
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, NULL, NULL);
+
+			break;
+		}
+		break;
+
+/*	case 13: // 로브
+		switch (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sIDnum) {
+		case 715: // 흑마법사의 로브 
+		case 733: // 흑여마법사의 로브
+			if (m_pClientList[iClientH]->m_iGizonItemUpgradeLeft <= 0) return;
+			break;
+
+		default:
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, NULL, NULL);
+			break;
+		}
+		break;
+*/
+	default:
+		// 업그레이드 된 것 없음.
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_ITEMATTRIBUTECHANGE, iItemIndex, m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute, NULL, NULL);
+		break;
+	}
+}
+
+// v2.16 2002-5-21 고광현 추가
+BOOL CGame::bCheckIsItemUpgradeSuccess(int iClientH, int iItemIndex, int iSomH, BOOL bBonus)
+{
+ int iValue, iProb, iResult;
+ char cTxt[126] ;
+
+	if (m_pClientList[iClientH]->m_pItemList[iSomH] == NULL) return FALSE;
+	iValue = (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0xF0000000) >> 28;
+
+	switch (iValue) {
+	case 0: iProb = 20; break;  // +1 :90%     +1~+2(제작 아이템 완성도 200%일때 보너스 성공률 +10%)
+	case 1: iProb = 15; break;  // +2 :80%      +3
+	case 2: iProb =  9; break;  // +3 :48%      +4 
+	case 3: iProb =  8; break;  // +4 :24%      +5
+	case 4: iProb =  7; break;  // +5 :9.6%     +6
+	case 5: iProb =  7; break;  // +6 :2.8%     +7
+	case 6: iProb =  5; break;  // +7 :0.57%    +8
+	case 7: iProb =  5; break;  // +8 :0.05%    +9
+	case 8: iProb =  3; break;  // +9 :0.004%   +10
+	case 9: iProb =  2; break;  // +10:0.00016%
+	default: iProb = 0; break;
+	}
+	
+	if (((m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_dwAttribute & 0x00000001) != NULL) && (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue2 > 100)) {	
+		// 제작된 무기라면 성공 확률 ItemSpecialEffectValue2가 100이상일때 증가된다. 최대 10%
+		if (iProb > 20) 
+			iProb += (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue2 / 10);
+		else if (iProb > 7) 
+			iProb += (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue2 / 20);
+		else
+			iProb += (m_pClientList[iClientH]->m_pItemList[iItemIndex]->m_sItemSpecEffectValue2 / 40);
+	}
+	if ( bBonus == TRUE) iProb *=2 ;
+
+	iProb *= 100;
+	iResult = iDice(1,10000);
+
+	if (iProb >= iResult) { 
+		_bItemLog(DEF_ITEMLOG_UPGRADESUCCESS, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[iItemIndex]);
+		return TRUE;
+	}
+
+	_bItemLog(DEF_ITEMLOG_UPGRADEFAIL, iClientH, (int) -1, m_pClientList[iClientH]->m_pItemList[iItemIndex]);
+
+	return FALSE;
+}
+
+// v2.16 2002-5-23 고광현 수정 성후니 수정
+void CGame::ArmorLifeDecrement(int iAttackerH, int iTargetH, char cOwnerType, int iValue)
+{
+ int iTemp;
+
+	if (m_pClientList[iAttackerH] == NULL) return ;
+	// v1.3 피격당했으므로 장착하고 있는 몸통 방어구의 수명을 줄인다. 
+	switch (cOwnerType) {
+	case DEF_OWNERTYPE_PLAYER:
+		if (m_pClientList[iTargetH] == NULL) return;
+		break;
+
+	case DEF_OWNERTYPE_NPC:	return;
+	default: return;
+	}
+	
+	// v2.16 같은 편이면 수명 달지 않게 
+	if (m_pClientList[iAttackerH]->m_cSide == m_pClientList[iTargetH]->m_cSide) return ;
+
+	// 몸통 갑옷 
+	iTemp = m_pClientList[iTargetH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_BODY];
+	if ((iTemp != -1) && (m_pClientList[iTargetH]->m_pItemList[iTemp] != NULL)) {
+		// v1.432 중립인 경우 수명 줄지 않는다.
+		if ((m_pClientList[iTargetH]->m_cSide != DEF_NETURAL) && (m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
+			m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan -= iValue;
+	 
+		if (m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan <= 0) {
+			m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan = 0;
+			// 수명이 다 되었으므로 장착을 해제한다.
+			// 아이템이 망가졌다는 메시지 <- 이걸 받으면 장착화면에서 해제시켜야 한다.
+			SendNotifyMsg(NULL, iTargetH, DEF_NOTIFY_ITEMLIFESPANEND, m_pClientList[iTargetH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
+			// 아이템을 장착 해제 시킨다.
+			ReleaseItemHandler(iTargetH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+		}
+	}
+ 
+	// 바지 혹은 신발류 방어구
+	iTemp = m_pClientList[iTargetH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_PANTS];
+	if ((iTemp != -1) && (m_pClientList[iTargetH]->m_pItemList[iTemp] != NULL)) {
+	 
+		// v1.432 중립인 경우 수명이 줄지 않음
+		if ((m_pClientList[iTargetH]->m_cSide != DEF_NETURAL) && (m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
+			m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan -= iValue;
+	 
+		if (m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan <= 0) {
+			m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan = 0;
+			// 수명이 다 되었으므로 장착을 해제한다.
+			// 아이템이 망가졌다는 메시지 <- 이걸 받으면 장착화면에서 해제시켜야 한다.
+			SendNotifyMsg(NULL, iTargetH, DEF_NOTIFY_ITEMLIFESPANEND, m_pClientList[iTargetH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
+			// 아이템을 장착 해제 시킨다.
+			ReleaseItemHandler(iTargetH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+		}
+	}
+ 
+	iTemp = m_pClientList[iTargetH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_LEGGINGS];
+	if ((iTemp != -1) && (m_pClientList[iTargetH]->m_pItemList[iTemp] != NULL)) {
+	 
+		// v1.432 중립인 경우 수명이 줄지 않음
+		if ((m_pClientList[iTargetH]->m_cSide != DEF_NETURAL) && (m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
+			m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan -= iValue;
+	 
+		if (m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan <= 0) {
+			m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan = 0;
+			// 수명이 다 되었으므로 장착을 해제한다.
+			// 아이템이 망가졌다는 메시지 <- 이걸 받으면 장착화면에서 해제시켜야 한다.
+			SendNotifyMsg(NULL, iTargetH, DEF_NOTIFY_ITEMLIFESPANEND, m_pClientList[iTargetH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
+			// 아이템을 장착 해제 시킨다.
+			ReleaseItemHandler(iTargetH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+		}
+	}
+ 	
+	// 팔갑옷 
+	iTemp = m_pClientList[iTargetH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_ARMS];
+	if ((iTemp != -1) && (m_pClientList[iTargetH]->m_pItemList[iTemp] != NULL)) {
+	 
+		// v1.432 중립인 경우 수명이 줄지 않음
+		if ((m_pClientList[iTargetH]->m_cSide != DEF_NETURAL) && (m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
+			m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan -= iValue;
+					
+		if (m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan <= 0) {
+			m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan = 0;
+			// 수명이 다 되었으므로 장착을 해제한다.
+			// 아이템이 망가졌다는 메시지 <- 이걸 받으면 장착화면에서 해제시켜야 한다.
+			SendNotifyMsg(NULL, iTargetH, DEF_NOTIFY_ITEMLIFESPANEND, m_pClientList[iTargetH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
+			// 아이템을 장착 해제 시킨다.
+			ReleaseItemHandler(iTargetH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+		}
+	}
+	
+	// 투구 
+	iTemp = m_pClientList[iTargetH]->m_sItemEquipmentStatus[DEF_EQUIPPOS_HEAD];
+	if ((iTemp != -1) && (m_pClientList[iTargetH]->m_pItemList[iTemp] != NULL)) {
+	 
+		// v1.432 중립인 경우 수명이 줄지 않음
+		if ((m_pClientList[iTargetH]->m_cSide != DEF_NETURAL) && (m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan > 0))	
+			m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan -= iValue;
+	 
+		if (m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan <= 0) {
+			m_pClientList[iTargetH]->m_pItemList[iTemp]->m_wCurLifeSpan = 0;
+			// 수명이 다 되었으므로 장착을 해제한다.
+			// 아이템이 망가졌다는 메시지 <- 이걸 받으면 장착화면에서 해제시켜야 한다.
+			SendNotifyMsg(NULL, iTargetH, DEF_NOTIFY_ITEMLIFESPANEND, m_pClientList[iTargetH]->m_pItemList[iTemp]->m_cEquipPos, iTemp, NULL, NULL);
+			// 아이템을 장착 해제 시킨다.
+			ReleaseItemHandler(iTargetH, iTemp, TRUE);  // <- 이 함수는 서버에서의 효과만 처리 
+		}
+	}
+}
+
+
+// v2.171 2002-6-14
+void CGame::RequestGuildNameHandler(int iClientH, int iObjectID, int iIndex)
+{
+	if (m_pClientList[iClientH] == NULL) return;
+	if ((iObjectID <= 0) || (iObjectID >= DEF_MAXCLIENTS)) return;
+
+	if (m_pClientList[iObjectID] == NULL) {
+		// 요청 받은 Object가 없다.
+		
+	}
+	else {
+		// 2002-11-14 사냥꾼 모드 추가 (길드 이름 보내주는 형식이 바뀌었다.)
+		// SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_REQGUILDNAMEANSWER, iObjectID, iIndex, m_pClientList[iObjectID]->m_iGuildRank, m_pClientList[iObjectID]->m_cGuildName);
+		// SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_REQGUILDNAMEANSWER, m_pClientList[iObjectID]->m_iGuildRank, iIndex, m_pClientList[iObjectID]->m_iGuildRank, m_pClientList[iObjectID]->m_cGuildName);
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_REQGUILDNAMEANSWER, m_pClientList[iObjectID]->m_iGuildRank, iIndex, NULL, m_pClientList[iObjectID]->m_cGuildName);
+	}
+}
+
+//v2.171
+BOOL CGame::bCheckClientAttackFrequency(int iClientH, DWORD dwClientTime)
+{
+ DWORD dwTimeGap;
+
+	if (m_pClientList[iClientH] == NULL) return FALSE;
+
+	if (m_pClientList[iClientH]->m_dwAttackFreqTime == NULL) 
+		m_pClientList[iClientH]->m_dwAttackFreqTime = dwClientTime;
+	else {
+		dwTimeGap = dwClientTime - m_pClientList[iClientH]->m_dwAttackFreqTime;
+		m_pClientList[iClientH]->m_dwAttackFreqTime = dwClientTime;
+
+		if (dwTimeGap < 500) {
+			wsprintf(G_cTxt, "(!) Speed hack suspect(%s)", m_pClientList[iClientH]->m_cCharName);
+			PutLogList(G_cTxt);
+			DeleteClient(iClientH, TRUE, TRUE);
+
+			return FALSE;
+		}
+
+		//testcode
+		//wsprintf(G_cTxt, "Attack: %d", dwTimeGap);
+		//PutLogList(G_cTxt);
+	}
+
+	return FALSE;
+}
+
+
+// v2.171
+BOOL CGame::bCheckClientMagicFrequency(int iClientH, DWORD dwClientTime)
+{
+ DWORD dwTimeGap;
+	
+	if (m_pClientList[iClientH] == NULL) return FALSE;
+
+	if (m_pClientList[iClientH]->m_dwMagicFreqTime == NULL) 
+		m_pClientList[iClientH]->m_dwMagicFreqTime = dwClientTime;
+	else {
+		dwTimeGap = dwClientTime - m_pClientList[iClientH]->m_dwMagicFreqTime;
+		m_pClientList[iClientH]->m_dwMagicFreqTime = dwClientTime;
+
+		if (dwTimeGap < 1500) {
+			wsprintf(G_cTxt, "(!) Speed hack suspect(%s)", m_pClientList[iClientH]->m_cCharName);
+			PutLogList(G_cTxt);
+			DeleteClient(iClientH, TRUE, TRUE);
+
+			return FALSE;
+		}
+
+		//testcode
+		//wsprintf(G_cTxt, "Magic: %d", dwTimeGap);
+		//PutLogList(G_cTxt);
+	}
+
+	return FALSE;
+}
+
+// v2.171
+BOOL CGame::bCheckClientMoveFrequency(int iClientH, DWORD dwClientTime)
+{
+ DWORD dwTimeGap;
+	
+	if (m_pClientList[iClientH] == NULL) return FALSE;
+
+	if (m_pClientList[iClientH]->m_dwMoveFreqTime == NULL) 
+		m_pClientList[iClientH]->m_dwMoveFreqTime = dwClientTime;
+	else {
+		if (m_pClientList[iClientH]->m_bIsMoveBlocked == TRUE) {
+			m_pClientList[iClientH]->m_dwMoveFreqTime = NULL;
+			m_pClientList[iClientH]->m_bIsMoveBlocked = FALSE;
+			return FALSE;
+		}
+
+		// v2.172 Tab키 연타로 인한 튕김을 막기 위함
+		if (m_pClientList[iClientH]->m_bIsAttackModeChange == TRUE) {
+			m_pClientList[iClientH]->m_dwMoveFreqTime = NULL;
+			m_pClientList[iClientH]->m_bIsAttackModeChange = FALSE;
+			return FALSE;
+		}
+
+		dwTimeGap = dwClientTime - m_pClientList[iClientH]->m_dwMoveFreqTime;
+		m_pClientList[iClientH]->m_dwMoveFreqTime = dwClientTime;
+
+		if (dwTimeGap < 250) {
+			wsprintf(G_cTxt, "(!) Speed hack suspect(%s)", m_pClientList[iClientH]->m_cCharName);
+			PutLogList(G_cTxt);
+			DeleteClient(iClientH, TRUE, TRUE);
+
+			return FALSE;
+		}
+
+		//testcode
+		//wsprintf(G_cTxt, "Move: %d", dwTimeGap);
+		//PutLogList(G_cTxt);
+	}
+
+	return FALSE;
+}
+
+// v2.17 2002-7-15 요일에 관계없이 강콜 시간을 조절 할 수 있게 수정한다.
+void CGame::SetForceRecallTime(int iClientH)
+{
+	int iTL_ = 0 ;
+	SYSTEMTIME SysTime;
+
+	if (m_pClientList[iClientH] == NULL) return ;
+
+	if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall == 0) {
+		// 남아있을 수 있는 잔존 시간을 설정해 준다. 
+		// 시간을 구한다음 iWarPeriod를 구한다.
+
+		// 서버에 강콜 시간이 설정되어 있으면 서버 강콜 시간을 강콜 시간으로 한다.
+
+		if (m_sForceRecallTime > 0 ) {
+			m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*m_sForceRecallTime ;
+		}
+		else {
+			GetLocalTime(&SysTime);
+			switch (SysTime.wDayOfWeek) {
+			// v2.19 2002-11-28
+#ifndef DEF_CONSULTATION
+			case 1:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*3 ; break;  //월요일  1 2002-09-10 #1
+			case 2:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*3 ; break;  //화요일  1 
+			case 3:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*3 ; break;  //수요일  1 
+			case 4:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*3 ; break;  //목요일  1분 
+#else 
+			case 1:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*1 ; break;  //월요일  1 2002-09-10 #1
+			case 2:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*1 ; break;  //화요일  1 
+			case 3:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*1 ; break;  //수요일  1 
+			case 4:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*1 ; break;  //목요일  1분 
+
+#endif 
+			case 5:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*15; break; //금요일 15분
+			case 6:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*45; break; //토요일 45분 
+			case 0:	m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 20*60; break; //일요일 60분
+			}
+		}
+	}
+	else { // if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall == 0) 
+		if (m_sForceRecallTime > 0 ) {
+			iTL_ =  20*m_sForceRecallTime ;
+		}
+		else {
+
+			// 잔존시간이 있다. 요일별 잔존시간보다 크면 1로 초기화 
+			GetLocalTime(&SysTime);
+			switch (SysTime.wDayOfWeek) {
+			case 1:	iTL_ = 20*1; break;  //월요일  1분 2002-09-10 #1
+			case 2:	iTL_ = 20*1; break;  //화요일  1분
+			case 3:	iTL_ = 20*1; break;  //수요일  1분
+			case 4:	iTL_ = 20*1; break;  //목요일  1분
+			case 5:	iTL_ = 20*15; break; //금요일 15분
+			case 6:	iTL_ = 20*45; break; //토요일 45분 
+			case 0:	iTL_ = 20*60; break; //일요일 60분
+			}
+		}
+
+		if (m_pClientList[iClientH]->m_iTimeLeft_ForceRecall > iTL_) 
+			m_pClientList[iClientH]->m_iTimeLeft_ForceRecall = 1;
+
+	}
+
+	return ;
+}
+
+// 2002-11-14 사냥꾼 모드 추가
+void CGame::RequestHuntmode(int iClientH)
+{
+#ifndef DEF_V219
+	return;
+#endif
+
+	if (m_pClientList[iClientH] == NULL) return;
+	if (m_pClientList[iClientH]->m_iPKCount > 0 ) return;
+	if (m_pClientList[iClientH]->m_bIsInitComplete == FALSE ) return;
+	if (memcmp(m_pClientList[iClientH]->m_cMapName, "cityhall",8) != 0) return ;
+	// v2.20 2002-12-31 민간인 모드 레벨 제한 과 이동지역 제한 추가 
+	if ((m_pClientList[iClientH]->m_iLevel > DEF_LIMITHUNTERLEVEL) && (m_pClientList[iClientH]->m_bIsHunter == FALSE) ) return;
+
+
+	if( memcmp(m_pClientList[iClientH]->m_cLocation, "aresden", 7) == 0 )
+	{
+		strcpy( m_pClientList[iClientH]->m_cLocation, "arehunter" );
+	}
+	else if( memcmp(m_pClientList[iClientH]->m_cLocation, "elvine", 6) == 0 ) 
+	{
+		strcpy( m_pClientList[iClientH]->m_cLocation, "elvhunter" );
+	}
+	else if( memcmp(m_pClientList[iClientH]->m_cLocation, "arehunter", 9) == 0 )
+	{
+		strcpy( m_pClientList[iClientH]->m_cLocation, "aresden" );
+	}	
+	else if( memcmp(m_pClientList[iClientH]->m_cLocation, "elvhunter", 9) == 0 )
+	{
+		strcpy( m_pClientList[iClientH]->m_cLocation, "elvine" );
+	}
+
+	if (m_pClientList[iClientH]->m_bIsHunter == TRUE)
+		m_pClientList[iClientH]->m_bIsHunter = FALSE ;
+	else 
+		m_pClientList[iClientH]->m_bIsHunter = TRUE ;
+
+
+	SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_RESPONSE_HUNTMODE, NULL, NULL, NULL, m_pClientList[iClientH]->m_cLocation);
+
+	// 특성이 바뀌므로 외양을 새로 보낸다. 
+	SendEventToNearClient_TypeA((short)iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTNULLACTION, NULL, NULL, NULL);
+}
+
+void CGame::SetNoHunterMode(int iClientH,BOOL bSendMsg) 	// v2.20 2002-12-31 민간인 모드 레벨 제한 과 이동지역 제한 추가 
+{
+#ifndef DEF_V219
+	return;
+#endif
+
+	if (m_pClientList[iClientH] == NULL) return;
+
+	if( memcmp(m_pClientList[iClientH]->m_cLocation, "arehunter", 9) == 0 )
+	{
+		strcpy( m_pClientList[iClientH]->m_cLocation, "aresden" );
+	}	
+	else if( memcmp(m_pClientList[iClientH]->m_cLocation, "elvhunter", 9) == 0 )
+	{
+		strcpy( m_pClientList[iClientH]->m_cLocation, "elvine" );
+	}
+
+	if (m_pClientList[iClientH]->m_bIsHunter == TRUE)
+		m_pClientList[iClientH]->m_bIsHunter = FALSE ;
+
+	if (bSendMsg == TRUE)
+	{
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_RESPONSE_HUNTMODE, NULL, NULL, NULL, m_pClientList[iClientH]->m_cLocation);
+
+		// 특성이 바뀌므로 외양을 새로 보낸다. 
+		SendEventToNearClient_TypeA((short)iClientH, DEF_OWNERTYPE_PLAYER, MSGID_EVENT_MOTION, DEF_OBJECTNULLACTION, NULL, NULL, NULL);
+
+	}
+
+}
+
+// 2002-11-15 클라이언트의 Side, OnTown, OnShop 정보를 설정한다.
+int CGame::iSetSide(int iClientH)
+{
+	if ( m_pClientList[iClientH] == NULL ) return -1;
+
+	char	cLocationName[12], cMapLocationName[12];
+
+	ZeroMemory(cLocationName, sizeof(cLocationName));
+	ZeroMemory(cMapLocationName, sizeof(cMapLocationName));
+
+	strcpy(cLocationName, m_pClientList[iClientH]->m_cLocation);
+	strcpy(cMapLocationName, m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_cLocationName);
+
+
+	// 플레이어의 소속에 따라 Side를 결정한다. 여행자라면 0을 유지하고 Aresden이면 1, Elvine이면 2를 할당한다.
+	// v2.181 2002-10-24 중립 공격 받는 버그 수정
+	m_pClientList[iClientH]->m_cSide = DEF_NETURAL ; // v2.172
+	m_pClientList[iClientH]->m_iIsOnTown = DEF_PK;
+	m_pClientList[iClientH]->m_bIsHunter = FALSE;
+
+	// v2.17 2002-7-21 마을과 농경지에서만 같은 편에게 공격 받지 않게 설정함 
+	// v2.19 2002-11-12 캐릭터끼리 공격 불가능한 지역 설정 (aresden으로 설정된 모든 부분..m_cLocationName)
+	
+	// are[sden], are[hunter] 와 같이 앞의 3글자가 일반 모드와 사냥꾼 모드가 같다는 것을 이용
+	if (memcmp(cLocationName,cMapLocationName,3) == 0)
+		m_pClientList[iClientH]->m_iIsOnTown = DEF_NONPK;
+
+	if (memcmp(cLocationName, "are", 3) == 0) {
+		m_pClientList[iClientH]->m_cSide = DEF_ARESDEN;
+	} else if (memcmp(cLocationName, "elv", 3) == 0) {
+		m_pClientList[iClientH]->m_cSide = DEF_ELVINE;
+	}
+    else {
+		if ((strcmp(cMapLocationName, "elvine") == 0)
+			|| (strcmp(cMapLocationName, "aresden") == 0))
+		{
+			m_pClientList[iClientH]->m_iIsOnTown = DEF_NONPK;
+		}
+		m_pClientList[iClientH]->m_bIsNeutral = TRUE ;
+	}
+
+#ifdef DEF_V219
+	if ((memcmp(cLocationName, "arehunter", 9) == 0)  ||  (memcmp(cLocationName, "elvhunter", 9) == 0)) {
+		m_pClientList[iClientH]->m_bIsHunter = TRUE ;
+	}
+#endif
+	
+	// 불리딩에서는 민간인 모드가 활성화 되지 않는다.
+	if((memcmp(m_pClientList[iClientH]->m_cMapName, "bisle",5) == 0))
+	{
+		m_pClientList[iClientH]->m_bIsHunter = FALSE ;
+	}
+
+	if((memcmp(m_pClientList[iClientH]->m_cMapName, "bsmith",6) == 0) ||
+		(memcmp(m_pClientList[iClientH]->m_cMapName, "gldhall",7) == 0) ||
+		(memcmp(m_pClientList[iClientH]->m_cMapName, "gshop",5) == 0) )
+		m_pClientList[iClientH]->m_bIsOnShop = TRUE;
+	else
+		m_pClientList[iClientH]->m_bIsOnShop = FALSE;
+
+	
+		// v2.20 2002-12-23 창고인지 체크 한다.
+	if((memcmp(m_pClientList[iClientH]->m_cMapName, "wrhus",5) == 0) 
+		|| (memcmp(m_pClientList[iClientH]->m_cMapName, "arewrhus",8) == 0)
+		|| (memcmp(m_pClientList[iClientH]->m_cMapName, "elvwrhus",8) == 0)
+		)
+		m_pClientList[iClientH]->m_bIsOnWarehouse = TRUE;
+	else
+		m_pClientList[iClientH]->m_bIsOnWarehouse = FALSE;
+
+	// v2.20 2002-12-23 마법을 배울수 있는곳인지 체크 한다.
+	if(memcmp(m_pClientList[iClientH]->m_cMapName, "wzdtwr",6) == 0 )
+		m_pClientList[iClientH]->m_bIsOnTower = TRUE;
+	else
+		m_pClientList[iClientH]->m_bIsOnTower = FALSE;
+
+#ifdef DEF_ALLPLAYERPROTECT
+	// v2.19 2002-11-12 캐릭터끼리 공격 불가능한 지역 설정 마을과 같은 룰이 적용된다.
+	if(memcmp(cMapLocationName, "2ndmiddle",9)== 0)
+	{
+		m_pClientList[iClientH]->m_iIsOnTown = DEF_NEVERNONPK;
+	}
+#endif
+
+	return m_pClientList[iClientH]->m_cSide;
+}
+
+
+//v2.19 2002-12-16 농사스킬..
+BOOL CGame::__bSetAgricultureItem(int iMapIndex, int dX, int dY, int iType,int iSsn, int iClientH)  
+{
+ int iNamingValue, ix, iy, tX, tY;
+ char cNpcName[21], cName[21], cNpcWaypoint[11], cOwnerType;
+ short sOwnerH;
+ BOOL	iRet;
+
+//	// 크루세이드 모드가 아니거나 건설한 사람이 공병이 아니면 무시.
+//	if ((m_bIsCrusadeMode == FALSE) || (m_pClientList[iClientH]->m_iCrusadeDuty != 2)) return FALSE;
+	if (m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_iTotalAgriculture >= DEF_MAXAGRICULTURE) {
+		// 해당 맵에 농작물 개수 제한에 걸렸다...
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_NOMOREAGRICULTURE, NULL, NULL, NULL, NULL);
+		return FALSE;
+	}
+
+	if(iSsn > m_pClientList[iClientH]->m_cSkillMastery[2]) //쓸수가 없다.. 스킬 제한에 걸린다..
+	{
+		SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_AGRICULTURESKILLLIMIT, NULL, NULL, NULL, NULL);  //??
+		return FALSE;
+	}
+
+
+
+	// 해당 위치에 농작물 NPC를 생성.
+	iNamingValue = m_pMapList[ m_pClientList[iClientH]->m_cMapIndex ]->iGetEmptyNamingValue();
+	if (iNamingValue == -1) {
+		// 더이상 이 맵에 NPC를 만들수 없다. 이름을 할당할 수 없기 때문.
+	}
+	else {
+
+		// 먼저 설치하고자 하는 근처에 구조물이 없나 확인한다.
+//		for (ix = dX -1; ix <= dX +3; ix++)
+//		for (iy = dY -1; iy <= dY +3; iy++) {
+		m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->GetOwner(&sOwnerH, &cOwnerType, dX, dY);
+		if ((sOwnerH != NULL) && (cOwnerType == DEF_OWNERTYPE_NPC) && (m_pNpcList[sOwnerH]->m_cActionLimit == 5))
+		{
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_AGRICULTURENOAREA, NULL, NULL, NULL, NULL);
+			return FALSE;
+		}
+// 		}
+
+		//농사를 지을수 있는 자리가 아니다.
+		if(m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->bGetIsFarm(dX,dY) == FALSE)
+		{
+			SendNotifyMsg(NULL, iClientH, DEF_NOTIFY_AGRICULTURENOAREA, NULL, NULL, NULL, NULL);
+			return FALSE;
+		}
+		// NPC를 생성한다.
+		ZeroMemory(cNpcName, sizeof(cNpcName));
+		strcpy(cNpcName, "Crops");
+	
+		ZeroMemory(cName, sizeof(cName));
+		wsprintf(cName, "XX%d", iNamingValue);
+		cName[0] = '_';
+		cName[1] = m_pClientList[iClientH]->m_cMapIndex+65;
+		
+		ZeroMemory(cNpcWaypoint, sizeof(cNpcWaypoint));
+
+		tX = (int)dX;
+		tY = (int)dY;
+		
+		iRet = bCreateNewNpc(cNpcName, cName, m_pMapList[ m_pClientList[iClientH]->m_cMapIndex ]->m_cName, 0, 0, 
+			              DEF_MOVETYPE_RANDOM, &tX, &tY, cNpcWaypoint, NULL, FALSE, 0 /*중립*/, FALSE, TRUE);
+
+		if ( iRet == FALSE) {
+			// 실패했으므로 예약된 NameValue를 해제시킨다.
+			m_pMapList[ m_pClientList[iClientH]->m_cMapIndex ]->SetNamingValueEmpty(iNamingValue);
+		} 
+		else {
+		
+			if(m_pNpcList[iRet] == NULL)
+			{
+				return FALSE;
+			}
+			
+			m_pNpcList[iRet]->m_iNpcCrops = iType;
+			
+			// 이렇게 할필요가 없지만..
+			switch (iType) 
+			{
+			case 1: //수박
+				m_pNpcList[iRet]->m_iCropsSkillLV = iSsn;
+				break;
+			case 2: //호박
+				m_pNpcList[iRet]->m_iCropsSkillLV = iSsn;
+				break;
+			case 3: //마늘
+				m_pNpcList[iRet]->m_iCropsSkillLV = iSsn;
+				break;
+			case 4: //보리
+				m_pNpcList[iRet]->m_iCropsSkillLV = iSsn;
+				break;
+				
+			default: //없는 작물...
+				m_pNpcList[iRet]->m_iCropsSkillLV = 100;
+				break;
+			}
+
+			m_pNpcList[iRet]->m_sAppr2 = iType << 8 | 1;
+//			m_pNpcList[iRet]->m_sAppr2 = (char)1;
+
+			// 다른 클라이언트에게 알린다.
+			SendEventToNearClient_TypeA(iRet, DEF_OWNERTYPE_NPC, MSGID_EVENT_LOG, DEF_MSGTYPE_CONFIRM, NULL, NULL, NULL);
+
+			// 성공
+			wsprintf(G_cTxt, "plant(%s) Agriculture begin(%d,%d) sum(%d)!", cNpcName, tX, tY,
+				m_pMapList[m_pClientList[iClientH]->m_cMapIndex]->m_iTotalAgriculture);
+			PutLogList(G_cTxt);
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+//v2.19 2002-12-16 농사 스킬 관련 :: 아이템을 떨어트린다..
+//////////////////////////////////////////////////////////////////////////////////////////////
+//		BOOL bCropsItemDrop(int iClientH, short iTargetH,BOOL bMobDropPos)  
+//		bMobDropPos :: 몹 위에 아이템을 떨어 트린다. (true)
+//////////////////////////////////////////////////////////////////////////////////////////////
+BOOL CGame::bCropsItemDrop(int iClientH, short iTargetH,BOOL bMobDropPos)  
+{
+	class CItem * pItem;
+	int	  iItemID = 0 ;
+	int	  iSeedID = 0 ;
+
+	iSeedID = m_pNpcList[iTargetH]->m_iNpcCrops;
+
+	switch (iSeedID) 
+	{
+	case 1: //수박
+		iItemID = 820;
+		GetExp(iClientH, iDice(3, 10));  //경험치를 준다.
+		break;
+	case 2: //호박
+		iItemID = 821;
+		GetExp(iClientH, iDice(3, 10));  //경험치를 준다.
+		break;
+	case 3: //마늘
+		iItemID = 822;
+		GetExp(iClientH, iDice(4, 10));  //경험치를 준다.
+		break;
+	case 4: //보리
+		iItemID = 823;
+		GetExp(iClientH, iDice(4, 10));  //경험치를 준다.
+		break;
+
+	default:
+		iItemID = 0;
+		break;
+	}
+
+	
+	if(iItemID == 0) return FALSE;
+
+	pItem = new class CItem;
+	if (_bInitItemAttr(pItem, iItemID) == FALSE) {
+		delete pItem;
+		return FALSE;
+	}
+	else {
+		
+		if( bMobDropPos == FALSE)
+		{
+			// 아이템을 서있는 위치에 버린다. 
+			m_pMapList[ m_pClientList[iClientH]->m_cMapIndex ]->bSetItem(m_pClientList[iClientH]->m_sX, 
+				m_pClientList[iClientH]->m_sY, pItem);
+			// 다른 클라이언트에게 아이템이 떨어진 것을 알린다. 
+			SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_ITEMDROP, m_pClientList[iClientH]->m_cMapIndex,
+				m_pClientList[iClientH]->m_sX, m_pClientList[iClientH]->m_sY,  
+				pItem->m_sSprite, pItem->m_sSpriteFrame, pItem->m_cItemColor); // v1.4
+		}
+		else
+		{
+			//농작물 위에 버린다.
+			m_pMapList[ m_pNpcList[iTargetH]->m_cMapIndex ]->bSetItem(m_pNpcList[iTargetH]->m_sX, 
+				m_pNpcList[iTargetH]->m_sY, 
+				pItem);
+			
+			// 다른 클라이언트에게 아이템이 떨어진 것을 알린다. 
+			SendEventToNearClient_TypeB(MSGID_EVENT_COMMON, DEF_COMMONTYPE_ITEMDROP, m_pNpcList[iTargetH]->m_cMapIndex,
+				m_pNpcList[iTargetH]->m_sX, m_pNpcList[iTargetH]->m_sY,
+				pItem->m_sSprite, pItem->m_sSpriteFrame, pItem->m_cItemColor); //v1.4 color
+			
+		}
+
+
+		//testcode
+		//wsprintf(G_cTxt, "Mining Success: %s", cMineralName); 
+		//PutLogList(G_cTxt);
+	}
+
+	return TRUE;
+}
+
+//v2.19 2002-12-16 스킬 레벨과 농작물 레벨에 따른 타격 성공 확률
+int SKILLCROPSTABLE[9][9] = 
+// 20  30  40  50  60  70  80  90 100
+{
+   42, 34, 27, 21, 16, 12,  9,  7,  6,  //20
+   43, 40, 33, 27, 22, 18, 15, 13, 10,	//30
+   44, 41, 38, 32, 27, 23, 20, 18, 13,  //40
+   45, 42, 39, 36, 31, 27, 24, 22, 15,  //50
+   46, 43, 40, 37, 34, 30, 27, 25, 16,  //60
+   47, 44, 41, 38, 35, 32, 29, 27, 20,  //70
+   48, 45, 42, 39, 36, 33, 30, 28, 23,  //80
+   49, 46, 43, 40, 37, 34, 31, 28, 25,  //90
+   50, 47, 44, 41, 38, 35, 32, 29, 26  //100
+};
+
+//v2.19 2002-12-16 스킬 레벨과 농작물 레벨에 따른 농작물 드롭 확률
+int CROPSDROPTABLE[9][9] = 
+// 20  30  40  50  60  70  80  90 100
+{
+   40,  0,  0,  0,  0,  0,  0,  0,  0,  //20
+   41, 38,  0,  0,  0,  0,  0,  0,  0,	//30
+   43, 40, 36,  0,  0,  0,  0,  0,  0,  //40
+   46, 42, 38, 35,  0,  0,  0,  0,  0,  //50
+   50, 45, 41, 37, 33,  0,  0,  0,  0,  //60
+   55, 49, 44, 40, 35, 31,  0,  0,  0,  //70
+   61, 54, 48, 43, 38, 33, 30,  0,  0,  //80
+   68, 60, 53, 47, 42, 37, 32, 28,  0,  //90
+   76, 67, 59, 52, 46, 41, 35, 29, 24  //100
+};
+
+
+
+
+
+
+
+
+
+
+
+
+/////////////////////////////////////////////////////////////////////////////////
+//	int bProbabilityTable(int x,int y,int iTable) 
+//	인자 :: x 스킬 레벨(20-100), y 농작물 레벨(20-100), 
+//			iTable 1 ::타격 성공 확률 
+//				   2 ::농작물 드롭 확률
+//			return 0 :: false 확률 제로.
+//				   1- 100 나올 확률에 들었고 적용 확률을 리턴..
+/////////////////////////////////////////////////////////////////////////////////
+int CGame::bProbabilityTable(int x,int y,int iTable) 
+{
+	int iProb;
+	int iX,iY;
+
+	iX = (x - 20) / 10;
+	iY = (y - 20) / 10;
+	
+	if( iX < 0 || iX > 8) return 0;
+	if( iY < 0 || iY > 8) return 0;
+
+	iProb = iDice(1,100);
+
+	if(iTable == 1){
+		if( SKILLCROPSTABLE[iX][iY] >= iProb )
+			return SKILLCROPSTABLE[iX][iY];
+		else
+			return 0;
+	}
+	else if(iTable == 2){
+		if( CROPSDROPTABLE[iX][iY] >= iProb )
+			return CROPSDROPTABLE[iX][iY];
+		else
+			return 0;
+	}
+	else return 0;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

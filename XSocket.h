@@ -15,6 +15,7 @@
 #define _WINSOCK2API_
 #define  FD_SETSIZE 2000
 #include <windows.h>
+#include <winbase.h>
 #include <windowsx.h>
 #include <winsock2.h>
 //#include <winsock.h>
@@ -51,7 +52,8 @@
 
 class XSocket  
 {
-public:						 
+public:	
+
 	int iGetPeerAddress(char * pAddrString);
 	char * pGetRcvDataPointer(DWORD * pMsgSize, char * pKey = NULL);
 	SOCKET iGetSocket();
@@ -67,6 +69,7 @@ public:
 
 	int  m_WSAErr;
 	BOOL m_bIsAvailable;
+	BOOL m_bIsWriteEnabled; // 2001-11-27일 추가
 
 private:
 	void _CloseConn();

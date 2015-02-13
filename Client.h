@@ -10,6 +10,7 @@
 #endif // _MSC_VER >= 1000
 
 #include <windows.h>
+#include <winbase.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "XSocket.h"
@@ -28,31 +29,40 @@
 #define	DEF_MAXMAGICTYPE	100	// 변경하려면 로그서버내용도 바꾸어야 한다.
 #define DEF_MAXSKILLTYPE	60
 
-#define DEF_MAXPARTYMEMBERS	6
+// 2002-12-6  Teleport 기능 추가
+#define DEF_MAXTELEPORTLIST	20
+
+#define DEF_MAXPARTYMEMBERS	8		// 2002-09-05 #3 adamas 6 -> 8 여긴 왜 6인지 모르겠다.
 
 #define DEF_SPECABLTYTIMESEC	1200
+
+#define DEF_PARTYSTATUS_NULL		0
+#define DEF_PARTYSTATUS_PROCESSING	1
+#define DEF_PARTYSTATUS_CONFIRM		2
 
 class CClient  
 {
 public:
+
 	BOOL bCreateNewParty();
 	
 	CClient(HWND hWnd);
 	virtual ~CClient();
 
-	char m_cCharName[11];
-	char m_cAccountName[11];
-	char m_cAccountPassword[11];
+	char m_cCharName[12];
+	char m_cAccountName[12];
+	char m_cAccountPassword[12];
 
 	BOOL  m_bIsInitComplete;
 	BOOL  m_bIsMsgSendAvailable;
+	BOOL  m_bIsCheckingWhisperPlayer;
 
-	char  m_cMapName[11];
+	char  m_cMapName[12];
 	char  m_cMapIndex;
 	short m_sX, m_sY;
 	
-	char  m_cGuildName[21];		// 길드의 이름 
-	char  m_cLocation[11];      //  <- 맵이름이 그대로 저장된다. 소속 마을 
+	char  m_cGuildName[22];		// 길드의 이름 
+	char  m_cLocation[12];      //  <- 맵이름이 그대로 저장된다. 소속 마을 
 	int   m_iGuildRank;			// -1이면 무의미. 0이면 길드 마스터. 양수는 길드내에서의 서열 
 	int   m_iGuildGUID;
 	
@@ -62,18 +72,19 @@ public:
 	short m_sAppr1;
 	short m_sAppr2;
 	short m_sAppr3;
-	short m_sAppr4;
+	short m_sAppr4;             // 
 	int   m_iApprColor;			// v1.4 외형 컬러테이블
 	short m_sStatus;
 
 	DWORD m_dwTime, m_dwHPTime, m_dwMPTime, m_dwSPTime, m_dwAutoSaveTime, m_dwHungerTime;
 
-	// Player 특성치 
+	// Player 특성치
 
 	char m_cSex, m_cSkin, m_cHairStyle, m_cHairColor, m_cUnderwear;
 
 	int  m_iHP;						// Hit Point
 	int  m_iHPstock;
+	int  m_iHPStatic_stock;         // v2.20 2002-12-28 3주년 기념반지 버그 수정 
 	int  m_iMP;
 	int  m_iSP;
 	int  m_iExp, m_iNextLevelExp;
@@ -124,6 +135,7 @@ public:
 	char  m_cMagicEffectStatus[DEF_MAXMAGICEFFECTS];
 
 	int   m_iWhisperPlayerIndex;
+	char  m_cWhisperPlayerName[12];
 	char  m_cProfile[256];
 
 	int   m_iHungerStatus;		// 배고픔 포인트. 이게 0이되면 스태미너가 오르지 않으며 체력도 절반이상 차지 않습니다. 
@@ -159,6 +171,7 @@ public:
 	DWORD m_dwAutoExpTime;		 // Auto-Exp 계산 시간.
 
 	DWORD m_dwRecentAttackTime;  // 가장 최근에 공격했던 시간 
+	DWORD m_dwLastActionTime;	 // 가장 최근에 행동했던 시간 : 채팅/이동/공격/마법/스킬 모두 적용   
 
 	int   m_iAllocatedFish;		 // 이 값이 0이 아니면 이벤트 낚시모드라는 이야기다. 
 	int   m_iFishChance;		 // 현재 낚을 상태 
@@ -185,6 +198,7 @@ public:
 
 	short m_sCharIDnum1, m_sCharIDnum2, m_sCharIDnum3; // v1.3 그 캐릭터가 갖는 고유값!
 
+	// v2.06 12-2 이 변수 사용 안한다.
 	int   m_iPartyRank;										// Party내에서의 위치. -1이면 무의미. 1이면 파티 생성자. 12면 멤버 
 	int   m_iPartyMemberCount;								// 파티 인원 제한용 
 	int   m_iPartyGUID;										// v1.42 Party GUID
@@ -193,10 +207,14 @@ public:
 		char cName[11];
 
 	} m_stPartyMemberName[DEF_MAXPARTYMEMBERS];
+	//
 
 	int   m_iAbuseCount;		// 해킹 용의자 파악용 
 	
 	BOOL  m_bIsBWMonitor;		// BadWord 모니터인가?
+	// v2.15 2002-5-6
+	BOOL  m_bIsManager;		    // Manager 프로그램인가?
+
 
 	BOOL  m_bIsExchangeMode;		// 현재 아이템 교환 모드인가? 
 	int   m_iExchangeH;				// 교환할 대상의 인덱스 
@@ -247,6 +265,8 @@ public:
 	int   m_iAddMR, m_iAddAbsPD, m_iAddAbsMD; 
 	int   m_iAddCD, m_iAddExp, m_iAddGold;		// 고정 마법 대미지 흡수율. 반지류와는 독립적으로 계산된다.
 
+	int   m_iAddTransMana, m_iAddChargeCritical;
+
 	int   m_iAddResistMagic;					// v1.2 추가 마법 저항 
 	int   m_iAddPhysicalDamage;					// v1.2 고정 대미지 추가 포인트 
 	int   m_iAddMagicalDamage;	
@@ -273,9 +293,10 @@ public:
 												// 50: 무기 수명 0로 만듬. 51:해당 부위 대미지 무효화  52: 모5든 부위 대미지 무효화
 	int   m_iSpecialAbilityEquipPos;			// 방어구인 경우 특수효과가 적용되는 부위를 의미함.
 	BOOL  m_bIsAdminCreateItemEnabled;
+	BOOL  m_bIsAdminCommandEnabled;             // v2.18 2002-10-15 중요 GM 명령어에 패스워드 추가 
 	int   m_iAlterItemDropIndex;				// 아이템 대신 떨어지는 아이템 인덱스 
 
-	int   m_iWarContribution;					// 전쟁 공헌도 
+	int   m_iWarContribution;					// 전쟁 공헌도
 
 	DWORD m_dwSpeedHackCheckTime;				// 속도버그 검사 루틴 
 	int   m_iSpeedHackCheckExp;		
@@ -283,8 +304,9 @@ public:
 	DWORD m_dwInitCCTimeRcv;
 	DWORD m_dwInitCCTime;
 
-	char  m_cLockedMapName[11];					// 갖힌 맵 이름
+	char  m_cLockedMapName[12];					// 갖힌 맵 이름
 	int   m_iLockedMapTime;						// 이 값이 0 이상이면 어디로 텔레포트 해도 위의 맵으로 간다.
+	int   m_iDeadPenaltyTime;					// v2.04 죽었을 경우 페널티 타임. 이 시간값이 남아 있는데 또 죽으면 맵에 갖힌다.
 
 	int   m_iCrusadeDuty;						// 크루세이드에서 맡은 역할: 1-용병. 2-건설자. 3-지휘관
 	DWORD m_dwCrusadeGUID;						// 크루세이드 GUID
@@ -297,16 +319,54 @@ public:
 	} m_stCrusadeStructureInfo[DEF_MAXCRUSADESTRUCTURES];
 	int m_iCSIsendPoint;
 
-	char m_cSendingMapName[11];
+	char m_cSendingMapName[12];
 	BOOL m_bIsSendingMapStatus;
 
 	// 지휘관이 건설할 수 있는 포인트. 일반 플레이어라면 자신의 행동에 대한 누적값이다.
 	int  m_iConstructionPoint;
 
-	char m_cConstructMapName[11];
+	char m_cConstructMapName[12];
 	int  m_iConstructLocX, m_iConstructLocY;
+
+	DWORD m_dwFightzoneDeadTime;
+
+	// v2.13 성후니 추가 DB 부하를 줄이기 위한 변수 
+	BOOL m_bIsBankModified ;
+
+	// v2.15 DB 저장 속도 향상 
+	DWORD m_dwCharID ;
+
+	int m_iPartyID;
+	int m_iPartyStatus;
+	int m_iReqJoinPartyClientH;
+	char m_cReqJoinPartyName[12];
+
+	int m_iGizonItemUpgradeLeft;
+
+	DWORD m_dwAttackFreqTime, m_dwMagicFreqTime, m_dwMoveFreqTime; // v2.171
+	BOOL m_bIsMoveBlocked; // v2.171
+	BOOL m_bIsAttackModeChange; // v2.172
+	int  m_iIsOnTown; 
+	BOOL m_bIsOnShop; // v2.182 2002-11-15 사고 팔수 있는 곳인지 체크하는 변수 추가 
+	BOOL m_bIsHunter; // v2.182 2002-11-15 사냥군인지 체크하는 변수 추가 
+	BOOL m_bIsOnTower; // v2.20 2002-12-23 마법을 배울수 있는곳인지 체크 한다.
+	BOOL m_bIsOnWarehouse ; // v2.20 2002-12-23 창고인지 체크 한다.
+	BOOL m_bIsInBuilding; // v2.19 2002-11-18 건물안인지 체크하는 변수 추가 
+
+	DWORD m_dwWarmEffectTime; // v2.172
 
 };
 
 #endif // !defined(AFX_CLIENT_H__39CC7700_789F_11D2_A8E6_00001C7030A6__INCLUDED_)
 
+/*
+
+Item Data 저장 순서:
+  Name Count TouchEffectType, TEV1, TEV2, TEV3, Color SpecEffectV1, SEV2, SEV3, Life, Attribute
+         
+  ToucheEffectType: DEF_ITET_DATE, ITET_ID, ITET_UNIQUE_OWNER
+
+  SpecEffectV1 : Custom-Item인 경우 최대 수명 
+  SpecEffectV2 : Custom-Item인 경우 완성도 
+
+*/
