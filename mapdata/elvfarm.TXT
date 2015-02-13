@@ -1,0 +1,72 @@
+[MAP-INFO]
+
+map-location  = elvfarm
+initial-point = 1  23 149
+
+
+//-Teleportation-Set----SX-----SY-----DestMapName---------DX-----DY----Dir---;
+teleport-loc     =      20     147    elvine              373    188   4
+teleport-loc     =      20     148    elvine              373    188   4
+teleport-loc     =      20     149    elvine              373    188   4
+teleport-loc     =      20     150    elvine              373    188   4
+teleport-loc     =      20     151    elvine              373    188   4
+teleport-loc     =      20     152    elvine              373    188   4
+teleport-loc     =      20     153    elvine              373    188   4
+teleport-loc     =      20     154    elvine              373    188   4
+teleport-loc     =      20     155    elvine              373    188   4
+
+
+//-WayPoint-Set---------Num-----X-----Y----;
+waypoint          =     1      106   69
+waypoint          =     2      107   69
+waypoint          =     3      108   69
+waypoint          =     4      106   70
+waypoint          =     5      107   70
+waypoint          =     6      108   70
+waypoint          =     7      106   71
+waypoint          =     8      107   71
+waypoint          =     9      108   71
+waypoint          =     10     106   69
+
+
+//-NPC-setting--------Name---------------MoveType----WaypointIndex(10)-------NamePrefix-------;
+npc               =   ShopKeeper-W       2           1 2 3 4 5 6 7 8 9 10         1  
+
+
+//-No-Attack-Area----------Num-----RECT-------------
+no-attack-area           = 1       103  66  109  72
+
+
+maximum-object		= 300
+random-mob-generator	= 1  1
+
+
+//-----------------------Num-Type-RECT---------------Mob-MobNum
+spot-mob-generator	= 1  1    77 32 102 50        10 10
+spot-mob-generator	= 2  1    133 115 148 129     10 10
+spot-mob-generator	= 3  1    124 129 145 144     10 10
+
+
+//--fish-point
+max-fish   = 15
+fish-point = 0   17  115
+fish-point = 1   18  115
+fish-point = 2   19  105
+fish-point = 3   13  92
+fish-point = 4   18  88
+fish-point = 5   19  77
+fish-point = 6   19  78
+fish-point = 7   25  72
+fish-point = 8   26  57
+fish-point = 9   23  30
+fish-point = 10   24  31
+fish-point = 11   31  24
+fish-point = 12   56  20
+fish-point = 13   69  16
+fish-point = 14   68  16
+fish-point = 15   81  13
+fish-point = 16   111 15
+fish-point = 17   131 14
+fish-point = 18   132 14
+fish-point = 19   144 17
+

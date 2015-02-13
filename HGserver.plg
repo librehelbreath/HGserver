@@ -1,0 +1,167 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: HGserver - Win32 Debug--------------------
+</h3>
+<h3>Command Lines</h3>
+Creating temporary file "d:\Temp\RSP295.tmp" with contents
+[
+/nologo /G5 /MTd /W3 /Gm /GX /ZI /D "WIN32" /D "_DEBUG" /D "_WINDOWS" /Fp"Debug/HGserver.pch" /YX /Fo"Debug/" /Fd"Debug/" /FD /c 
+"D:\GSENG\Game.cpp"
+]
+Creating command line "cl.exe @d:\Temp\RSP295.tmp" 
+Creating temporary file "d:\Temp\RSP296.tmp" with contents
+[
+kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib /nologo /subsystem:windows /profile /debug /machine:I386 /out:"Debug/HGserver.exe" 
+.\Debug\BuildItem.obj
+.\Debug\Client.obj
+.\Debug\DelayEvent.obj
+.\Debug\DynamicObject.obj
+.\Debug\Fish.obj
+.\Debug\Game.obj
+.\Debug\GuildsMan.obj
+.\Debug\Item.obj
+.\Debug\Magic.obj
+.\Debug\Map.obj
+.\Debug\Mineral.obj
+.\Debug\Misc.obj
+.\Debug\Msg.obj
+.\Debug\Npc.obj
+.\Debug\OccupyFlag.obj
+.\Debug\Portion.obj
+.\Debug\Quest.obj
+.\Debug\Skill.obj
+.\Debug\StrategicPoint.obj
+.\Debug\StrTok.obj
+.\Debug\TeleportLoc.obj
+.\Debug\Tile.obj
+.\Debug\wmain.obj
+.\Debug\XSocket.obj
+.\Winmm.lib
+.\Ws2_32.lib
+]
+Creating command line "link.exe @d:\Temp\RSP296.tmp"
+<h3>Output Window</h3>
+Compiling...
+Game.cpp
+d:\gseng\xsocket.h(16) : warning C4005: 'FD_SETSIZE' : macro redefinition
+        d:\program files\microsoft visual studio\vc98\include\winsock.h(46) : see previous definition of 'FD_SETSIZE'
+d:\gseng\game.cpp(835) : warning C4101: 'ix' : unreferenced local variable
+d:\gseng\game.cpp(835) : warning C4101: 'iy' : unreferenced local variable
+d:\gseng\game.cpp(834) : warning C4101: 'cTemp' : unreferenced local variable
+d:\gseng\game.cpp(866) : warning C4101: 'dwp' : unreferenced local variable
+d:\gseng\game.cpp(866) : warning C4101: 'dwTime' : unreferenced local variable
+d:\gseng\game.cpp(4133) : warning C4018: '>' : signed/unsigned mismatch
+d:\gseng\game.cpp(6005) : warning C4101: 'cTxt' : unreferenced local variable
+d:\gseng\game.cpp(9362) : warning C4305: '=' : truncation from 'const int' to 'short'
+d:\gseng\game.cpp(9362) : warning C4309: '=' : truncation of constant value
+d:\gseng\game.cpp(9423) : warning C4244: 'argument' : conversion from 'short' to 'char', possible loss of data
+d:\gseng\game.cpp(9609) : warning C4101: 'cTemp2' : unreferenced local variable
+d:\gseng\game.cpp(10623) : warning C4101: 'dY_follow' : unreferenced local variable
+d:\gseng\game.cpp(10623) : warning C4101: 'sDistance' : unreferenced local variable
+d:\gseng\game.cpp(10623) : warning C4101: 'dX_follow' : unreferenced local variable
+d:\gseng\game.cpp(10625) : warning C4101: 'wWeaponType' : unreferenced local variable
+d:\gseng\game.cpp(11147) : warning C4101: 'i' : unreferenced local variable
+d:\gseng\game.cpp(12745) : warning C4101: 'iGuildGUID' : unreferenced local variable
+d:\gseng\game.cpp(13931) : warning C4101: 'dwTime' : unreferenced local variable
+d:\gseng\game.cpp(14118) : warning C4018: '>' : signed/unsigned mismatch
+d:\gseng\game.cpp(14123) : warning C4018: '>' : signed/unsigned mismatch
+d:\gseng\game.cpp(14578) : warning C4101: 'dwTime' : unreferenced local variable
+d:\gseng\game.cpp(16033) : warning C4244: '=' : conversion from 'long' to 'short', possible loss of data
+d:\gseng\game.cpp(16036) : warning C4244: '=' : conversion from 'long' to 'short', possible loss of data
+d:\gseng\game.cpp(18390) : warning C4101: 'ip' : unreferenced local variable
+d:\gseng\game.cpp(18521) : warning C4101: 'dwTime' : unreferenced local variable
+d:\gseng\game.cpp(23157) : warning C4101: 'cp' : unreferenced local variable
+d:\gseng\game.cpp(23157) : warning C4101: 'cMsg' : unreferenced local variable
+d:\gseng\game.cpp(23157) : warning C4101: 'cGuildName' : unreferenced local variable
+d:\gseng\game.cpp(23157) : warning C4101: 'cTxt' : unreferenced local variable
+d:\gseng\game.cpp(24539) : warning C4101: 'dV2' : unreferenced local variable
+d:\gseng\game.cpp(24539) : warning C4101: 'dV3' : unreferenced local variable
+d:\gseng\game.cpp(24537) : warning C4101: 'iMin' : unreferenced local variable
+d:\gseng\game.cpp(24539) : warning C4101: 'dV1' : unreferenced local variable
+d:\gseng\game.cpp(25266) : warning C4244: '=' : conversion from 'short' to 'char', possible loss of data
+d:\gseng\game.cpp(27216) : warning C4101: 'cTargetDir' : unreferenced local variable
+d:\gseng\game.cpp(27215) : warning C4101: 'iDestHitRatio' : unreferenced local variable
+d:\gseng\game.cpp(27214) : warning C4101: 'dTmp1' : unreferenced local variable
+d:\gseng\game.cpp(27214) : warning C4101: 'dTmp2' : unreferenced local variable
+d:\gseng\game.cpp(27214) : warning C4101: 'dTmp3' : unreferenced local variable
+d:\gseng\game.cpp(27216) : warning C4101: 'cProtect' : unreferenced local variable
+d:\gseng\game.cpp(27704) : warning C4101: 'cp' : unreferenced local variable
+d:\gseng\game.cpp(27704) : warning C4101: 'cTemp' : unreferenced local variable
+d:\gseng\game.cpp(28718) : warning C4018: '<' : signed/unsigned mismatch
+d:\gseng\game.cpp(28898) : warning C4018: '<' : signed/unsigned mismatch
+d:\gseng\game.cpp(29219) : warning C4244: '=' : conversion from 'unsigned long' to 'short', possible loss of data
+d:\gseng\game.cpp(29230) : warning C4244: '=' : conversion from 'unsigned long' to 'short', possible loss of data
+d:\gseng\game.cpp(29248) : warning C4244: '=' : conversion from 'unsigned long' to 'short', possible loss of data
+d:\gseng\game.cpp(29259) : warning C4244: '=' : conversion from 'unsigned long' to 'short', possible loss of data
+d:\gseng\game.cpp(29300) : warning C4244: '=' : conversion from 'unsigned long' to 'short', possible loss of data
+d:\gseng\game.cpp(29311) : warning C4244: '=' : conversion from 'unsigned long' to 'short', possible loss of data
+d:\gseng\game.cpp(30066) : warning C4244: '=' : conversion from 'short' to 'char', possible loss of data
+d:\gseng\game.cpp(30067) : warning C4244: '=' : conversion from 'short' to 'char', possible loss of data
+d:\gseng\game.cpp(30068) : warning C4244: '=' : conversion from 'short' to 'char', possible loss of data
+d:\gseng\game.cpp(30069) : warning C4244: '=' : conversion from 'short' to 'char', possible loss of data
+d:\gseng\game.cpp(30070) : warning C4244: '=' : conversion from 'short' to 'char', possible loss of data
+d:\gseng\game.cpp(30071) : warning C4244: '=' : conversion from 'short' to 'char', possible loss of data
+d:\gseng\game.cpp(30310) : warning C4244: '=' : conversion from 'short' to 'char', possible loss of data
+d:\gseng\game.cpp(30311) : warning C4244: '=' : conversion from 'short' to 'char', possible loss of data
+d:\gseng\game.cpp(30312) : warning C4244: '=' : conversion from 'short' to 'char', possible loss of data
+d:\gseng\game.cpp(30313) : warning C4244: '=' : conversion from 'short' to 'char', possible loss of data
+d:\gseng\game.cpp(30314) : warning C4244: '=' : conversion from 'short' to 'char', possible loss of data
+d:\gseng\game.cpp(30315) : warning C4244: '=' : conversion from 'short' to 'char', possible loss of data
+d:\gseng\game.cpp(31163) : warning C4101: 'cTargetName' : unreferenced local variable
+d:\gseng\game.cpp(32195) : warning C4101: 'iRet' : unreferenced local variable
+d:\gseng\game.cpp(32722) : warning C4018: '<' : signed/unsigned mismatch
+d:\gseng\game.cpp(33808) : warning C4244: '=' : conversion from 'short' to 'char', possible loss of data
+d:\gseng\game.cpp(34469) : warning C4101: 'iNum' : unreferenced local variable
+d:\gseng\game.cpp(34469) : warning C4101: 'i' : unreferenced local variable
+d:\gseng\game.cpp(35041) : warning C4018: '<' : signed/unsigned mismatch
+d:\gseng\game.cpp(35130) : warning C4018: '<' : signed/unsigned mismatch
+d:\gseng\game.cpp(35240) : warning C4018: '>' : signed/unsigned mismatch
+d:\gseng\game.cpp(35271) : warning C4018: '>' : signed/unsigned mismatch
+d:\gseng\game.cpp(36478) : warning C4018: '>' : signed/unsigned mismatch
+d:\gseng\game.cpp(36536) : warning C4244: '=' : conversion from 'long' to 'short', possible loss of data
+d:\gseng\game.cpp(36537) : warning C4244: '=' : conversion from 'long' to 'short', possible loss of data
+d:\gseng\game.cpp(37412) : warning C4018: '>=' : signed/unsigned mismatch
+d:\gseng\game.cpp(38053) : warning C4101: 'iDiceResult' : unreferenced local variable
+d:\gseng\game.cpp(38855) : warning C4018: '!=' : signed/unsigned mismatch
+d:\gseng\game.cpp(39014) : warning C4101: 'sDOtype' : unreferenced local variable
+d:\gseng\game.cpp(39014) : warning C4101: 'sTemp2' : unreferenced local variable
+d:\gseng\game.cpp(39014) : warning C4101: 'sTemp' : unreferenced local variable
+d:\gseng\game.cpp(39015) : warning C4101: 'ip' : unreferenced local variable
+d:\gseng\game.cpp(39015) : warning C4101: 'iDamage' : unreferenced local variable
+d:\gseng\game.cpp(39013) : warning C4101: 'wObjectID' : unreferenced local variable
+d:\gseng\game.cpp(39011) : warning C4101: 'pTile' : unreferenced local variable
+d:\gseng\game.cpp(39079) : warning C4101: 'dX' : unreferenced local variable
+d:\gseng\game.cpp(39079) : warning C4101: 'dY' : unreferenced local variable
+d:\gseng\game.cpp(39778) : warning C4101: 'dwCount' : unreferenced local variable
+d:\gseng\game.cpp(39792) : warning C4101: 'iGenType' : unreferenced local variable
+d:\gseng\game.cpp(40199) : warning C4101: 'iMaxPx' : unreferenced local variable
+d:\gseng\game.cpp(40199) : warning C4101: 'iMaxPy' : unreferenced local variable
+d:\gseng\game.cpp(40199) : warning C4101: 'iMaxMx' : unreferenced local variable
+d:\gseng\game.cpp(40199) : warning C4101: 'iMaxEy' : unreferenced local variable
+d:\gseng\game.cpp(40199) : warning C4101: 'iMaxAy' : unreferenced local variable
+d:\gseng\game.cpp(40199) : warning C4101: 'iMaxMy' : unreferenced local variable
+d:\gseng\game.cpp(40199) : warning C4101: 'iMaxEx' : unreferenced local variable
+d:\gseng\game.cpp(40199) : warning C4101: 'iMaxAx' : unreferenced local variable
+d:\gseng\game.cpp(40199) : warning C4101: 'iMaxNx' : unreferenced local variable
+d:\gseng\game.cpp(40199) : warning C4101: 'iMaxNy' : unreferenced local variable
+d:\gseng\game.cpp(40877) : warning C4101: 'iTotalTargets' : unreferenced local variable
+d:\gseng\game.cpp(41236) : warning C4101: 'cp' : unreferenced local variable
+d:\gseng\game.cpp(41238) : warning C4101: 'ip' : unreferenced local variable
+d:\gseng\game.cpp(42209) : warning C4101: 'cp' : unreferenced local variable
+d:\gseng\game.cpp(42208) : warning C4101: 'ip' : unreferenced local variable
+d:\gseng\game.cpp(42280) : warning C4101: 'cp' : unreferenced local variable
+d:\gseng\game.cpp(42279) : warning C4101: 'ip' : unreferenced local variable
+d:\gseng\game.cpp(42486) : warning C4101: 'iRet' : unreferenced local variable
+d:\gseng\game.cpp(42529) : warning C4101: 'cTxt' : unreferenced local variable
+Linking...
+
+
+
+<h3>Results</h3>
+HGserver.exe - 0 error(s), 109 warning(s)
+</pre>
+</body>
+</html>
