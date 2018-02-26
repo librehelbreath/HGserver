@@ -48957,7 +48957,7 @@ void CGame::CheckConnectionHandler(int iClientH, char *pData)
 		// 클라이언트에서 지나간 시간이 더 적다. 무시해도 된다. 속도를 사용한 경우는 서버보다 클라이언트가 시간이 더 간 경우.
 		if (dwTimeGapClient < dwTimeGapServer) return;
 
-		if ((abs(dwTimeGapClient - dwTimeGapServer)) >= (DEF_CLIENTTIMEOUT)) {
+		if ((std::abs((int)dwTimeGapClient - (int)dwTimeGapServer)) >= (DEF_CLIENTTIMEOUT)) {
 			// v1.4334 
 			wsprintf(G_cTxt, "(!) 캐릭터(%s) 속도 조작 %u %u %u %u %u %u 속도차이 %u", m_pClientList[iClientH]->m_cCharName, dwTimeRcv, m_pClientList[iClientH]->m_dwInitCCTimeRcv, dwTime, m_pClientList[iClientH]->m_dwInitCCTime,dwTimeGapClient,dwTimeGapServer,   dwTimeGapClient - dwTimeGapServer );
 			PutLogList(G_cTxt);
