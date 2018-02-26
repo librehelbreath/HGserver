@@ -84,6 +84,7 @@
     <ClCompile Include="Tile.cpp">
       <Filter>NotCurrent</Filter>
     </ClCompile>
+    <ClCompile Include="XSocket.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Client.h">
@@ -203,9 +204,6 @@
       <Filter>lib</Filter>
     </Library>
     <Library Include="GameServerStrTok.lib">
-      <Filter>lib</Filter>
-    </Library>
-    <Library Include="GameServerXsocket.lib">
       <Filter>lib</Filter>
     </Library>
   </ItemGroup>

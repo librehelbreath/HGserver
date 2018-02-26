@@ -125,6 +125,7 @@
       <SubSystem>Windows</SubSystem>
       <OutputFile>.\Debug\HGserver.exe</OutputFile>
       <AdditionalDependencies>odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>Ws2_32.lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -151,6 +152,7 @@
     <ClCompile Include="StrategicPoint.cpp" />
     <ClCompile Include="TeleportLoc.cpp" />
     <ClCompile Include="Tile.cpp" />
+    <ClCompile Include="XSocket.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Client.h" />
@@ -194,7 +196,6 @@
     <Library Include="Winmm.lib" />
     <Library Include="Ws2_32.lib" />
     <Library Include="GameServerStrTok.lib" />
-    <Library Include="GameServerXsocket.lib" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
