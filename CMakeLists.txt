@@ -1,0 +1,39 @@
+cmake_minimum_required(VERSION 3.8)
+
+project(hgserver)
+
+file(GLOB_RECURSE sources src/*.cpp src/*.h)
+
+add_executable(${PROJECT_NAME} ${sources})
+
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+
+if (MSVC)
+    set(CMAKE_CXX_FLAGS "/std:c++17")
+    set(ADDITIONAL_DEFINES "-D_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS -D_SCL_SECURE_NO_WARNINGS -D_HAS_AUTO_PTR_ETC=1")
+    set(ADDITIONAL_LIBRARIES "")
+
+    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME_DEBUG ${PROJECT_NAME}-debug)
+    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME_MINSIZEREL ${PROJECT_NAME}-minsizerelease)
+    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME_RELWITHDEBINFO ${PROJECT_NAME}-dbgrelease)
+    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME_RELEASE ${PROJECT_NAME}-release)
+
+    set_target_properties(${PROJECT_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY  ${CMAKE_SOURCE_DIR}/bin)
+    set_target_properties(${PROJECT_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/bin)
+    set_target_properties(${PROJECT_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL ${CMAKE_SOURCE_DIR}/bin)
+    set_target_properties(${PROJECT_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_SOURCE_DIR}/bin)
+    set_target_properties(${PROJECT_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}/bin)
+else ()
+    set(CMAKE_CXX_FLAGS "--std=c++17 -Wall ${CMAKE_CXX_FLAGS}")
+    set(ADDITIONAL_DEFINES "")
+    set(ADDITIONAL_LIBRARIES "")
+endif (MSVC)
+
+ADD_DEFINITIONS(-DASIO_STANDALONE -DBOOST_DATE_TIME_NO_LIB -DBOOST_REGEX_NO_LIB ${ADDITIONAL_LIBRARIES})
+
+target_include_directories(${PROJECT_NAME} PUBLIC src)
+
+include_directories(${CMAKE_SOURCE_DIR}/lib/spdlog/include ${CMAKE_SOURCE_DIR}/lib/asio/asio/include)
+
+target_link_libraries(${PROJECT_NAME} ${ADDITIONAL_LIBRARIES})
+
